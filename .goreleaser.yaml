@@ -142,9 +142,13 @@ homebrew_casks:
     homepage: "https://github.com/Aman-CERP/amanmcp"
     description: "Local-first RAG MCP server for AI coding assistants"
     license: "MIT"
-    # Handle unsigned binaries on macOS
-    post_install: |
-      system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", staged_path]
+    # Handle unsigned binaries on macOS (remove quarantine bit)
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/amanmcp"]
+          end
     caveats: |
       To get started:
         cd your-project
