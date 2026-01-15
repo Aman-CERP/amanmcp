@@ -1,0 +1,226 @@
+{
+  "metadata": {
+    "version": "1.0",
+    "description": "Query definitions for amanmcp vs Claude Code search quality comparison",
+    "created": "2026-01-07",
+    "total_queries": 28
+  },
+  "content_search": {
+    "description": "Content search queries - compare amanmcp vs ripgrep",
+    "queries": [
+      {
+        "id": "T1-01",
+        "query": "Where is the vector store created",
+        "expected": "internal/store/hnsw",
+        "type": "semantic",
+        "source": "dogfood-tier1"
+      },
+      {
+        "id": "T1-02",
+        "query": "How does RRF fusion work",
+        "expected": "internal/search/fusion",
+        "type": "semantic",
+        "source": "dogfood-tier1"
+      },
+      {
+        "id": "T1-03",
+        "query": "Find the embedder interface",
+        "expected": "internal/embed",
+        "type": "semantic",
+        "source": "dogfood-tier1"
+      },
+      {
+        "id": "T1-04",
+        "query": "Where are MCP tools registered",
+        "expected": "internal/mcp/server",
+        "type": "semantic",
+        "source": "dogfood-tier1"
+      },
+      {
+        "id": "T1-05",
+        "query": "What are the performance targets",
+        "expected": "docs/",
+        "type": "documentation",
+        "source": "dogfood-tier1"
+      },
+      {
+        "id": "T1-06",
+        "query": "How do I add a new language",
+        "expected": "docs/",
+        "type": "documentation",
+        "source": "dogfood-tier1"
+      },
+      {
+        "id": "T1-07",
+        "query": "Search function",
+        "expected": "internal/search/engine",
+        "type": "symbol",
+        "source": "dogfood-tier1"
+      },
+      {
+        "id": "T1-08",
+        "query": "Index function",
+        "expected": "internal/index",
+        "type": "symbol",
+        "source": "dogfood-tier1"
+      },
+      {
+        "id": "T1-09",
+        "query": "Chunk type",
+        "expected": "internal/chunk",
+        "type": "symbol",
+        "source": "dogfood-tier1"
+      },
+      {
+        "id": "T1-10",
+        "query": "Config type",
+        "expected": "internal/config",
+        "type": "symbol",
+        "source": "dogfood-tier1"
+      },
+      {
+        "id": "T1-11",
+        "query": "OllamaEmbedder",
+        "expected": "internal/embed/ollama",
+        "type": "exact",
+        "source": "dogfood-tier1"
+      },
+      {
+        "id": "T1-12",
+        "query": "Config struct fields",
+        "expected": "internal/config",
+        "type": "symbol",
+        "source": "dogfood-tier1"
+      },
+      {
+        "id": "T2-01",
+        "query": "What configuration options exist",
+        "expected": "config",
+        "type": "semantic",
+        "source": "dogfood-tier2"
+      },
+      {
+        "id": "T2-02",
+        "query": "Installation instructions",
+        "expected": "README",
+        "type": "documentation",
+        "source": "dogfood-tier2"
+      },
+      {
+        "id": "T2-03",
+        "query": "Error codes",
+        "expected": "internal/",
+        "type": "semantic",
+        "source": "dogfood-tier2"
+      },
+      {
+        "id": "T2-04",
+        "query": "SearchOptions parameters",
+        "expected": "search",
+        "type": "symbol",
+        "source": "dogfood-tier2"
+      },
+      {
+        "id": "NEW-C01",
+        "query": "authentication middleware pattern",
+        "expected": "internal/",
+        "type": "semantic",
+        "source": "new-content",
+        "rationale": "Tests NL understanding of concepts"
+      },
+      {
+        "id": "NEW-C02",
+        "query": "func.*Embed.*",
+        "expected": "internal/embed",
+        "type": "regex",
+        "source": "new-content",
+        "rationale": "Tests regex matching (rg advantage)"
+      },
+      {
+        "id": "NEW-C03",
+        "query": "error handling with context",
+        "expected": "internal/",
+        "type": "semantic",
+        "source": "new-content",
+        "rationale": "Tests concept search for error wrapping"
+      },
+      {
+        "id": "NEW-C04",
+        "query": "BM25.*score",
+        "expected": "internal/search/bm25",
+        "type": "regex",
+        "source": "new-content",
+        "rationale": "Tests regex for scoring code"
+      },
+      {
+        "id": "NEW-C05",
+        "query": "how to add tree-sitter parser",
+        "expected": "docs/",
+        "type": "semantic",
+        "source": "new-content",
+        "rationale": "Tests NL question in docs"
+      },
+      {
+        "id": "NEW-C06",
+        "query": "type Config struct",
+        "expected": "internal/config/config.go",
+        "type": "exact",
+        "source": "new-content",
+        "rationale": "Tests exact Go struct match"
+      }
+    ]
+  },
+  "file_discovery": {
+    "description": "File discovery queries - compare amanmcp vs fd/find",
+    "queries": [
+      {
+        "id": "NEW-F01",
+        "query": "files related to embedding",
+        "expected": "internal/embed",
+        "type": "semantic",
+        "source": "new-file",
+        "rationale": "Tests semantic file discovery"
+      },
+      {
+        "id": "NEW-F02",
+        "query": "internal/search/*.go",
+        "expected": "internal/search/",
+        "type": "glob",
+        "source": "new-file",
+        "rationale": "Tests glob pattern (fd advantage)"
+      },
+      {
+        "id": "NEW-F03",
+        "query": "test files for MCP",
+        "expected": "internal/mcp",
+        "type": "semantic",
+        "source": "new-file",
+        "rationale": "Tests concept to files mapping"
+      },
+      {
+        "id": "NEW-F04",
+        "query": "**/*_bench_test.go",
+        "expected": "_bench_test.go",
+        "type": "glob",
+        "source": "new-file",
+        "rationale": "Tests glob for benchmark files"
+      },
+      {
+        "id": "NEW-F05",
+        "query": "where is BM25 implemented",
+        "expected": "bm25.go",
+        "type": "semantic",
+        "source": "new-file",
+        "rationale": "Tests semantic to file mapping"
+      },
+      {
+        "id": "NEW-F06",
+        "query": "internal/**/*.md",
+        "expected": ".md",
+        "type": "glob",
+        "source": "new-file",
+        "rationale": "Tests glob for markdown files"
+      }
+    ]
+  }
+}

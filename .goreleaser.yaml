@@ -1,0 +1,154 @@
+# AmanMCP Release Configuration
+# See https://goreleaser.com for documentation
+version: 2
+
+project_name: amanmcp
+
+before:
+  hooks:
+    - go mod tidy
+    - go generate ./...
+
+builds:
+  - id: amanmcp-darwin-arm64
+    main: ./cmd/amanmcp
+    binary: amanmcp
+    env:
+      - CGO_ENABLED=1
+      - CC=clang
+    goos:
+      - darwin
+    goarch:
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/Aman-CERP/amanmcp/pkg/version.Version={{.Version}}
+      - -X github.com/Aman-CERP/amanmcp/pkg/version.Commit={{.ShortCommit}}
+      - -X github.com/Aman-CERP/amanmcp/pkg/version.Date={{.Date}}
+    flags:
+      - -trimpath
+
+  # Note: amd64 build disabled for v1.0 - requires cross-compilation setup
+  # - id: amanmcp-darwin-amd64
+  #   main: ./cmd/amanmcp
+  #   binary: amanmcp
+  #   env:
+  #     - CGO_ENABLED=1
+  #     - CC=clang
+  #   goos:
+  #     - darwin
+  #   goarch:
+  #     - amd64
+  #   ldflags:
+  #     - -s -w
+  #     - -X github.com/Aman-CERP/amanmcp/pkg/version.Version={{.Version}}
+  #     - -X github.com/Aman-CERP/amanmcp/pkg/version.Commit={{.ShortCommit}}
+  #     - -X github.com/Aman-CERP/amanmcp/pkg/version.Date={{.Date}}
+  #   flags:
+  #     - -trimpath
+
+archives:
+  - id: darwin-arm64
+    builds:
+      - amanmcp-darwin-arm64
+    name_template: "{{ .ProjectName }}_{{ .Version }}_darwin_arm64"
+    format: tar.gz
+    files:
+      - LICENSE
+      - README.md
+
+  # Note: amd64 archive disabled for v1.0
+  # - id: darwin-amd64
+  #   builds:
+  #     - amanmcp-darwin-amd64
+  #   name_template: "{{ .ProjectName }}_{{ .Version }}_darwin_amd64"
+  #   format: tar.gz
+  #   files:
+  #     - LICENSE
+  #     - README.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  use: github
+  groups:
+    - title: "Features"
+      regexp: '^feat(\(.+\))?!?:'
+      order: 0
+    - title: "Bug Fixes"
+      regexp: '^fix(\(.+\))?!?:'
+      order: 1
+    - title: "Performance"
+      regexp: '^perf(\(.+\))?!?:'
+      order: 2
+    - title: "Documentation"
+      regexp: '^docs(\(.+\))?!?:'
+      order: 3
+    - title: "Other"
+      order: 999
+  filters:
+    exclude:
+      - "^chore"
+      - "^test"
+      - "^ci"
+      - "Merge pull request"
+      - "Merge branch"
+
+release:
+  github:
+    owner: Aman-CERP
+    name: amanmcp
+  draft: false
+  prerelease: auto
+  name_template: "v{{ .Version }}"
+  footer: |
+    ## Installation
+
+    ### Homebrew (macOS) - Recommended
+    ```bash
+    brew tap Aman-CERP/tap
+    brew install amanmcp
+    ```
+
+    ### Universal Install Script (macOS & Linux)
+    ```bash
+    curl -sSL https://raw.githubusercontent.com/Aman-CERP/amanmcp/main/scripts/install.sh | sh
+    ```
+    Installs to `~/.local/bin/` (no sudo required).
+
+    ### Manual Download
+    ```bash
+    tar -xzf amanmcp_{{ .Version }}_darwin_arm64.tar.gz
+    mkdir -p ~/.local/bin
+    cp amanmcp ~/.local/bin/
+    ```
+
+    ### Verification
+    ```bash
+    amanmcp version
+    ```
+
+brews:
+  - repository:
+      owner: Aman-CERP
+      name: homebrew-amanmcp
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/Aman-CERP/amanmcp"
+    description: "Local-first RAG MCP server for AI coding assistants"
+    license: "Apache-2.0"
+    install: |
+      bin.install "amanmcp"
+    caveats: |
+      To get started:
+        cd your-project
+        amanmcp
+    test: |
+      system "#{bin}/amanmcp", "version"
+
+# Announce to dev/marketing channels (commented out for now)
+# announce:
+#   skip: true

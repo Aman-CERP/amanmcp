@@ -1,0 +1,45 @@
+# AmanMCP User Configuration
+# Machine-specific settings that apply to ALL projects on this machine.
+# Location: ~/.config/amanmcp/config.yaml
+#
+# This file is created by: amanmcp config init
+# Project-specific settings go in .amanmcp.yaml in each project.
+#
+# Documentation: https://github.com/Aman-CERP/amanmcp#configuration
+
+version: 1
+
+# Embedding settings
+# By default, AmanMCP auto-detects the best provider:
+#   Apple Silicon: MLX (55x faster) -> Ollama -> Static
+#   Other platforms: Ollama -> Static
+#
+embeddings:
+  # Provider: "" (auto-detect), "mlx", "ollama", or "static"
+  # Leave empty to use auto-detection (recommended)
+  provider: ""
+
+  # MLX settings (Apple Silicon - recommended, 55x faster)
+  # MLX server must be running: cd mlx-server && python server.py
+  mlx_endpoint: http://localhost:9659
+  mlx_model: large  # Options: small (0.6B), medium (4B), large (8B)
+
+  # Ollama settings (fallback when MLX unavailable)
+  model: qwen3-embedding:8b
+  ollama_host: http://localhost:11434
+
+  # Thermal management (Apple Silicon / GPU throttling)
+  # Uncomment if you experience timeouts during large indexing operations.
+  # These settings help prevent GPU thermal throttling on sustained workloads.
+  #
+  # inter_batch_delay: 200ms        # Pause between embedding batches (cooling)
+  # timeout_progression: 1.5        # Increase timeout as indexing progresses (1.0 = disabled)
+  # retry_timeout_multiplier: 1.2   # Increase timeout on retries (1.0 = disabled)
+
+# Server settings
+server:
+  log_level: debug    # Options: debug, info, warn, error (debug shows all)
+
+# Performance tuning (machine-specific)
+# performance:
+#   index_workers: 8   # Parallel workers (default: auto, uses CPU core count)

@@ -1,0 +1,209 @@
+# Validation Queries
+# ===================
+# Data-driven validation queries for testing search quality.
+#
+# This file is loaded at runtime - no rebuild required to modify queries.
+# Follow the Unix Philosophy: "Data-driven behavior"
+#
+# Query Structure:
+#   id:       Unique identifier (T1-Q1, T2-Q1, N-Q1)
+#   name:     Human-readable description
+#   query:    The search query to execute
+#   tool:     MCP tool to use (search, search_code, search_docs)
+#   expected: File paths or prefixes that should appear in results
+#   notes:    Optional explanation (for maintainers)
+#
+# Expected Matching:
+#   - Prefix match: "internal/search/" matches "internal/search/engine.go"
+#   - Contains match: "fusion.go" matches "internal/search/fusion.go"
+#   - Multiple expected: ANY match = pass
+#
+# Design Principles (Updated 2026-01-15):
+#   1. Queries must not match test infrastructure (avoid dogfood script phrases)
+#   2. Expected results must be indexed (no docs/** expectations)
+#   3. Queries should be specific enough to avoid ambiguity
+#   4. Test semantic understanding, not just keyword matching
+
+tier1:
+  # === Code Location Queries ===
+  # These test semantic understanding of WHERE code lives
+
+  - id: T1-Q1
+    name: HNSW vector storage
+    query: "hnsw.go VectorStore"
+    tool: search
+    expected:
+      - internal/store/hnsw.go
+    notes: "Filename + type name targets vector store implementation"
+
+  - id: T1-Q2
+    name: RRF fusion algorithm
+    query: "RRF fusion algorithm reciprocal rank"
+    tool: search
+    expected:
+      - internal/search/fusion.go
+      - internal/search/multi_fusion.go
+    notes: "Algorithm-specific terms find fusion implementation"
+
+  - id: T1-Q3
+    name: Embedder interface
+    query: "Embedder interface definition"
+    tool: search
+    expected:
+      - internal/embed/
+    notes: "Interface and factory definitions in embed package"
+
+  - id: T1-Q4
+    name: MCP tool registration
+    query: "mcp.AddTool server registration"
+    tool: search
+    expected:
+      - internal/mcp/server.go
+    notes: "Exact function name targets registration code"
+
+  # === Architecture Queries ===
+  # These test understanding of system components
+
+  - id: T1-Q5
+    name: Tree-sitter chunking
+    query: "tree-sitter parser chunking"
+    tool: search
+    expected:
+      - internal/chunk/parser.go
+      - internal/chunk/code_chunker.go
+    notes: "Tree-sitter specific to chunk package"
+
+  - id: T1-Q6
+    name: BM25 search
+    query: "BM25 keyword search scoring"
+    tool: search
+    expected:
+      - internal/store/bm25.go
+      - internal/store/sqlite_bm25.go
+    notes: "BM25 algorithm in store package"
+
+  - id: T1-Q7
+    name: Ollama embedder
+    query: "Ollama HTTP API embedding"
+    tool: search
+    expected:
+      - internal/embed/ollama.go
+    notes: "Specific embedder implementation"
+
+  - id: T1-Q8
+    name: File watcher
+    query: "file watcher debouncer"
+    tool: search
+    expected:
+      - internal/watcher/debouncer.go
+    notes: "Specific component in watcher package"
+
+  # === Symbol Queries ===
+  # These use search_code for symbol-aware search
+
+  - id: T1-Q9
+    name: Chunk type definition
+    query: "type Chunk struct"
+    tool: search_code
+    expected:
+      - internal/chunk/types.go
+    notes: "Exact type definition pattern"
+
+  - id: T1-Q10
+    name: Config type definition
+    query: "type Config struct"
+    tool: search_code
+    expected:
+      - internal/config/config.go
+      - internal/daemon/config.go
+    notes: "Config struct in config package"
+
+  - id: T1-Q11
+    name: OllamaEmbedder type
+    query: "OllamaEmbedder"
+    tool: search_code
+    expected:
+      - internal/embed/ollama.go
+    notes: "Specific type name"
+
+  - id: T1-Q12
+    name: SearchOptions type
+    query: "SearchOptions"
+    tool: search_code
+    expected:
+      - internal/search/options.go
+      - internal/search/types.go
+    notes: "SearchOptions struct in search package"
+
+tier2:
+  # === Tier 2: Documentation & Advanced Queries ===
+  # Lower priority, may have more variable results
+  # Note: Using 'search' instead of 'search_docs' since our docs are indexed as regular files
+
+  - id: T2-Q1
+    name: Configuration package
+    query: ".amanmcp.yaml configuration"
+    tool: search
+    expected:
+      - internal/config/
+      - README.md
+    notes: "Config implementation and docs both valid"
+
+  - id: T2-Q2
+    name: Installation instructions
+    query: "brew tap install amanmcp"
+    tool: search
+    expected:
+      - README.md
+      - internal/lifecycle/
+    notes: "Installation in README or lifecycle package"
+
+  - id: T2-Q3
+    name: Error handling
+    query: "error handling retry"
+    tool: search_code
+    expected:
+      - internal/embed/retry.go
+      - internal/
+    notes: "Retry logic in embed package"
+
+  - id: T2-Q4
+    name: Query decomposition
+    query: "query decomposition multi-query"
+    tool: search_code
+    expected:
+      - internal/search/decomposer.go
+      - internal/search/multi_query.go
+    notes: "Multi-query feature in search package"
+
+negative:
+  # === Negative Tests ===
+  # These should NOT crash, regardless of results
+
+  - id: N-Q1
+    name: Non-existent symbol
+    query: "xyznonexistent123"
+    tool: search
+    expected: []
+    notes: "Should return empty, not crash"
+
+  - id: N-Q2
+    name: SQL injection attempt
+    query: "func(); DROP TABLE"
+    tool: search
+    expected: []
+    notes: "Tests input sanitization"
+
+  - id: N-Q3
+    name: Empty query
+    query: ""
+    tool: search
+    expected: []
+    notes: "Empty query should be handled gracefully"
+
+  - id: N-Q4
+    name: Single character
+    query: "a"
+    tool: search
+    expected: []
+    notes: "Very short queries should not crash"

@@ -1,0 +1,119 @@
+# AmanMCP Project Configuration
+# ===========================================================================
+# This file is OPTIONAL - AmanMCP works with sensible defaults.
+# Uncomment and modify settings only if you need to customize behavior.
+#
+# Created by: amanmcp init
+# Template source: configs/project-config.example.yaml (embedded at build time)
+#
+# Configuration Hierarchy (highest to lowest precedence):
+#   1. Environment variables (AMANMCP_*)
+#   2. Project config (.amanmcp.yaml) - THIS FILE
+#   3. User config (~/.config/amanmcp/config.yaml)
+#   4. Built-in defaults
+#
+# Machine-specific settings (thermal, Ollama host) go in user config.
+# Create user config with: amanmcp config init
+#
+# Documentation: https://github.com/Aman-CERP/amanmcp#configuration
+# ===========================================================================
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# Paths Configuration
+# ---------------------------------------------------------------------------
+# Controls which files are indexed for semantic search.
+#
+# IMPORTANT: Directories containing documentation with code examples should be
+# excluded to prevent them from outranking actual source code in search results.
+# BM25 keyword search cannot distinguish "docs about code" from "actual code."
+#
+# Your exclude patterns are MERGED with built-in defaults:
+#   - **/node_modules/**
+#   - **/.git/**
+#   - **/vendor/**
+#   - **/__pycache__/**
+#   - **/dist/**
+#   - **/build/**
+#   - **/*.min.js, **/*.min.css
+#   - **/package-lock.json, **/yarn.lock, **/pnpm-lock.yaml, **/go.sum
+#
+# RECOMMENDED: Uncomment patterns that apply to your project.
+
+paths:
+  exclude:
+    # -------------------------------------------------------------------------
+    # AI Coding Assistants (contain prompts/instructions with code examples)
+    # -------------------------------------------------------------------------
+    - ".claude/**"          # Claude Code: skills, hooks, philosophy guides
+    - ".cursor/**"          # Cursor IDE AI configuration
+    - ".aider/**"           # Aider AI coding assistant
+    - ".continue/**"        # Continue.dev AI assistant
+    - ".codeium/**"         # Codeium AI assistant
+    - ".tabnine/**"         # Tabnine AI assistant
+
+    # -------------------------------------------------------------------------
+    # Project Management (documentation often contains code snippets)
+    # -------------------------------------------------------------------------
+    - ".aman-pm/**"         # AI-native PM system (backlogs, sprints, specs)
+    - "archive/**"          # Historical/archived content
+
+    # -------------------------------------------------------------------------
+    # IDE/Editor Configuration (rarely needed in search)
+    # -------------------------------------------------------------------------
+    # - ".idea/**"          # JetBrains IDEs (IntelliJ, GoLand, PyCharm)
+    # - ".vscode/**"        # VS Code settings (uncomment if large)
+
+    # -------------------------------------------------------------------------
+    # Test Fixtures & Generated Code (noise in search results)
+    # -------------------------------------------------------------------------
+    # - "**/testdata/**"    # Test fixture data
+    # - "**/fixtures/**"    # Test fixtures
+    # - "**/generated/**"   # Generated code (protobuf, GraphQL, etc.)
+    # - "**/__snapshots__/**"  # Jest/Vitest snapshots
+    # - "**/mocks/**"       # Generated mocks
+
+    # -------------------------------------------------------------------------
+    # Documentation (uncomment if docs contain too many code examples)
+    # -------------------------------------------------------------------------
+    # - "docs/**"           # Usually fine to index, but can cause pollution
+
+# Include patterns (empty = all files matching supported extensions)
+# Uncomment to restrict indexing to specific directories:
+# paths:
+#   include:
+#     - "src/**"
+#     - "lib/**"
+#     - "pkg/**"
+#     - "internal/**"
+#     - "cmd/**"
+
+# Hybrid search configuration
+# search:
+#   bm25_weight: 0.35       # Keyword matching weight (0.0-1.0)
+#   semantic_weight: 0.65   # Semantic similarity weight (0.0-1.0)
+#   chunk_size: 1500        # Characters per chunk
+#   chunk_overlap: 200      # Overlap between chunks
+#   max_results: 20         # Maximum search results
+
+# Embedding configuration (can override user config)
+# embeddings:
+#   provider: ollama        # Options: ollama, static
+#   model: qwen3-embedding:8b
+#   batch_size: 32
+
+# Performance tuning
+# performance:
+#   max_files: 100000       # Maximum files to index
+#   cache_size: 1000        # LRU cache size
+
+# Server configuration
+# server:
+#   transport: stdio        # Options: stdio, sse
+#   log_level: info         # Options: debug, info, warn, error
+
+# Git submodule support
+# submodules:
+#   enabled: false          # Set to true to index submodules
+#   recursive: true         # Index nested submodules
