@@ -266,7 +266,7 @@ func TestOllamaEmbedder_ServerReturns500_ReturnsError(t *testing.T) {
 	var embedCalled bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/tags" {
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"models": []map[string]any{{"name": "qwen3-embedding:8b"}},
 			})
 			return
@@ -398,7 +398,7 @@ func TestOllamaEmbedder_Embed_ContextCancellation(t *testing.T) {
 	// Given: slow mock server for embed requests
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/tags" {
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"models": []map[string]any{{"name": "qwen3-embedding:8b"}},
 			})
 			return
@@ -437,7 +437,7 @@ func TestOllamaEmbedder_Embed_ContextCancellation_ExitsQuickly(t *testing.T) {
 	serverDone := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/tags" {
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"models": []map[string]any{{"name": "qwen3-embedding:8b"}},
 			})
 			return
@@ -507,7 +507,7 @@ func TestOllamaEmbedder_HealthCheck_FindsModel(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/tags" {
 			healthChecked.Store(true)
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"models": []map[string]any{
 					{"name": "qwen3-embedding:8b"},
 				},
@@ -516,7 +516,7 @@ func TestOllamaEmbedder_HealthCheck_FindsModel(t *testing.T) {
 		}
 		if r.URL.Path == "/api/embed" {
 			// Return embedding for dimension detection
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"embeddings": [][]float64{make([]float64, 768)},
 			})
 			return
@@ -584,7 +584,7 @@ func TestOllamaEmbedder_RetryOnTransientError(t *testing.T) {
 	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/tags" {
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"models": []map[string]any{{"name": "qwen3-embedding:8b"}},
 			})
 			return
@@ -600,7 +600,7 @@ func TestOllamaEmbedder_RetryOnTransientError(t *testing.T) {
 			for i := range embedding {
 				embedding[i] = 0.1
 			}
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"embeddings": [][]float64{embedding},
 			})
 		}
@@ -634,7 +634,7 @@ func TestOllamaEmbedder_EmbedBatch_UsesNativeBatchAPI(t *testing.T) {
 	var receivedBatch atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/tags" {
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"models": []map[string]any{{"name": "qwen3-embedding:8b"}},
 			})
 			return
@@ -662,7 +662,7 @@ func TestOllamaEmbedder_EmbedBatch_UsesNativeBatchAPI(t *testing.T) {
 					embeddings[i][j] = 0.1
 				}
 			}
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"embeddings": embeddings,
 			})
 		}
@@ -701,7 +701,7 @@ func TestOllamaEmbedder_ContextTimeout_NotOverriddenByHTTPClient(t *testing.T) {
 	var requestReceived bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/tags" {
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"models": []map[string]any{{"name": "qwen3-embedding:8b"}},
 			})
 			return
@@ -715,7 +715,7 @@ func TestOllamaEmbedder_ContextTimeout_NotOverriddenByHTTPClient(t *testing.T) {
 			for i := range embedding {
 				embedding[i] = 0.1
 			}
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"embeddings": [][]float64{embedding},
 			})
 		}
@@ -798,7 +798,7 @@ func mockOllamaServer(t *testing.T, dims int, customHandler func(w http.Response
 		}
 
 		if r.URL.Path == "/api/tags" {
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"models": []map[string]any{{"name": "qwen3-embedding:8b"}},
 			})
 			return
@@ -820,7 +820,7 @@ func mockOllamaServer(t *testing.T, dims int, customHandler func(w http.Response
 				embeddings[i] = generateMockEmbedding(fmt.Sprintf("text%d", i), dims)
 			}
 
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"model":      "qwen3-embedding:8b",
 				"embeddings": embeddings,
 			})
@@ -840,7 +840,7 @@ func mockOllamaServerWithTags(t *testing.T, dims int, models []string) *httptest
 			for i, m := range models {
 				modelList[i] = map[string]any{"name": m}
 			}
-			json.NewEncoder(w).Encode(map[string]any{"models": modelList})
+			_ = json.NewEncoder(w).Encode(map[string]any{"models": modelList})
 			return
 		}
 
@@ -859,7 +859,7 @@ func mockOllamaServerWithTags(t *testing.T, dims int, models []string) *httptest
 				embeddings[i] = generateMockEmbedding(fmt.Sprintf("text%d", i), dims)
 			}
 
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"model":      models[0],
 				"embeddings": embeddings,
 			})
