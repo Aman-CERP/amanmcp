@@ -61,11 +61,12 @@ jobs:
       - name: Install tree-sitter dependencies
         run: brew install tree-sitter
 
+      - name: Install golangci-lint
+        run: |
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
-          skip-cache: true  # Force rebuild with Go 1.25
+        run: golangci-lint run --timeout=10m
 
   # Security scan using govulncheck
   security:
