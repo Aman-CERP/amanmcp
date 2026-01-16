@@ -151,7 +151,7 @@ func TestMLXEmbedder_EmbedBatch(t *testing.T) {
 					embeddings[i][j] = float64(i*1000+j) / 4096.0
 				}
 			}
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"embeddings": embeddings,
 			})
 		default:
@@ -202,12 +202,12 @@ func TestMLXEmbedder_Available(t *testing.T) {
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/health":
-					json.NewEncoder(w).Encode(map[string]interface{}{
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
 						"status":       "healthy",
 						"model_status": "ready",
 					})
 				case "/models":
-					json.NewEncoder(w).Encode(map[string]interface{}{
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
 						"models": map[string]interface{}{
 							"large": map[string]int{"dimensions": 4096},
 						},
@@ -493,7 +493,7 @@ func TestMLXEmbedder_RetryOnTimeout(t *testing.T) {
 			for i := range embeddings {
 				embeddings[i] = make([]float64, 4096)
 			}
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"embeddings": embeddings,
 			})
 		}
