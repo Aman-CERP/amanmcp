@@ -223,7 +223,7 @@ func TestMLXEmbedder_Available(t *testing.T) {
 				case "/health":
 					w.WriteHeader(http.StatusServiceUnavailable)
 				case "/models":
-					json.NewEncoder(w).Encode(map[string]interface{}{
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
 						"models": map[string]interface{}{
 							"large": map[string]int{"dimensions": 4096},
 						},
@@ -265,11 +265,11 @@ func TestMLXEmbedder_EmptyTexts(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/health":
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"status": "healthy", "model_status": "ready", "loaded_model": "large",
 	})
 		case "/models":
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"models": map[string]interface{}{"large": map[string]int{"dimensions": 4096}},
 			})
 		}
@@ -314,13 +314,13 @@ func TestMLXEmbedder_ModelSizes(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/health":
-					json.NewEncoder(w).Encode(map[string]interface{}{
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
 						"status":       "healthy",
 						"model_status": "ready",
 						"loaded_model": tt.model,
 					})
 				case "/models":
-					json.NewEncoder(w).Encode(map[string]interface{}{
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
 						"models": map[string]interface{}{
 							"small":  map[string]int{"dimensions": 1024},
 							"medium": map[string]int{"dimensions": 2560},
@@ -370,11 +370,11 @@ func TestMLXEmbedder_SetBatchIndex(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/health":
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"status": "healthy", "model_status": "ready", "loaded_model": "large",
 	})
 		case "/models":
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"models": map[string]interface{}{"large": map[string]int{"dimensions": 4096}},
 			})
 		}
@@ -471,11 +471,11 @@ func TestMLXEmbedder_RetryOnTimeout(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/health":
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"status": "healthy", "model_status": "ready", "loaded_model": "large",
 	})
 		case "/models":
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"models": map[string]interface{}{"large": map[string]int{"dimensions": 4096}},
 			})
 		case "/embed_batch":
