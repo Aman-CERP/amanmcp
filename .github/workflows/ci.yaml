@@ -65,6 +65,7 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: latest
+          skip-cache: true  # Force rebuild with Go 1.25
 
   # Security scan using govulncheck
   security:
