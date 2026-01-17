@@ -10,6 +10,7 @@ Welcome! We're excited that you want to contribute. This section contains detail
 
 | Guide | What You'll Learn | Read This If... |
 |-------|-------------------|-----------------|
+| [Go for Newcomers](go-for-newcomers.md) | Go basics for non-Go developers | You're new to Go |
 | [Code Conventions](code-conventions.md) | Go patterns, naming, structure | You're writing Go code for AmanMCP |
 | [TDD Rationale](tdd-rationale.md) | Why test-first, the TDD cycle | You want to understand our testing philosophy |
 | [Testing Guide](testing-guide.md) | How to run tests, validation framework | You're adding features or fixing bugs |
@@ -252,7 +253,7 @@ graph TB
 
     subgraph "Concepts"
         D1[concepts/<br/>How Systems Work]
-        D2[hybrid-search.md<br/>BM25 + Semantic]
+        D2[hybrid-search/<br/>BM25 + Semantic]
         D3[chunking.md<br/>Code Parsing]
         style D1 fill:#ffe0b2,stroke:#f39c12,stroke-width:2px
         style D2 fill:#ffe0b2,stroke:#f39c12,stroke-width:2px
@@ -295,4 +296,4 @@ graph TB
 | **Run tests** | [testing-guide.md](testing-guide.md) |
 | **Learn architecture** | [Architecture](../reference/architecture/architecture.md) |
 | **See design rationale** | [ADRs](../reference/decisions/) |
-| **Understand search** | [Hybrid Search](../concepts/hybrid-search.md) |
+| **Understand search** | [Hybrid Search](../concepts/hybrid-search/) |

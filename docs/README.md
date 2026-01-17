@@ -9,12 +9,37 @@ Local RAG for your codebase. Zero config. Privacy-first.
 | Goal | Start Here |
 |------|------------|
 | **Get started in 5 minutes** | [Quick Start Guide](getting-started/) |
-| **Understand how search works** | [Hybrid Search Explained](concepts/hybrid-search.md) |
+| **Understand how search works** | [Hybrid Search Explained](concepts/hybrid-search/) |
 | **Optimize for Apple Silicon** | [MLX Setup Guide](guides/mlx-setup.md) |
 | **Configure exclusions** | [Configuration Guide](../reference/configuration.md) |
 | **Troubleshoot issues** | Run `amanmcp doctor` |
 | **Contribute code** | [Contributing Guide](contributing/) |
 | **See what's new** | [Changelog](changelog.md) |
+
+---
+
+## Recommended Reading Order
+
+**New to AmanMCP and RAG concepts?** Follow this path:
+
+```
+1. What is RAG?              → learning/what-is-rag.md
+                                "What problem does RAG solve?"
+
+2. How AmanMCP Works         → learning/how-amanmcp-works.md
+                                "3-minute overview with diagrams"
+
+3. Getting Started           → getting-started/
+                                "Installation and first steps"
+
+4. Your First Search         → tutorials/your-first-search.md
+                                "Hands-on walkthrough"
+
+5. Guides                    → guides/
+                                "Task-based how-tos"
+```
+
+**Already familiar with search/RAG?** Jump straight to [Getting Started](getting-started/).
 
 ---
 
@@ -37,7 +62,7 @@ Local RAG for your codebase. Zero config. Privacy-first.
 3. [Research](research/) - Technical decisions
 
 **Building on AmanMCP?**
-- [MCP Protocol](concepts/mcp-protocol.md) - Integration layer
+- [MCP Protocol](concepts/mcp/) - Integration layer
 - [Reference](reference/) - API and technical specs
 
 ### 🔬 Researchers
@@ -97,6 +122,8 @@ graph TB
 | Section | Purpose | Example |
 |---------|---------|---------|
 | [Getting Started](getting-started/) | Installation and first steps | "How do I install AmanMCP?" |
+| [Learning](learning/) | Foundational concepts for beginners | "What is RAG?" |
+| [Tutorials](tutorials/) | Hands-on step-by-step guides | "Your first search" |
 | [Guides](guides/) | Task-based how-tos | "How do I switch to MLX embeddings?" |
 | [Concepts](concepts/) | Understanding how it works | "How does hybrid search work?" |
 | [Research](research/) | Technical decisions & analysis | "Why SQLite FTS5 instead of Bleve?" |

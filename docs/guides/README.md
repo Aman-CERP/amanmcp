@@ -56,7 +56,7 @@ graph TD
 |-------|-------------------|-------------|
 | [MLX Setup](mlx-setup.md) | Using MLX embeddings on Apple Silicon | You have a Mac and want faster embeddings |
 | [Backend Switching](backend-switching.md) | Switching between Ollama and MLX | You want to try different embedding backends |
-| [Auto-Reindexing](AUTO-REINDEXING.md) | Automatic index updates on file changes | You want seamless background updates |
+| [Auto-Reindexing](auto-reindexing.md) | Automatic index updates on file changes | You want seamless background updates |
 | [Thermal Management](thermal-management.md) | CPU temperature optimization | Your laptop runs hot during indexing |
 
 ---
@@ -73,7 +73,7 @@ graph TD
 2. [Homebrew Setup](homebrew-setup-guide.md) - If using Homebrew
 
 ### "I want automatic updates"
-1. [Auto-Reindexing](AUTO-REINDEXING.md) - File watcher setup
+1. [Auto-Reindexing](auto-reindexing.md) - File watcher setup
 
 ---
 

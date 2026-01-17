@@ -138,7 +138,7 @@ Browse our comprehensive documentation organized by topic. Each category highlig
 | [Homebrew Setup Guide](docs/guides/homebrew-setup-guide.md) | Installation | How to install via Homebrew on macOS? | Homebrew provides automatic updates and dependency management |
 | [MLX Setup](docs/guides/mlx-setup.md) | Performance | How to get faster embeddings on Apple Silicon? | MLX can be 16x faster than Ollama for local embedding generation |
 | [Backend Switching](docs/guides/backend-switching.md) | Configuration | How to switch between Ollama and MLX embeddings? | Simple config change enables comparing backends for your workload |
-| [Auto-Reindexing](docs/guides/AUTO-REINDEXING.md) | Workflow | How to keep search index in sync with code changes? | File watching enables real-time incremental updates without manual reindexing |
+| [Auto-Reindexing](docs/guides/auto-reindexing.md) | Workflow | How to keep search index in sync with code changes? | File watching enables real-time incremental updates without manual reindexing |
 | [Thermal Management](docs/guides/thermal-management.md) | Optimization | How to reduce CPU heat during indexing? | CPU temperature optimization through batch sizing and concurrency tuning |
 
 [→ Guides documentation overview](docs/guides/README.md)

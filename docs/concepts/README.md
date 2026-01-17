@@ -4,140 +4,207 @@ This section explains the core concepts and architecture behind AmanMCP. Read th
 
 **Audience**: Users who want to understand the "why" and "how", developers, and anyone curious about the internals.
 
+---
+
+## Choose Your Topic
+
+### Search Concepts
+
+| Concept | What You'll Learn | Start Here |
+|---------|-------------------|------------|
+| [Hybrid Search](hybrid-search/) | How BM25 keyword + semantic vector search combine | [Overview](hybrid-search/overview.md) |
+| [Vector Search](vector-search/) | Embeddings, HNSW index, semantic similarity | [Overview](vector-search/overview.md) |
+| [Query Processing](query-processing.md) | How queries are classified and weighted | Single doc |
+| [Two-Stage Retrieval](two-stage-retrieval.md) | Bi-encoders vs cross-encoders, reranking | Single doc |
+
+### Infrastructure Concepts
+
+| Concept | What You'll Learn | Start Here |
+|---------|-------------------|------------|
+| [Indexing Pipeline](indexing-pipeline.md) | Full flow from files to searchable index | Single doc |
+| [Tree-sitter](tree-sitter/) | Code parsing, AST extraction, chunking | [Overview](tree-sitter/overview.md) |
+| [Caching & Performance](caching-performance.md) | Why AmanMCP is fast | Single doc |
+| [MCP Protocol](mcp/) | How AmanMCP connects to AI assistants | [Overview](mcp/overview.md) |
+
+---
+
+## Layered Documentation
+
+Each major concept has three levels of detail:
+
+| Level | Time | Content | Audience |
+|-------|------|---------|----------|
+| **Overview** | 3-4 min | What it is, why it matters | Everyone |
+| **How It Works** | 8-10 min | Examples, intuition, no formulas | Users wanting to understand |
+| **Advanced** | 15+ min | Algorithms, code, implementation | Developers extending the system |
+
+### Example: Hybrid Search
+
+```
+docs/concepts/hybrid-search/
+├── README.md        # Quick navigation
+├── overview.md      # "What is hybrid search?"
+├── how-it-works.md  # "BM25 + Vector with examples"
+└── advanced.md      # "RRF formula, Go implementation"
+```
+
+Pick the depth that matches your needs.
+
+---
+
+## Visual Navigation
+
 ```mermaid
-graph TD
-    START[New to AmanMCP] --> LEVEL{What do you<br/>want to know?}
+flowchart TB
+    Start["I want to understand..."]
 
-    LEVEL -->|Just use it| G[Getting Started Guide]
-    LEVEL -->|How search works| S[Search Concepts]
-    LEVEL -->|Full architecture| A[Architecture Docs]
+    Start --> Search{Search?}
+    Start --> Indexing{Indexing?}
+    Start --> Integration{Integration?}
 
-    S --> S1[Hybrid Search]
-    S --> S2[Vector Search]
-    S --> S3[Two-Stage Retrieval]
+    Search -->|"How results are ranked"| HS[Hybrid Search]
+    Search -->|"Semantic similarity"| VS[Vector Search]
+    Search -->|"Query handling"| QP[Query Processing]
+    Search -->|"Reranking"| TSR[Two-Stage Retrieval]
 
-    A --> A1[Tree-sitter Chunking]
-    A --> A2[MCP Protocol]
-    A --> A3[Full System Design]
+    Indexing -->|"Full flow"| IP[Indexing Pipeline]
+    Indexing -->|"Code parsing"| TS[Tree-sitter]
+    Indexing -->|"Why it's fast"| CP[Caching & Performance]
 
-    S1 --> S2
-    S2 --> S3
+    Integration -->|"AI assistant connection"| MCP[MCP Protocol]
 
-    A1 --> A2
-    A2 --> A3
-
-    style START fill:#e1f5ff
-    style G fill:#c8e6c9
-    style S fill:#e1f5ff
-    style A fill:#ffe0b2
-    style S1 fill:#c8e6c9
-    style S2 fill:#c8e6c9
-    style S3 fill:#c8e6c9
+    style Start fill:#e1f5ff,stroke:#1565c0
+    style HS fill:#c8e6c9,stroke:#2e7d32
+    style VS fill:#c8e6c9,stroke:#2e7d32
+    style QP fill:#c8e6c9,stroke:#2e7d32
+    style TSR fill:#c8e6c9,stroke:#2e7d32
+    style IP fill:#fff9c4,stroke:#f57f17
+    style TS fill:#fff9c4,stroke:#f57f17
+    style CP fill:#fff9c4,stroke:#f57f17
+    style MCP fill:#e1bee7,stroke:#7b1fa2
 ```
 
 ---
 
-## Core Concepts
-
-| Concept | What You'll Learn | Read This If... |
-|---------|-------------------|-----------------|
-| [Hybrid Search](hybrid-search.md) | How BM25 keyword search + semantic vector search work together | You want to understand why results are relevant |
-| [Vector Search](vector-search-concepts.md) | Embeddings, HNSW index, semantic similarity | You're curious about "AI search" internals |
-| [Two-Stage Retrieval](two-stage-retrieval.md) | Why we search twice (fast filter → precise ranking) | You want to optimize search performance |
-| [Tree-sitter AST Chunking](tree-sitter-guide.md) | How we extract functions/classes from code | You're curious about code parsing |
-| [MCP Protocol](mcp-protocol.md) | How AmanMCP talks to Claude | You want to understand the integration |
-
----
-
-## Learning Path
+## Learning Paths
 
 ### Beginner: "I just want to use it"
-Start with [Getting Started](../getting-started/) - you don't need to understand concepts to use AmanMCP.
 
-### Intermediate: "I want to understand how search works"
-1. [Hybrid Search](hybrid-search.md) - The foundation
-2. [Vector Search](vector-search-concepts.md) - How semantic search works
-3. [Two-Stage Retrieval](two-stage-retrieval.md) - Why it's fast and accurate
+Start with [Getting Started](../getting-started/) and [Your First Search](../tutorials/your-first-search.md). You don't need concepts to use AmanMCP.
 
-### Advanced: "I want to understand the architecture"
-1. [Tree-sitter AST Chunking](tree-sitter-guide.md) - Code parsing internals
-2. [MCP Protocol](mcp-protocol.md) - Integration layer
-3. [Architecture Overview](../reference/architecture/architecture.md) - Full system design
+### Intermediate: "I want to understand search"
+
+1. [Search Fundamentals](../learning/search-fundamentals.md) - BM25 vs Vector basics
+2. [Hybrid Search Overview](hybrid-search/overview.md) - The big picture
+3. [Query Processing](query-processing.md) - How queries are handled
+4. [Understanding Results](../tutorials/understanding-results.md) - Interpret scores
+
+### Advanced: "I want to understand implementation"
+
+1. [Hybrid Search Advanced](hybrid-search/advanced.md) - RRF formulas, Go code
+2. [Vector Search Advanced](vector-search/advanced.md) - HNSW algorithm deep dive
+3. [Tree-sitter Advanced](tree-sitter/advanced.md) - Go bindings, queries
+4. [Caching & Performance](caching-performance.md) - Why it's fast
+
+### Contributor: "I want to extend AmanMCP"
+
+1. [Architecture Overview](../reference/architecture/architecture.md)
+2. [Indexing Pipeline](indexing-pipeline.md) - Full data flow
+3. [MCP Building Guide](mcp/building-mcp.md) - Protocol implementation
+4. [Research Decisions](../research/) - Why we chose this
 
 ---
 
-## Concepts vs Guides vs Research
+## Quick Concept Summary
 
-| Section | Focus | Example |
-|---------|-------|---------|
-| **Concepts** (here) | How systems work | "How does hybrid search combine BM25 and vectors?" |
-| [Guides](../guides/) | How to do tasks | "How do I switch to MLX embeddings?" |
-| [Research](../research/) | Why we chose this | "Why SQLite FTS5 instead of Bleve?" |
+### Search System
 
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#e1f5ff', 'primaryTextColor': '#1a1a1a', 'primaryBorderColor': '#3498db', 'lineColor': '#3498db', 'secondaryColor': '#c8e6c9', 'tertiaryColor': '#ffe0b2'}}}%%
-graph TB
-    subgraph Concepts["Concepts: HOW it works"]
-        C1[Hybrid Search<br/>Combines BM25 + vectors]
-        C2[Vector Search<br/>Embeddings & HNSW]
-        C3[Two-Stage Retrieval<br/>Filter then rank]
-        C4[Tree-sitter<br/>Code parsing]
-        C5[MCP Protocol<br/>AI integration]
-    end
+flowchart LR
+    Query["Your Query"]
+    QP["Query Processing<br/>Classify & weight"]
+    BM25["BM25<br/>Keywords"]
+    Vector["Vector<br/>Semantic"]
+    RRF["RRF Fusion<br/>Combine rankings"]
+    Results["Results"]
 
-    subgraph Guides["Guides: HOW to do tasks"]
-        G1[Switch Embedders<br/>MLX vs Ollama]
-        G2[Configure Search<br/>Weights & filters]
-        G3[Optimize Performance<br/>Tuning parameters]
-    end
+    Query --> QP --> BM25 --> RRF
+    QP --> Vector --> RRF
+    RRF --> Results
 
-    subgraph Research["Research: WHY we chose"]
-        R1[SQLite vs Bleve<br/>Performance analysis]
-        R2[HNSW vs Annoy<br/>Memory tradeoffs]
-        R3[BM25 weights<br/>Empirical results]
-    end
-
-    Question[I have a question...] --> Q1{What kind?}
-
-    Q1 -->|How does X work?| Concepts
-    Q1 -->|How do I do Y?| Guides
-    Q1 -->|Why not Z?| Research
-
-    C1 --> R3
-    C2 --> R2
-    G1 --> C2
-    G2 --> C1
-    G3 --> C3
-
-    style Concepts fill:#e1f5ff,stroke:#3498db,stroke-width:2px
-    style Guides fill:#c8e6c9,stroke:#27ae60,stroke-width:2px
-    style Research fill:#ffe0b2,stroke:#f39c12,stroke-width:2px
-    style Question fill:#fff9c4,stroke:#f39c12,stroke-width:2px
+    style Query fill:#e1f5ff
+    style Results fill:#c8e6c9
 ```
 
+**Key docs:** [Hybrid Search](hybrid-search/), [Query Processing](query-processing.md)
+
+### Indexing System
+
+```mermaid
+flowchart LR
+    Files["Source Files"]
+    Parse["Tree-sitter<br/>Parse AST"]
+    Chunk["Extract<br/>Chunks"]
+    Embed["Generate<br/>Embeddings"]
+    Store["Store in<br/>Indexes"]
+
+    Files --> Parse --> Chunk --> Embed --> Store
+
+    style Files fill:#e1f5ff
+    style Store fill:#c8e6c9
+```
+
+**Key docs:** [Indexing Pipeline](indexing-pipeline.md), [Tree-sitter](tree-sitter/)
+
+### Integration
+
+```mermaid
+flowchart LR
+    AI["AI Assistant<br/>(Claude, Cursor)"]
+    MCP["MCP Protocol"]
+    AmanMCP["AmanMCP<br/>Search Engine"]
+
+    AI <-->|"JSON-RPC"| MCP <--> AmanMCP
+
+    style AI fill:#e1bee7
+    style AmanMCP fill:#c8e6c9
+```
+
+**Key docs:** [MCP Protocol](mcp/)
+
 ---
 
-## Visual Learning
+## Concepts at a Glance
 
-Most concept docs include:
-- 📊 **Mermaid diagrams** - Flowcharts and sequence diagrams
-- 📈 **Performance charts** - Speed and quality comparisons
-- 🎯 **Examples** - Real queries and results
+| Concept | One-Line Summary |
+|---------|------------------|
+| **Hybrid Search** | BM25 (keywords) + Vector (semantic) combined with RRF |
+| **Vector Search** | Text → numbers (embeddings) → find similar meanings |
+| **Query Processing** | Classify query type → adjust search weights |
+| **Two-Stage Retrieval** | Fast recall with embeddings, precise rerank with cross-encoder |
+| **Indexing Pipeline** | Files → parse → chunk → embed → store |
+| **Tree-sitter** | Parse code into AST, extract complete functions |
+| **Caching** | Embed once, search instantly |
+| **MCP** | Universal protocol for AI-tool integration |
 
 ---
 
-## Contribute
+## Concepts vs Other Docs
 
-Found a concept confusing? Want to add diagrams or examples?
-1. File an issue with the concept name
-2. Suggest improvements (PRs welcome!)
-3. Ask questions - confusion indicates documentation gaps
+| Section | Focus | Example Question |
+|---------|-------|------------------|
+| **Concepts** (here) | How systems work | "How does hybrid search combine BM25 and vectors?" |
+| [Learning](../learning/) | Foundational knowledge | "What is RAG?" |
+| [Tutorials](../tutorials/) | Hands-on walkthroughs | "How do I run my first search?" |
+| [Guides](../guides/) | How to do tasks | "How do I switch to MLX embeddings?" |
+| [Research](../research/) | Why we chose this | "Why SQLite FTS5 instead of Bleve?" |
 
 ---
 
 ## Related Documentation
 
+- [Learning](../learning/) - Foundational concepts for beginners
+- [Tutorials](../tutorials/) - Step-by-step walkthroughs
 - [Getting Started](../getting-started/) - Installation and first steps
-- [Guides](../guides/) - Task-based how-tos
 - [Architecture Reference](../reference/architecture/) - Technical specifications
 - [Research](../research/) - Technical decisions and analysis
