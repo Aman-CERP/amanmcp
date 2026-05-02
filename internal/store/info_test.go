@@ -75,10 +75,10 @@ func TestFormatBytes_Gigabytes(t *testing.T) {
 		bytes    int64
 		expected string
 	}{
-		{1073741824, "1.0 GB"},      // 1GB
-		{5368709120, "5.0 GB"},      // 5GB
-		{10737418240, "10.0 GB"},    // 10GB
-		{107374182400, "100.0 GB"},  // 100GB
+		{1073741824, "1.0 GB"},     // 1GB
+		{5368709120, "5.0 GB"},     // 5GB
+		{10737418240, "10.0 GB"},   // 10GB
+		{107374182400, "100.0 GB"}, // 100GB
 	}
 
 	for _, tc := range tests {
@@ -186,10 +186,10 @@ func TestInferBackendFromModel_MLX(t *testing.T) {
 		model    string
 		expected string
 	}{
-		{"/path/to/local/model", "mlx"},                          // Absolute path
-		{"mlx-community/bge-small", "mlx"},                       // mlx-community prefix
-		{"mlx-embedding-model", "mlx"},                           // mlx- prefix
-		{"/Users/user/.cache/mlx/models/embedding", "mlx"},       // Absolute path
+		{"/path/to/local/model", "mlx"},                    // Absolute path
+		{"mlx-community/bge-small", "mlx"},                 // mlx-community prefix
+		{"mlx-embedding-model", "mlx"},                     // mlx- prefix
+		{"/Users/user/.cache/mlx/models/embedding", "mlx"}, // Absolute path
 	}
 
 	for _, tc := range tests {
@@ -207,7 +207,7 @@ func TestInferBackendFromModel_Ollama(t *testing.T) {
 	}{
 		{"qwen3-embedding:0.6b", "ollama"},
 		{"nomic-embed-text", "ollama"},
-		{"nomic-embed-text:latest", "ollama"},
+		{"nomic-embed-text:v1.5", "ollama"},
 		{"mxbai-embed-large", "ollama"},
 		{"some-random-model", "ollama"}, // Default to ollama
 	}

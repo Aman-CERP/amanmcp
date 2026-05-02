@@ -69,8 +69,8 @@ func (m *MockBM25Index) Stats() *store.IndexStats {
 	return &store.IndexStats{}
 }
 
-func (m *MockBM25Index) Save(_ string) error       { return nil }
-func (m *MockBM25Index) Load(_ string) error       { return nil }
+func (m *MockBM25Index) Save(_ string) error { return nil }
+func (m *MockBM25Index) Load(_ string) error { return nil }
 func (m *MockBM25Index) Close() error {
 	if m.CloseFn != nil {
 		return m.CloseFn()
@@ -164,21 +164,22 @@ func (m *MockEmbedder) Dimensions() int {
 	return 768
 }
 
-func (m *MockEmbedder) ModelName() string                       { return "mock-embedder" }
-func (m *MockEmbedder) Available(_ context.Context) bool        { return true }
-func (m *MockEmbedder) Close() error                            { return nil }
-func (m *MockEmbedder) SetBatchIndex(_ int)                     {}
-func (m *MockEmbedder) SetFinalBatch(_ bool)                    {}
+func (m *MockEmbedder) ModelName() string                { return "mock-embedder" }
+func (m *MockEmbedder) Available(_ context.Context) bool { return true }
+func (m *MockEmbedder) Close() error                     { return nil }
+func (m *MockEmbedder) SetBatchIndex(_ int)              {}
+func (m *MockEmbedder) SetFinalBatch(_ bool)             {}
 
 // MockMetadataStore implements store.MetadataStore for testing
 type MockMetadataStore struct {
-	GetChunkFn     func(ctx context.Context, id string) (*store.Chunk, error)
-	DeleteChunksFn func(ctx context.Context, ids []string) error
-	GetStateFn     func(ctx context.Context, key string) (string, error)
-	SetStateFn     func(ctx context.Context, key, value string) error
-	CloseFn        func() error
-	chunks         map[string]*store.Chunk
-	state          map[string]string // QW-5: State storage for dimension tracking
+	GetChunkFn          func(ctx context.Context, id string) (*store.Chunk, error)
+	GetChunksBySymbolFn func(ctx context.Context, name string, limit int) ([]*store.Chunk, error)
+	DeleteChunksFn      func(ctx context.Context, ids []string) error
+	GetStateFn          func(ctx context.Context, key string) (string, error)
+	SetStateFn          func(ctx context.Context, key, value string) error
+	CloseFn             func() error
+	chunks              map[string]*store.Chunk
+	state               map[string]string // QW-5: State storage for dimension tracking
 }
 
 func NewMockMetadataStore() *MockMetadataStore {
@@ -237,6 +238,24 @@ func (m *MockMetadataStore) GetChunksByFile(_ context.Context, fileID string) ([
 	for _, c := range m.chunks {
 		if c.FileID == fileID {
 			result = append(result, c)
+		}
+	}
+	return result, nil
+}
+func (m *MockMetadataStore) GetChunksBySymbol(ctx context.Context, name string, limit int) ([]*store.Chunk, error) {
+	if m.GetChunksBySymbolFn != nil {
+		return m.GetChunksBySymbolFn(ctx, name, limit)
+	}
+	result := make([]*store.Chunk, 0, limit)
+	for _, c := range m.chunks {
+		for _, sym := range c.Symbols {
+			if sym != nil && sym.Name == name {
+				result = append(result, c)
+				break
+			}
+		}
+		if limit > 0 && len(result) >= limit {
+			break
 		}
 	}
 	return result, nil
@@ -524,6 +543,46 @@ func TestEngine_Search_MaxLimitEnforcement(t *testing.T) {
 
 	// Then: caps at max limit (no error, just capped)
 	require.NoError(t, err)
+}
+
+func TestEngine_Search_ExactIdentifierSupplementsSymbolCandidate(t *testing.T) {
+	// Given: BM25 returns a dense reference chunk but misses the exact symbol owner.
+	engine, bm25, vector, embedder, metadata := setupTestEngine(t)
+	reference := &store.Chunk{
+		ID:          "reference",
+		FilePath:    "internal/embed/ollama_test.go",
+		Content:     "run OllamaEmbedder tests and mention ollama embedder repeatedly",
+		ContentType: store.ContentTypeCode,
+	}
+	definition := &store.Chunk{
+		ID:          "definition",
+		FilePath:    "internal/embed/ollama.go",
+		Content:     "type OllamaEmbedder struct {}",
+		ContentType: store.ContentTypeCode,
+		Symbols: []*store.Symbol{
+			{Name: "OllamaEmbedder", Type: store.SymbolTypeType},
+		},
+	}
+	metadata.chunks[reference.ID] = reference
+	metadata.chunks[definition.ID] = definition
+
+	bm25.SearchFn = func(ctx context.Context, query string, limit int) ([]*store.BM25Result, error) {
+		return []*store.BM25Result{{DocID: reference.ID, Score: 10, MatchedTerms: []string{"ollama", "embedder"}}}, nil
+	}
+	vector.SearchFn = func(ctx context.Context, query []float32, k int) ([]*store.VectorResult, error) {
+		return nil, nil
+	}
+	embedder.EmbedFn = func(ctx context.Context, text string) ([]float32, error) {
+		return make([]float32, 768), nil
+	}
+
+	// When: the user asks for an exact identifier.
+	results, err := engine.Search(context.Background(), "OllamaEmbedder", SearchOptions{BM25Only: true, Limit: 5})
+
+	// Then: the exact symbol owner is injected and ranked first.
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+	assert.Equal(t, "internal/embed/ollama.go", results[0].Chunk.FilePath)
 }
 
 func TestEngine_Index(t *testing.T) {
@@ -2065,9 +2124,9 @@ func TestEngine_Search_BM25QueryExpansion(t *testing.T) {
 			expectedTerms: []string{"Index", "func", "method", "indexer"},
 		},
 		{
-			name:          "OllamaEmbedder expands to related terms",
+			name:          "OllamaEmbedder preserves exact identifier",
 			query:         "OllamaEmbedder",
-			expectedTerms: []string{"Ollama", "Embedder", "embed"},
+			expectedTerms: []string{"OllamaEmbedder"},
 		},
 	}
 
@@ -2101,8 +2160,21 @@ func TestEngine_Search_BM25QueryExpansion(t *testing.T) {
 				assert.Contains(t, bm25Query, term,
 					"BM25 query should contain '%s'", term)
 			}
+			if tt.query == "OllamaEmbedder" {
+				assert.Equal(t, tt.query, bm25Query,
+					"exact identifiers should bypass synonym expansion")
+			}
 		})
 	}
+}
+
+func TestCandidateLimitForQuery_BroadensExactLexicalPool(t *testing.T) {
+	assert.Equal(t, 100, candidateLimitForQuery("OllamaEmbedder", 10))
+	assert.Equal(t, 20, candidateLimitForQuery("Search function", 10))
+	assert.Equal(t, 100, candidateLimitForOptions("current search ADR", SearchOptions{
+		Limit: 10,
+		Mode:  SearchModeDecisions,
+	}))
 }
 
 // =============================================================================
@@ -2151,6 +2223,7 @@ func TestEngine_RerankResults_Integration(t *testing.T) {
 	t.Run("reranks results when reranker available", func(t *testing.T) {
 		// Given: engine with mock reranker
 		engine, bm25, vector, embedder, metadata := setupTestEngine(t)
+		engine.config.RerankerPolicy = RerankerPolicyAlways
 
 		// Setup chunks in metadata
 		chunk1 := &store.Chunk{ID: "chunk1", Content: "func Login() {}", FilePath: "auth.go", ContentType: store.ContentTypeCode}
@@ -2248,6 +2321,7 @@ func TestEngine_RerankResults_Integration(t *testing.T) {
 	t.Run("graceful degradation on reranker error", func(t *testing.T) {
 		// Given: engine with reranker that returns error
 		engine, bm25, vector, embedder, metadata := setupTestEngine(t)
+		engine.config.RerankerPolicy = RerankerPolicyAlways
 
 		chunk1 := &store.Chunk{ID: "chunk1", Content: "content1", FilePath: "a.go", ContentType: store.ContentTypeCode}
 		chunk2 := &store.Chunk{ID: "chunk2", Content: "content2", FilePath: "b.go", ContentType: store.ContentTypeCode}
@@ -2347,6 +2421,7 @@ func TestEngine_RerankResults_Integration(t *testing.T) {
 	t.Run("graceful handling of invalid reranker indices", func(t *testing.T) {
 		// Given: engine with reranker that returns invalid indices
 		engine, bm25, vector, embedder, metadata := setupTestEngine(t)
+		engine.config.RerankerPolicy = RerankerPolicyAlways
 
 		chunk1 := &store.Chunk{ID: "chunk1", Content: "content1", FilePath: "a.go", ContentType: store.ContentTypeCode}
 		chunk2 := &store.Chunk{ID: "chunk2", Content: "content2", FilePath: "b.go", ContentType: store.ContentTypeCode}
@@ -2515,6 +2590,7 @@ func TestEngine_Search_BM25Only_StillAppliesFilters(t *testing.T) {
 func TestEngine_Search_BM25Only_StillAppliesReranking(t *testing.T) {
 	// Given: engine with BM25Only and reranker
 	engine, bm25, _, _, metadata := setupTestEngine(t)
+	engine.config.RerankerPolicy = RerankerPolicyAlways
 
 	chunk1 := &store.Chunk{ID: "chunk1", Content: "first content", FilePath: "a.go", ContentType: store.ContentTypeCode}
 	chunk2 := &store.Chunk{ID: "chunk2", Content: "second content", FilePath: "b.go", ContentType: store.ContentTypeCode}
@@ -2882,7 +2958,9 @@ func TestWithReranker(t *testing.T) {
 	}
 
 	// Create engine with reranker option
-	engine, err := NewEngine(bm25, vector, embedder, metadata, DefaultConfig(), WithReranker(mockReranker))
+	cfg := DefaultConfig()
+	cfg.RerankerPolicy = RerankerPolicyAlways
+	engine, err := NewEngine(bm25, vector, embedder, metadata, cfg, WithReranker(mockReranker))
 	require.NoError(t, err)
 	assert.NotNil(t, engine)
 

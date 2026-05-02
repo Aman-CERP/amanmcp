@@ -283,6 +283,16 @@ func TestSearchCmd_BM25OnlyFlag(t *testing.T) {
 	assert.Equal(t, "false", bm25OnlyFlag.DefValue, "default should be false")
 }
 
+func TestSearchCmd_ProfileFlag(t *testing.T) {
+	rootCmd := NewRootCmd()
+	searchCmd, _, _ := rootCmd.Find([]string{"search"})
+	require.NotNil(t, searchCmd)
+
+	profileFlag := searchCmd.Flags().Lookup("profile")
+	assert.NotNil(t, profileFlag, "should have --profile flag")
+	assert.Equal(t, "", profileFlag.DefValue)
+}
+
 func TestSearchCmd_NoResults_ShowsMessage(t *testing.T) {
 	// Given: a directory with an empty index
 	tmpDir := t.TempDir()

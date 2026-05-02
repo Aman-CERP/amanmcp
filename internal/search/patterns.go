@@ -19,10 +19,11 @@ var (
 	filePathPattern = regexp.MustCompile(`(?i)^[\w\-\./\\]+\.(go|ts|tsx|js|jsx|py|md|json|yaml|yml|toml|css|scss|html|rs|java|kt|c|cpp|h|hpp|rb|php|swift|sh|bash|zsh)$`)
 
 	// Technical identifiers
-	camelCasePattern      = regexp.MustCompile(`^[a-z]+([A-Z][a-z0-9]*)+$`)
-	pascalCasePattern     = regexp.MustCompile(`^([A-Z][a-z0-9]*){2,}$`)
-	snakeCasePattern      = regexp.MustCompile(`^[a-z]+(_[a-z0-9]+)+$`)
-	screamingSnakePattern = regexp.MustCompile(`^[A-Z]+(_[A-Z0-9]+)+$`)
+	camelCasePattern          = regexp.MustCompile(`^[a-z]+([A-Z][a-z0-9]*)+$`)
+	pascalCasePattern         = regexp.MustCompile(`^([A-Z][a-z0-9]*){2,}$`)
+	exportedIdentifierPattern = regexp.MustCompile(`^[A-Z][A-Za-z0-9]{2,}$`)
+	snakeCasePattern          = regexp.MustCompile(`^[a-z]+(_[a-z0-9]+)+$`)
+	screamingSnakePattern     = regexp.MustCompile(`^[A-Z]+(_[A-Z0-9]+)+$`)
 
 	// Natural language starters (questions, commands)
 	naturalLanguagePattern = regexp.MustCompile(`(?i)^(how|what|where|why|when|which|can|does|is|are|should|explain|describe|show|find|list)\s`)
@@ -47,6 +48,15 @@ func (p *PatternClassifier) Classify(_ context.Context, query string) (QueryType
 
 	qt := p.classifyQuery(query)
 	return qt, WeightsForQueryType(qt), nil
+}
+
+// ClassifyWithConfidence returns deterministic confidence for pattern matches.
+func (p *PatternClassifier) ClassifyWithConfidence(ctx context.Context, query string) (QueryType, Weights, float64, error) {
+	queryType, weights, err := p.Classify(ctx, query)
+	if err != nil {
+		return queryType, weights, 0, err
+	}
+	return queryType, weights, p.confidence(query, queryType), nil
 }
 
 // classifyQuery determines the query type based on patterns.
@@ -92,6 +102,7 @@ func (p *PatternClassifier) isLexicalQuery(query string) bool {
 	if !strings.Contains(query, " ") {
 		if camelCasePattern.MatchString(query) ||
 			pascalCasePattern.MatchString(query) ||
+			exportedIdentifierPattern.MatchString(query) ||
 			snakeCasePattern.MatchString(query) ||
 			screamingSnakePattern.MatchString(query) {
 			return true
@@ -106,5 +117,21 @@ func (p *PatternClassifier) isSemanticQuery(query string) bool {
 	return naturalLanguagePattern.MatchString(query)
 }
 
+func (p *PatternClassifier) confidence(query string, queryType QueryType) float64 {
+	query = strings.TrimSpace(query)
+	switch queryType {
+	case QueryTypeLexical:
+		return 0.9
+	case QueryTypeSemantic:
+		if p.isSemanticQuery(query) {
+			return 0.85
+		}
+		return 0.75
+	default:
+		return 0.6
+	}
+}
+
 // Ensure PatternClassifier implements Classifier interface.
 var _ Classifier = (*PatternClassifier)(nil)
+var _ confidenceClassifier = (*PatternClassifier)(nil)

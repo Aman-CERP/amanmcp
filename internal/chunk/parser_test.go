@@ -2,6 +2,7 @@ package chunk
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -226,7 +227,7 @@ func TestLanguageRegistry_GetByExtension(t *testing.T) {
 	}
 }
 
-// TS07: Unsupported Language
+// TS07: Unsupported Language Fallback
 func TestLanguageRegistry_UnsupportedLanguage(t *testing.T) {
 	// Given: file extension for Elixir
 	extension := ".ex"
@@ -235,9 +236,11 @@ func TestLanguageRegistry_UnsupportedLanguage(t *testing.T) {
 	registry := NewLanguageRegistry()
 	config, ok := registry.GetByExtension(extension)
 
-	// Then: no configuration is found
-	assert.False(t, ok)
-	assert.Nil(t, config)
+	// Then: line fallback configuration is found
+	require.True(t, ok)
+	require.NotNil(t, config)
+	assert.Equal(t, "elixir", config.Name)
+	assert.True(t, config.LineFallback)
 }
 
 // ============================================================================
@@ -282,6 +285,37 @@ func TestParser_MultipleParses(t *testing.T) {
 		require.NotNil(t, tree)
 		assert.Equal(t, src.language, tree.Language)
 	}
+}
+
+func TestParser_ConcurrentParse_NoRace(t *testing.T) {
+	parser := NewParser()
+	defer parser.Close()
+
+	source := []byte("package main\n\nfunc Hello() {}\n")
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				tree, err := parser.Parse(context.Background(), source, "go")
+				require.NoError(t, err)
+				require.NotNil(t, tree)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestParser_ParseAfterClose_ReturnsError(t *testing.T) {
+	parser := NewParser()
+	parser.Close()
+
+	tree, err := parser.Parse(context.Background(), []byte("package main"), "go")
+
+	require.Error(t, err)
+	assert.Nil(t, tree)
+	assert.Contains(t, err.Error(), "parser is closed")
 }
 
 // ============================================================================
@@ -364,6 +398,28 @@ const getUser = (id: number): User | undefined => {
 	assert.Contains(t, names, "UserService")
 	assert.Contains(t, names, "createUser")
 	assert.Contains(t, names, "getUser")
+}
+
+func TestSymbolExtractor_ExtractTypeScriptMethodPropertyIdentifier(t *testing.T) {
+	source := []byte(`class UserService {
+	addUser(user: User): void {
+		this.users.push(user);
+	}
+}
+`)
+
+	parser := NewParser()
+	defer parser.Close()
+
+	tree, err := parser.Parse(context.Background(), source, "typescript")
+	require.NoError(t, err)
+
+	extractor := NewSymbolExtractor()
+	symbols := extractor.Extract(tree, source)
+
+	method := findSymbolByName(symbols, "addUser")
+	require.NotNil(t, method)
+	assert.Equal(t, SymbolTypeMethod, method.Type)
 }
 
 func TestSymbolExtractor_ExtractJavaScriptSymbols(t *testing.T) {

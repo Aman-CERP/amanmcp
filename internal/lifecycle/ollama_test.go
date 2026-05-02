@@ -121,7 +121,7 @@ func TestHasModel_Found(t *testing.T) {
 			resp := map[string]interface{}{
 				"models": []map[string]interface{}{
 					{"name": "qwen3-embedding:0.6b"},
-					{"name": "embeddinggemma:latest"},
+					{"name": "embeddinggemma:300m"},
 				},
 			}
 			_ = json.NewEncoder(w).Encode(resp)

@@ -216,6 +216,25 @@ Configures hybrid search behavior.
 - Larger chunks = more context, fewer chunks
 - Overlap prevents information loss at chunk boundaries
 
+### Language Registration
+
+Built-in language detection works without configuration. Projects may add
+extensions for compiled-in parsers or explicit line fallback:
+
+```yaml
+search:
+  languages:
+    - name: elixir_custom
+      extensions: [".exx"]
+      content_type: code
+      parser: line_fallback
+```
+
+Allowed `parser` values are `go`, `typescript`, `tsx`, `javascript`, `python`,
+and `line_fallback`. Extensions are normalized to lower-case dotted form.
+Duplicate extension ownership, unknown parsers, and unknown parser node kinds
+fail configuration validation.
+
 ---
 
 ## Embeddings
@@ -560,10 +579,18 @@ paths:
 search:
   chunk_size: 2000
   max_results: 50
+  reranker:
+    policy: auto  # auto, always, or never
 
 submodules:
   enabled: true
 ```
+
+`search.reranker.policy` defaults to `auto`. `auto` keeps exact identifiers,
+paths, quoted strings, error/config-code style lookups, negative/adversarial
+queries, and unknown classifier states lexical-preserving by skipping the
+reranker. Use `always` only as an operator diagnostic override, and `never` as a
+hard disable. `AMANMCP_RERANKER_POLICY` uses the same validation path as YAML.
 
 ---
 

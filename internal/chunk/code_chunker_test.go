@@ -52,6 +52,67 @@ func Goodbye() {
 	}
 }
 
+func TestCodeChunker_ChunkGoFile_RecordsASTProvenance(t *testing.T) {
+	source := `package main
+
+func Hello() string {
+	return "hello"
+}
+`
+	chunker := NewCodeChunker()
+	defer chunker.Close()
+
+	chunks, err := chunker.Chunk(context.Background(), &FileInput{
+		Path:     "main.go",
+		Content:  []byte(source),
+		Language: "go",
+	})
+
+	require.NoError(t, err)
+	require.NotEmpty(t, chunks)
+	assert.Equal(t, "ast", chunks[0].Metadata["chunk_provenance"])
+}
+
+func TestCodeChunker_UnsupportedLanguage_RecordsLineFallbackProvenance(t *testing.T) {
+	source := strings.Repeat("line\n", 300)
+	chunker := NewCodeChunker()
+	defer chunker.Close()
+
+	chunks, err := chunker.Chunk(context.Background(), &FileInput{
+		Path:     "notes.unknown",
+		Content:  []byte(source),
+		Language: "unknown",
+	})
+
+	require.NoError(t, err)
+	require.NotEmpty(t, chunks)
+	assert.Equal(t, "line_fallback", chunks[0].Metadata["chunk_provenance"])
+}
+
+func TestCodeChunker_UnsupportedLanguage_LineFallbackHonorsTokenBudgetForLongLines(t *testing.T) {
+	denseLine := `prefix ` + strings.Repeat("x", 1500)
+	source := denseLine + "\n" + denseLine
+	chunker := NewCodeChunkerWithOptions(CodeChunkerOptions{MaxChunkTokens: 80})
+	defer chunker.Close()
+
+	chunks, err := chunker.Chunk(context.Background(), &FileInput{
+		Path:     "module.ex",
+		Content:  []byte(source),
+		Language: "elixir",
+	})
+
+	require.NoError(t, err)
+	require.Greater(t, len(chunks), 1)
+	ids := make(map[string]struct{}, len(chunks))
+	for _, chunk := range chunks {
+		assert.LessOrEqual(t, estimateTokens(chunk.RawContent), 80)
+		if _, exists := ids[chunk.ID]; exists {
+			t.Fatalf("duplicate chunk ID %s", chunk.ID)
+		}
+		ids[chunk.ID] = struct{}{}
+	}
+}
+
 // TS02: Include Doc Comments
 func TestCodeChunker_ChunkGoFile_IncludesDocComments(t *testing.T) {
 	source := `package main

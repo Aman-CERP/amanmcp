@@ -7,13 +7,18 @@ type SearchCodeInput struct {
 	SymbolType string   `json:"symbol_type,omitempty" jsonschema:"filter by symbol type: function, class, interface, type, method, or any"`
 	Limit      int      `json:"limit,omitempty" jsonschema:"maximum number of results, default 10"`
 	Scope      []string `json:"scope,omitempty" jsonschema:"filter by path prefixes (OR logic)"`
+	Profile    string   `json:"profile,omitempty" jsonschema:"retrieval profile: code, project-memory, review-corpus, archive"`
+	Explain    bool     `json:"explain,omitempty" jsonschema:"include verbose search explainability metadata"`
 }
 
 // SearchDocsInput defines the input schema for the search_docs tool.
 type SearchDocsInput struct {
-	Query string   `json:"query" jsonschema:"the documentation search query to execute"`
-	Limit int      `json:"limit,omitempty" jsonschema:"maximum number of results, default 10"`
-	Scope []string `json:"scope,omitempty" jsonschema:"filter by path prefixes (OR logic)"`
+	Query   string   `json:"query" jsonschema:"the documentation search query to execute"`
+	Limit   int      `json:"limit,omitempty" jsonschema:"maximum number of results, default 10"`
+	Scope   []string `json:"scope,omitempty" jsonschema:"filter by path prefixes (OR logic)"`
+	Profile string   `json:"profile,omitempty" jsonschema:"retrieval profile: code, project-memory, review-corpus, archive"`
+	Mode    string   `json:"mode,omitempty" jsonschema:"docs search mode: decisions for current ADRs, decision-history for current plus superseded ADRs"`
+	Explain bool     `json:"explain,omitempty" jsonschema:"include verbose search explainability metadata"`
 }
 
 // IndexStatusInput defines the input schema for the index_status tool (no parameters).
@@ -29,14 +34,14 @@ type IndexStatusOutput struct {
 
 // IndexingProgress contains information about ongoing background indexing.
 type IndexingProgress struct {
-	Status         string  `json:"status"`                     // "indexing", "ready", or "error"
-	Stage          string  `json:"stage,omitempty"`            // "scanning", "chunking", "embedding", "indexing"
-	FilesTotal     int     `json:"files_total"`                // Total files to process
-	FilesProcessed int     `json:"files_processed"`            // Files processed so far
-	ChunksIndexed  int     `json:"chunks_indexed"`             // Chunks indexed so far
-	ProgressPct    float64 `json:"progress_pct"`               // Progress percentage (0-100)
-	ElapsedSeconds int     `json:"elapsed_seconds"`            // Time since indexing started
-	ErrorMessage   string  `json:"error_message,omitempty"`    // Error message if status is "error"
+	Status         string  `json:"status"`                  // "indexing", "ready", or "error"
+	Stage          string  `json:"stage,omitempty"`         // "scanning", "chunking", "embedding", "indexing"
+	FilesTotal     int     `json:"files_total"`             // Total files to process
+	FilesProcessed int     `json:"files_processed"`         // Files processed so far
+	ChunksIndexed  int     `json:"chunks_indexed"`          // Chunks indexed so far
+	ProgressPct    float64 `json:"progress_pct"`            // Progress percentage (0-100)
+	ElapsedSeconds int     `json:"elapsed_seconds"`         // Time since indexing started
+	ErrorMessage   string  `json:"error_message,omitempty"` // Error message if status is "error"
 }
 
 // ProjectInfo contains information about the indexed project.

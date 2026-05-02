@@ -705,6 +705,31 @@ func TestValidateSQLiteIntegrity(t *testing.T) {
 	}
 }
 
+func TestIsSQLiteLockError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "sqlite busy", err: errString("database is locked (5) (SQLITE_BUSY)"), want: true},
+		{name: "sqlite locked", err: errString("database table is locked (6) (SQLITE_LOCKED)"), want: true},
+		{name: "other corruption", err: errString("FTS5 table 'fts_content' missing"), want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isSQLiteLockError(tt.err))
+		})
+	}
+}
+
+type errString string
+
+func (e errString) Error() string {
+	return string(e)
+}
+
 // ============================================================================
 // Update/Replace Tests
 // ============================================================================

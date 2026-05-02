@@ -47,13 +47,13 @@ type QueryDecomposer interface {
 // - "How does RRF fusion work" -> "RRF", "fusion.go", etc.
 type PatternDecomposer struct {
 	// Compiled patterns for decomposition eligibility
-	nounFunctionPattern  *regexp.Regexp
-	howDoesWorkPattern   *regexp.Regexp
-	camelCasePattern     *regexp.Regexp
-	pascalCasePattern    *regexp.Regexp
-	snakeCasePattern     *regexp.Regexp
-	filePathPattern      *regexp.Regexp
-	quotedPattern        *regexp.Regexp
+	nounFunctionPattern *regexp.Regexp
+	howDoesWorkPattern  *regexp.Regexp
+	camelCasePattern    *regexp.Regexp
+	pascalCasePattern   *regexp.Regexp
+	snakeCasePattern    *regexp.Regexp
+	filePathPattern     *regexp.Regexp
+	quotedPattern       *regexp.Regexp
 }
 
 // NewPatternDecomposer creates a new pattern-based query decomposer.
@@ -66,9 +66,9 @@ func NewPatternDecomposer() *PatternDecomposer {
 		howDoesWorkPattern: regexp.MustCompile(`(?i)^how\s+does\s+(.+?)\s+work$`),
 
 		// Technical identifiers that should skip decomposition
-		camelCasePattern: regexp.MustCompile(`^[a-z]+([A-Z][a-z0-9]*)+$`),
+		camelCasePattern:  regexp.MustCompile(`^[a-z]+([A-Z][a-z0-9]*)+$`),
 		pascalCasePattern: regexp.MustCompile(`^([A-Z][a-z0-9]*){2,}$`),
-		snakeCasePattern: regexp.MustCompile(`^[a-z]+(_[a-z0-9]+)+$`),
+		snakeCasePattern:  regexp.MustCompile(`^[a-z]+(_[a-z0-9]+)+$`),
 
 		// File paths with common extensions
 		filePathPattern: regexp.MustCompile(`(?i)[\w\-\.]*[/\\][\w\-\./\\]*\.(go|ts|tsx|js|jsx|py|md|json|yaml|yml)$`),
@@ -141,6 +141,7 @@ func (d *PatternDecomposer) isSpecificIdentifier(query string) bool {
 
 	return d.camelCasePattern.MatchString(query) ||
 		d.pascalCasePattern.MatchString(query) ||
+		exportedIdentifierPattern.MatchString(query) ||
 		d.snakeCasePattern.MatchString(query)
 }
 

@@ -136,18 +136,12 @@ func TestPollingWatcher_DetectsNewDirectory(t *testing.T) {
 	testFile := filepath.Join(subDir, "file.go")
 	require.NoError(t, os.WriteFile(testFile, []byte("package subdir"), 0o644))
 
-	// Then: CREATE events for both are detected
-	events := collectEvents(w.Events(), 2, 500*time.Millisecond)
-	require.GreaterOrEqual(t, len(events), 1, "expected at least one event")
-
-	// Check we got at least the file creation
-	hasFileEvent := false
-	for _, e := range events {
-		if e.Operation == OpCreate && !e.IsDir {
-			hasFileEvent = true
-		}
-	}
-	assert.True(t, hasFileEvent, "expected file create event")
+	// Then: a CREATE event for the file is detected.
+	event, ok := waitForEvent(w.Events(), 750*time.Millisecond, func(e FileEvent) bool {
+		return e.Operation == OpCreate && !e.IsDir && filepath.Base(e.Path) == "file.go"
+	})
+	require.True(t, ok, "expected file create event")
+	assert.Contains(t, event.Path, "file.go")
 
 	require.NoError(t, w.Stop())
 }
@@ -208,22 +202,22 @@ func TestPollingWatcher_ContextCancellation(t *testing.T) {
 	}
 }
 
-// collectEvents collects up to n events or until timeout.
-func collectEvents(ch <-chan FileEvent, n int, timeout time.Duration) []FileEvent {
-	var events []FileEvent
+// waitForEvent drains events until a matching event is observed or timeout expires.
+func waitForEvent(ch <-chan FileEvent, timeout time.Duration, match func(FileEvent) bool) (FileEvent, bool) {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
-	for len(events) < n {
+	for {
 		select {
 		case e, ok := <-ch:
 			if !ok {
-				return events
+				return FileEvent{}, false
 			}
-			events = append(events, e)
+			if match(e) {
+				return e, true
+			}
 		case <-timer.C:
-			return events
+			return FileEvent{}, false
 		}
 	}
-	return events
 }

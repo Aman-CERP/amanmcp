@@ -3,6 +3,7 @@ package chunk
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	sitter "github.com/smacker/go-tree-sitter"
 )
@@ -11,6 +12,7 @@ import (
 type Parser struct {
 	parser   *sitter.Parser
 	registry *LanguageRegistry
+	mu       sync.Mutex
 }
 
 // NewParser creates a new parser with default language registry
@@ -37,6 +39,12 @@ func (p *Parser) Parse(ctx context.Context, source []byte, language string) (*Tr
 		return nil, fmt.Errorf("unsupported language: %s", language)
 	}
 
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.parser == nil {
+		return nil, fmt.Errorf("parser is closed")
+	}
+
 	// Set language (smacker bindings don't return error)
 	p.parser.SetLanguage(tsLang)
 
@@ -48,6 +56,7 @@ func (p *Parser) Parse(ctx context.Context, source []byte, language string) (*Tr
 	if tsTree == nil {
 		return nil, fmt.Errorf("failed to parse source: nil tree")
 	}
+	defer tsTree.Close()
 
 	// Convert tree-sitter tree to our tree structure
 	root := convertNode(tsTree.RootNode(), source)
@@ -61,8 +70,11 @@ func (p *Parser) Parse(ctx context.Context, source []byte, language string) (*Tr
 
 // Close releases parser resources
 func (p *Parser) Close() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.parser != nil {
 		p.parser.Close()
+		p.parser = nil
 	}
 }
 

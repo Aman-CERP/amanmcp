@@ -26,10 +26,10 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration (match Makefile - Single Source of Truth)
-GO_MIN_VERSION="1.24"
-GO_EXACT_VERSION="1.25.5"
-GOLANGCI_LINT_VERSION="v2.1.6"
-GOVULNCHECK_VERSION="v1.1.4"  # Updated for Go 1.25 compatibility
+GO_MIN_VERSION="1.25.9"
+GO_EXACT_VERSION="1.25.9"
+GOLANGCI_LINT_VERSION="v2.7.2"
+GOVULNCHECK_VERSION="v1.3.0"
 COVERAGE_THRESHOLD=25
 
 # Parse arguments
@@ -211,6 +211,19 @@ run_build() {
     log_success "Build succeeded"
 }
 
+# Run AmanPM compliance as advisory while the F40 enforcement layer transitions
+# from repair mode to a hard CI gate.
+run_amanpm_advisory() {
+    log_step "Running AmanPM compliance advisory..."
+
+    if ! python3 .aman-pm/scripts/comply.py --mode advisory --db .amanmcp/amanpm-read-model.sqlite; then
+        log_error "AmanPM advisory check failed to execute"
+        exit 6
+    fi
+
+    log_success "AmanPM advisory check completed"
+}
+
 # Run parallel checks (tests, lint, security)
 run_parallel_checks() {
     log_parallel "Running tests, lint, and security scan IN PARALLEL..."
@@ -339,6 +352,7 @@ main() {
             check_go_version
             run_tests
             run_lint
+            run_amanpm_advisory
 
             echo ""
             echo "========================================"
@@ -362,6 +376,7 @@ main() {
             run_parallel_checks
             check_coverage
             run_build
+            run_amanpm_advisory
 
             echo ""
             echo "========================================"

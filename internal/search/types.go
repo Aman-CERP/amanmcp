@@ -49,6 +49,30 @@ type SearchOptions struct {
 	// Empty slice means no scope filtering.
 	Scopes []string
 
+	// Profile selects a retrieval profile before results are returned.
+	// Empty keeps existing broad active-search behavior while excluding
+	// review-corpus, archive, and raw-evidence material by default.
+	Profile Profile
+
+	// ProfileMismatches collects profile-excluded results for structured UX.
+	// Callers that do not need diagnostics can leave this nil.
+	ProfileMismatches *[]ProfileMismatch
+
+	// ProfileRules controls profile eligibility. Empty uses built-in defaults.
+	ProfileRules ProfileRules
+
+	// Mode narrows behavior inside a tool/profile without adding another tool.
+	// Decision modes are used by search_docs for current or historical ADR lookup.
+	Mode SearchMode
+
+	// QueryClassification collects the runtime query classifier decision.
+	// Callers that do not need diagnostics can leave this nil.
+	QueryClassification *QueryClassification
+
+	// RerankerStatus collects the runtime reranker state for structured output.
+	// Callers that do not need diagnostics can leave this nil.
+	RerankerStatus *RerankerStatus
+
 	// BM25Only forces keyword-only search, skipping semantic/vector search entirely.
 	// FEAT-DIM1: Useful when embedder is unavailable or for exact keyword matching.
 	BM25Only bool
@@ -62,6 +86,13 @@ type SearchOptions struct {
 	// FEAT-UNIX3: When true, returns ExplainData with search decision details.
 	Explain bool
 }
+
+type SearchMode string
+
+const (
+	SearchModeDecisions       SearchMode = "decisions"
+	SearchModeDecisionHistory SearchMode = "decision-history"
+)
 
 // Weights configures the relative importance of BM25 vs semantic search.
 type Weights struct {
@@ -119,6 +150,9 @@ type SearchResult struct {
 	// Explain contains detailed search decision information when opts.Explain=true.
 	// FEAT-UNIX3: Only populated on the first result to avoid duplication.
 	Explain *ExplainData
+
+	// SourceMetadata contains F39 source authority/profile/freshness metadata.
+	SourceMetadata SourceMetadata
 }
 
 // AdjacentContext contains surrounding chunks for context continuity.
@@ -152,6 +186,59 @@ type EngineStats struct {
 	VectorCount int
 }
 
+const (
+	QueryClassificationConfidenceAvailable   = "available"
+	QueryClassificationConfidenceUnavailable = "unavailable"
+	QueryClassificationConfidenceNotReported = "not_reported"
+)
+
+// QueryClassification records the classifier output used for a search call.
+type QueryClassification struct {
+	Type            QueryType
+	Confidence      *float64
+	ConfidenceState string
+}
+
+const (
+	RerankerStateNotConfigured = "not_configured"
+	RerankerStateApplied       = "applied"
+	RerankerStateSkipped       = "skipped"
+	RerankerStateUnavailable   = "unavailable"
+	RerankerStateFailed        = "failed"
+)
+
+const (
+	RerankerSkipTooFewResults          = "too_few_results"
+	RerankerSkipNoDocuments            = "no_documents"
+	RerankerSkipFetchFailed            = "chunk_fetch_failed"
+	RerankerSkipPolicyNever            = "policy_never"
+	RerankerSkipPolicyAutoLexical      = "policy_auto_lexical"
+	RerankerSkipPolicyAutoPath         = "policy_auto_path"
+	RerankerSkipPolicyAutoQuoted       = "policy_auto_quoted"
+	RerankerSkipPolicyAutoNegative     = "policy_auto_negative"
+	RerankerSkipPolicyAutoUnknownClass = "policy_auto_unknown_class"
+	RerankerSkipPolicyAutoSemantic     = "policy_auto_semantic"
+)
+
+// RerankerPolicy controls whether the optional cross-encoder reranker runs.
+type RerankerPolicy string
+
+const (
+	RerankerPolicyAuto   RerankerPolicy = "auto"
+	RerankerPolicyAlways RerankerPolicy = "always"
+	RerankerPolicyNever  RerankerPolicy = "never"
+)
+
+// RerankerStatus records what happened in the optional reranker stage.
+type RerankerStatus struct {
+	Policy         RerankerPolicy
+	State          string
+	SkipReason     string
+	CandidateCount int
+	RerankedCount  int
+	LatencyMS      int64
+}
+
 // EngineConfig configures the search engine.
 type EngineConfig struct {
 	// DefaultLimit is the default number of results (default: 10).
@@ -168,6 +255,15 @@ type EngineConfig struct {
 
 	// SearchTimeout is the maximum search duration (default: 5s).
 	SearchTimeout time.Duration
+
+	// MetadataRules classifies source authority and retrieval profile defaults.
+	MetadataRules MetadataRules
+
+	// ProfileRules controls profile eligibility.
+	ProfileRules ProfileRules
+
+	// RerankerPolicy controls when the optional reranker runs.
+	RerankerPolicy RerankerPolicy
 }
 
 // DefaultConfig returns sensible default configuration.
@@ -178,6 +274,9 @@ func DefaultConfig() EngineConfig {
 		DefaultWeights: DefaultWeights(),
 		RRFConstant:    60,
 		SearchTimeout:  5 * time.Second,
+		MetadataRules:  DefaultMetadataRules(),
+		ProfileRules:   DefaultProfileRules(),
+		RerankerPolicy: RerankerPolicyAuto,
 	}
 }
 

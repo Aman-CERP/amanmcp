@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Aman-CERP/amanmcp/internal/config"
+	"github.com/Aman-CERP/amanmcp/internal/embed"
+	"github.com/Aman-CERP/amanmcp/internal/store"
 )
 
 // TestTier1_All runs all Tier 1 validation queries.
@@ -338,4 +341,332 @@ func TestQuery_ByID(t *testing.T) {
 			// Don't fail on individual queries - TestTier1_All handles pass rates
 		})
 	}
+}
+
+func TestParseQueryConfig_F37SchemaAndLegacyExpectedCompatibility(t *testing.T) {
+	data := []byte(`
+tier1:
+  - id: T1-Q1
+    name: Legacy expected query
+    query: "RRF fusion"
+    tool: search
+    class: exact_identifier
+    job: exact_lookup
+    expected:
+      - internal/search/fusion.go
+    holdout: false
+    source: dogfood-tier1
+    notes: "legacy expected must map to grade-3 evidence"
+tier2: []
+negative:
+  - id: N-Q1
+    name: Empty query
+    query: ""
+    tool: search
+    class: negative_adversarial
+    job: general
+    expected: []
+    holdout: false
+    source: dogfood-negative
+graded:
+  - id: CODE-Q01
+    name: Graded query
+    query: "how does vector storage load"
+    tool: search_code
+    class: natural_language_intent
+    job: code
+    expected_results:
+      - path: internal/store/hnsw.go
+        symbol: HNSWStore
+        grade: 3
+        rationale: "Canonical vector store implementation."
+    holdout: true
+    source: manual
+    notes: "F37 graded evidence"
+`)
+
+	cfg, err := parseQueryConfig(data)
+	require.NoError(t, err)
+
+	require.Len(t, cfg.Tier1, 1)
+	assert.Equal(t, 1, cfg.Tier1[0].Tier)
+	require.Len(t, cfg.Tier1[0].ExpectedResults, 1)
+	assert.Equal(t, "internal/search/fusion.go", cfg.Tier1[0].ExpectedResults[0].Path)
+	assert.Equal(t, 3, cfg.Tier1[0].ExpectedResults[0].Grade)
+
+	require.Len(t, cfg.Negative, 1)
+	assert.Equal(t, 0, cfg.Negative[0].Tier)
+
+	require.Len(t, cfg.Graded, 1)
+	assert.Equal(t, 3, cfg.Graded[0].Tier)
+	assert.True(t, cfg.Graded[0].Holdout)
+	assert.Equal(t, "natural_language_intent", cfg.Graded[0].Class)
+	assert.Equal(t, "code", cfg.Graded[0].Job)
+}
+
+func TestParseQueryConfig_RejectsMalformedCorpus(t *testing.T) {
+	base := func(body string) []byte {
+		return []byte("tier1:\n" + body + "\ntier2: []\nnegative: []\ngraded: []\n")
+	}
+
+	tests := []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{
+			name: "duplicate ids",
+			body: `  - id: DUP-Q1
+    name: First
+    query: "SearchOptions"
+    tool: search
+    class: exact_identifier
+    job: exact_lookup
+    expected_results:
+      - path: internal/search/options.go
+        grade: 3
+        rationale: "Canonical."
+    holdout: false
+    source: manual
+  - id: DUP-Q1
+    name: Second
+    query: "SearchOptions"
+    tool: search
+    class: exact_identifier
+    job: exact_lookup
+    expected_results:
+      - path: internal/search/types.go
+        grade: 2
+        rationale: "Supporting."
+    holdout: false
+    source: manual
+`,
+			wantErr: "duplicate query id",
+		},
+		{
+			name: "unsupported tool",
+			body: `  - id: BAD-Q1
+    name: Bad tool
+    query: "SearchOptions"
+    tool: search_everything
+    class: exact_identifier
+    job: exact_lookup
+    expected_results:
+      - path: internal/search/options.go
+        grade: 3
+        rationale: "Canonical."
+    holdout: false
+    source: manual
+`,
+			wantErr: "unsupported tool",
+		},
+		{
+			name: "unsupported class",
+			body: `  - id: BAD-Q1
+    name: Bad class
+    query: "SearchOptions"
+    tool: search
+    class: vibes
+    job: exact_lookup
+    expected_results:
+      - path: internal/search/options.go
+        grade: 3
+        rationale: "Canonical."
+    holdout: false
+    source: manual
+`,
+			wantErr: "unsupported class",
+		},
+		{
+			name: "invalid profile",
+			body: `  - id: BAD-Q1
+    name: Bad profile
+    query: "SearchOptions"
+    tool: search_docs
+    profile: everything
+    class: docs_to_code
+    job: project_memory
+    expected_results:
+      - path: docs/reference/architecture.md
+        grade: 3
+        rationale: "Canonical."
+    holdout: false
+    source: manual
+`,
+			wantErr: "invalid profile",
+		},
+		{
+			name: "invalid mode",
+			body: `  - id: BAD-Q1
+    name: Bad mode
+    query: "ADR decisions"
+    tool: search_docs
+    mode: latest
+    class: adr_to_code
+    job: decision_lookup
+    expected_results:
+      - path: docs/reference/decisions/ADR-001.md
+        grade: 3
+        rationale: "Canonical."
+    holdout: false
+    source: manual
+`,
+			wantErr: "invalid mode",
+		},
+		{
+			name: "unsupported job",
+			body: `  - id: BAD-Q1
+    name: Bad job
+    query: "SearchOptions"
+    tool: search
+    class: exact_identifier
+    job: everything
+    expected_results:
+      - path: internal/search/options.go
+        grade: 3
+        rationale: "Canonical."
+    holdout: false
+    source: manual
+`,
+			wantErr: "unsupported job",
+		},
+		{
+			name: "invalid grade",
+			body: `  - id: BAD-Q1
+    name: Bad grade
+    query: "SearchOptions"
+    tool: search
+    class: exact_identifier
+    job: exact_lookup
+    expected_results:
+      - path: internal/search/options.go
+        grade: 4
+        rationale: "Out of range."
+    holdout: false
+    source: manual
+`,
+			wantErr: "invalid expected result grade",
+		},
+		{
+			name: "malformed holdout",
+			body: `  - id: BAD-Q1
+    name: Bad holdout
+    query: "SearchOptions"
+    tool: search
+    class: exact_identifier
+    job: exact_lookup
+    expected_results:
+      - path: internal/search/options.go
+        grade: 3
+        rationale: "Canonical."
+    holdout: sometimes
+    source: manual
+`,
+			wantErr: "holdout must be a boolean",
+		},
+		{
+			name: "missing expected evidence",
+			body: `  - id: BAD-Q1
+    name: Missing evidence
+    query: "SearchOptions"
+    tool: search
+    class: exact_identifier
+    job: exact_lookup
+    holdout: false
+    source: manual
+`,
+			wantErr: "requires expected evidence",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseQueryConfig(base(tt.body))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestLoadQueries_CurrentCorpusHasF37Coverage(t *testing.T) {
+	ResetQueries()
+	t.Cleanup(ResetQueries)
+
+	cfg, err := LoadQueries()
+	require.NoError(t, err)
+
+	all := allQuerySpecs(cfg)
+	assert.Len(t, all, 69)
+
+	holdout := 0
+	nonHoldoutByClass := make(map[string]int)
+	byJob := make(map[string]int)
+	for _, spec := range all {
+		if spec.Holdout {
+			holdout++
+		} else {
+			nonHoldoutByClass[spec.Class]++
+		}
+		byJob[spec.Job]++
+		if spec.Class != "negative_adversarial" {
+			assert.NotEmpty(t, spec.ExpectedResults, "query %s must have expected evidence", spec.ID)
+		}
+	}
+
+	assert.GreaterOrEqual(t, holdout, 12)
+	for class := range allowedQueryClasses {
+		assert.GreaterOrEqual(t, nonHoldoutByClass[class], 3, "class %s should have at least 3 non-holdout queries", class)
+	}
+	for job := range allowedQueryJobs {
+		assert.NotZero(t, byJob[job], "job %s should be represented", job)
+	}
+}
+
+func TestValidationEmbedderSelection_UsesIndexedStaticBackend(t *testing.T) {
+	ctx := context.Background()
+	metadata, err := store.NewSQLiteStore(filepath.Join(t.TempDir(), "metadata.db"))
+	require.NoError(t, err)
+	defer func() { _ = metadata.Close() }()
+	require.NoError(t, metadata.SetState(ctx, store.StateKeyIndexModel, "static768"))
+
+	cfg := config.NewConfig()
+	cfg.Embeddings.Provider = "ollama"
+
+	provider, model := validationEmbedderSelection(ctx, cfg, metadata)
+
+	assert.Equal(t, embed.ProviderStatic, provider)
+	assert.Equal(t, "static768", model)
+}
+
+func TestExtractFilePaths_CoversLegacyResponseShapes(t *testing.T) {
+	markdown := "### 1. internal/search/engine.go:173-215 (score: 0.91)\n" +
+		"### 2. docs/reference/architecture.md:42-60 (score: 0.81)\n"
+	docsMarkdown := "### 1. README.md (score: 1.00)\n\n" +
+		"### 2. .aman-pm/product/F02-configuration.md (score: 0.97)\n"
+	jsonish := `{"results":[{"file_path":"internal/mcp/server.go"},{"file_path":"README.md"}]}`
+
+	assert.Equal(t,
+		[]string{"internal/search/engine.go", "docs/reference/architecture.md"},
+		extractFilePaths(markdown),
+	)
+	assert.Equal(t,
+		[]string{"README.md", ".aman-pm/product/F02-configuration.md"},
+		extractFilePaths(docsMarkdown),
+	)
+	assert.Equal(t,
+		[]string{"internal/mcp/server.go"},
+		extractFilePaths(jsonish),
+	)
+}
+
+func TestCheckExpected_UsesExactOrDirectoryPrefixOnly(t *testing.T) {
+	results := []string{"internal/store/hnsw.go", "internal/storeother/hnsw.go"}
+
+	passed, idx := checkExpected(results, []string{"internal/store"})
+	assert.True(t, passed)
+	assert.Equal(t, 0, idx)
+
+	passed, idx = checkExpected([]string{"internal/storeother/hnsw.go"}, []string{"internal/store"})
+	assert.False(t, passed)
+	assert.Equal(t, -1, idx)
 }

@@ -40,7 +40,7 @@ func GetIndexInfo(ctx context.Context, metadata MetadataStore, dataDir string, e
 	if model, err := metadata.GetState(ctx, StateKeyIndexModel); err == nil {
 		info.IndexModel = model
 		// Infer backend from model name
-		info.IndexBackend = inferBackendFromModel(model)
+		info.IndexBackend = InferBackendFromModel(model)
 	}
 
 	// Get file sizes - check both BM25 backends
@@ -84,6 +84,11 @@ type EmbedderInfoInput struct {
 	Model      string
 	Backend    string
 	Dimensions int
+}
+
+// InferBackendFromModel infers the backend from an indexed embedding model name.
+func InferBackendFromModel(model string) string {
+	return inferBackendFromModel(model)
 }
 
 // inferBackendFromModel infers the backend from the model name.

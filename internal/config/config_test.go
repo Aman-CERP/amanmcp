@@ -29,6 +29,7 @@ func TestNewConfig_ReturnsDefaults(t *testing.T) {
 	assert.Equal(t, 1500, cfg.Search.ChunkSize)
 	assert.Equal(t, 200, cfg.Search.ChunkOverlap)
 	assert.Equal(t, 20, cfg.Search.MaxResults)
+	assert.Equal(t, "auto", cfg.Search.Reranker.Policy)
 
 	// Embeddings defaults (auto-detection: MLX on Apple Silicon → Ollama → Static)
 	assert.Equal(t, "", cfg.Embeddings.Provider) // Empty triggers auto-detection
@@ -121,6 +122,45 @@ search:
 	assert.Equal(t, 100, cfg.Search.RRFConstant)
 	assert.Equal(t, 2000, cfg.Search.ChunkSize)
 	assert.Equal(t, 50, cfg.Search.MaxResults)
+}
+
+func TestLoad_YamlFile_OverridesRerankerPolicy(t *testing.T) {
+	tmpDir := t.TempDir()
+	configContent := `
+version: 1
+search:
+  reranker:
+    policy: never
+`
+	err := os.WriteFile(filepath.Join(tmpDir, ".amanmcp.yaml"), []byte(configContent), 0o644)
+	require.NoError(t, err)
+
+	cfg, err := Load(tmpDir)
+
+	require.NoError(t, err)
+	assert.Equal(t, "never", cfg.Search.Reranker.Policy)
+	assert.NotEmpty(t, cfg.Search.Profiles, "reranker policy merge must preserve search profile defaults")
+}
+
+func TestLoad_InvalidRerankerPolicy_ReturnsError(t *testing.T) {
+	tmpDir := t.TempDir()
+	configContent := `
+version: 1
+search:
+  reranker:
+    policy: sometimes
+`
+	err := os.WriteFile(filepath.Join(tmpDir, ".amanmcp.yaml"), []byte(configContent), 0o644)
+	require.NoError(t, err)
+
+	cfg, err := Load(tmpDir)
+
+	require.Error(t, err)
+	assert.Nil(t, cfg)
+	assert.Contains(t, err.Error(), "search.reranker.policy")
+	assert.Contains(t, err.Error(), "auto")
+	assert.Contains(t, err.Error(), "always")
+	assert.Contains(t, err.Error(), "never")
 }
 
 func TestLoad_YmlExtension_IsRecognized(t *testing.T) {
@@ -440,6 +480,16 @@ func TestLoad_EnvVarOverridesLogLevel(t *testing.T) {
 	assert.Equal(t, "debug", cfg.Server.LogLevel)
 }
 
+func TestLoad_EnvVarOverridesRerankerPolicy(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("AMANMCP_RERANKER_POLICY", "always")
+
+	cfg, err := Load(tmpDir)
+
+	require.NoError(t, err)
+	assert.Equal(t, "always", cfg.Search.Reranker.Policy)
+}
+
 func TestLoad_EnvVarOverridesTransport(t *testing.T) {
 	// Given: env var for transport
 	tmpDir := t.TempDir()
@@ -633,6 +683,39 @@ embeddings:
 	assert.Equal(t, "project-model", cfg.Embeddings.Model)
 	// And: user config's provider is still used (not overridden by project)
 	assert.Equal(t, "ollama", cfg.Embeddings.Provider)
+}
+
+func TestLoad_UserPathExcludesSurviveProjectPathExcludes(t *testing.T) {
+	configDir := t.TempDir()
+	projectDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+
+	amanmcpDir := filepath.Join(configDir, "amanmcp")
+	require.NoError(t, os.MkdirAll(amanmcpDir, 0o755))
+	userConfig := `
+version: 1
+paths:
+  exclude:
+    - "secrets/**"
+    - "**/.env*"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(amanmcpDir, "config.yaml"), []byte(userConfig), 0o644))
+
+	projectConfig := `
+version: 1
+paths:
+  exclude:
+    - "archive/**"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, ".amanmcp.yaml"), []byte(projectConfig), 0o644))
+
+	cfg, err := Load(projectDir)
+
+	require.NoError(t, err)
+	assert.Contains(t, cfg.Paths.Exclude, "**/.git/**")
+	assert.Contains(t, cfg.Paths.Exclude, "secrets/**")
+	assert.Contains(t, cfg.Paths.Exclude, "**/.env*")
+	assert.Contains(t, cfg.Paths.Exclude, "archive/**")
 }
 
 func TestLoad_EnvVarOverridesUserAndProjectConfig(t *testing.T) {

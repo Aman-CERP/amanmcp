@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Aman-CERP/amanmcp/internal/language"
 	"gopkg.in/yaml.v3"
 )
 
@@ -47,9 +48,9 @@ type PathsConfig struct {
 
 // SearchConfig configures hybrid search parameters.
 // Weights and RRF constant are configurable via:
-//   1. User config (~/.config/amanmcp/config.yaml) - personal defaults
-//   2. Project config (.amanmcp.yaml) - per-repo tuning
-//   3. Env vars (AMANMCP_BM25_WEIGHT, AMANMCP_SEMANTIC_WEIGHT, AMANMCP_RRF_CONSTANT) - highest priority
+//  1. User config (~/.config/amanmcp/config.yaml) - personal defaults
+//  2. Project config (.amanmcp.yaml) - per-repo tuning
+//  3. Env vars (AMANMCP_BM25_WEIGHT, AMANMCP_SEMANTIC_WEIGHT, AMANMCP_RRF_CONSTANT) - highest priority
 type SearchConfig struct {
 	// BM25Weight is the weight for BM25 keyword matching (0.0-1.0).
 	// Must sum to 1.0 with SemanticWeight.
@@ -72,6 +73,34 @@ type SearchConfig struct {
 	ChunkSize    int `yaml:"chunk_size" json:"chunk_size"`
 	ChunkOverlap int `yaml:"chunk_overlap" json:"chunk_overlap"`
 	MaxResults   int `yaml:"max_results" json:"max_results"`
+
+	// Profiles define retrieval eligibility/classification defaults for F39
+	// authority-safe search. They do not make excluded paths indexable; .gitignore
+	// and paths.exclude remain the source of truth for indexability.
+	Profiles map[string]SearchProfileConfig `yaml:"profiles" json:"profiles"`
+
+	// Languages adds validated registrations for compiled-in parsers or explicit
+	// line fallback. Built-in defaults remain active without user config.
+	Languages []language.Definition `yaml:"languages" json:"languages"`
+
+	// Reranker controls the optional post-fusion cross-encoder stage.
+	Reranker RerankerConfig `yaml:"reranker" json:"reranker"`
+}
+
+// RerankerConfig configures the optional post-fusion reranker.
+type RerankerConfig struct {
+	// Policy controls when reranking is attempted: auto, always, or never.
+	Policy string `yaml:"policy" json:"policy"`
+}
+
+// SearchProfileConfig defines data-driven source/profile routing rules.
+type SearchProfileConfig struct {
+	Include              []string `yaml:"include,omitempty" json:"include,omitempty"`
+	Exclude              []string `yaml:"exclude,omitempty" json:"exclude,omitempty"`
+	SourceClasses        []string `yaml:"source_classes,omitempty" json:"source_classes,omitempty"`
+	ExcludeSourceClasses []string `yaml:"exclude_source_classes,omitempty" json:"exclude_source_classes,omitempty"`
+	Authorities          []string `yaml:"authorities,omitempty" json:"authorities,omitempty"`
+	ExcludeAuthorities   []string `yaml:"exclude_authorities,omitempty" json:"exclude_authorities,omitempty"`
 }
 
 // EmbeddingsConfig configures the embedding provider.
@@ -205,7 +234,7 @@ func NewConfig() *Config {
 		Version: 1,
 		Paths: PathsConfig{
 			Include: []string{},
-			Exclude: defaultExcludePatterns,
+			Exclude: append([]string(nil), defaultExcludePatterns...),
 		},
 		Search: SearchConfig{
 			// RCA-015: Favor BM25 over semantic search until vector search is fixed
@@ -219,6 +248,10 @@ func NewConfig() *Config {
 			ChunkSize:    1500,
 			ChunkOverlap: 200,
 			MaxResults:   20,
+			Profiles:     defaultSearchProfiles(),
+			Reranker: RerankerConfig{
+				Policy: "auto",
+			},
 		},
 		Embeddings: EmbeddingsConfig{
 			Provider:             "", // Empty triggers auto-detection: MLX (Apple Silicon) → Ollama → Static
@@ -269,12 +302,12 @@ func NewConfig() *Config {
 			Cooldown:        "1h",  // At most once per hour per project
 		},
 		Contextual: ContextualConfig{
-			Enabled:      true,           // CR-1: Enabled by default for 67% error reduction
-			Model:        "qwen3:0.6b",   // Small, fast model (~50ms per chunk)
-			Timeout:      "5s",           // Per-chunk timeout
-			BatchSize:    8,              // Chunks per batch for prompt caching
-			FallbackOnly: false,          // Use LLM when available
-			CodeChunks:   false,          // RCA-015: Skip prefixes for code (improves vector search)
+			Enabled:      true,         // CR-1: Enabled by default for 67% error reduction
+			Model:        "qwen3:0.6b", // Small, fast model (~50ms per chunk)
+			Timeout:      "5s",         // Per-chunk timeout
+			BatchSize:    8,            // Chunks per batch for prompt caching
+			FallbackOnly: false,        // Use LLM when available
+			CodeChunks:   false,        // RCA-015: Skip prefixes for code (improves vector search)
 		},
 	}
 }
@@ -325,8 +358,10 @@ func loadUserConfig() (*Config, error) {
 		return nil, nil // No user config is fine
 	}
 
-	// Load the config
-	cfg := NewConfig()
+	// Load only user-specified values. Defaults are applied by Load before
+	// merging user and project layers, so starting from NewConfig here would
+	// duplicate default list values.
+	cfg := &Config{}
 	if err := cfg.loadYAML(configPath); err != nil {
 		return nil, fmt.Errorf("failed to load user config from %s: %w", configPath, err)
 	}
@@ -351,8 +386,12 @@ func Load(dir string) (*Config, error) {
 	}
 
 	// Step 2: Load project config (overrides user config)
-	if err := cfg.loadFromFile(dir); err != nil {
+	projectCfg, projectConfigFound, err := loadProjectConfig(dir)
+	if err != nil {
 		return nil, err
+	}
+	if projectConfigFound {
+		cfg.mergeWith(projectCfg)
 	}
 
 	// Step 3: Apply environment variable overrides (highest precedence)
@@ -366,22 +405,22 @@ func Load(dir string) (*Config, error) {
 	return cfg, nil
 }
 
-// loadFromFile attempts to load configuration from .amanmcp.yaml or .amanmcp.yml.
-func (c *Config) loadFromFile(dir string) error {
-	// Try .yaml first (takes precedence)
-	yamlPath := filepath.Join(dir, ".amanmcp.yaml")
-	if _, err := os.Stat(yamlPath); err == nil {
-		return c.loadYAML(yamlPath)
+func loadProjectConfig(dir string) (*Config, bool, error) {
+	for _, name := range []string{".amanmcp.yaml", ".amanmcp.yml"} {
+		path := filepath.Join(dir, name)
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, false, err
+		}
+		cfg := &Config{}
+		if err := cfg.loadYAML(path); err != nil {
+			return nil, false, err
+		}
+		return cfg, true, nil
 	}
-
-	// Try .yml as fallback
-	ymlPath := filepath.Join(dir, ".amanmcp.yml")
-	if _, err := os.Stat(ymlPath); err == nil {
-		return c.loadYAML(ymlPath)
-	}
-
-	// No config file is fine - use defaults
-	return nil
+	return nil, false, nil
 }
 
 // loadYAML loads and merges configuration from a YAML file.
@@ -414,7 +453,7 @@ func (c *Config) mergeWith(other *Config) {
 	}
 	if len(other.Paths.Exclude) > 0 {
 		// Merge with defaults rather than replace
-		c.Paths.Exclude = append(c.Paths.Exclude, other.Paths.Exclude...)
+		c.Paths.Exclude = appendUniqueStrings(c.Paths.Exclude, other.Paths.Exclude...)
 	}
 
 	// Search weights and RRF constant
@@ -439,6 +478,15 @@ func (c *Config) mergeWith(other *Config) {
 	}
 	if other.Search.MaxResults != 0 {
 		c.Search.MaxResults = other.Search.MaxResults
+	}
+	if len(other.Search.Profiles) > 0 {
+		c.Search.Profiles = mergeSearchProfiles(c.Search.Profiles, other.Search.Profiles)
+	}
+	if len(other.Search.Languages) > 0 {
+		c.Search.Languages = append(c.Search.Languages, other.Search.Languages...)
+	}
+	if other.Search.Reranker.Policy != "" {
+		c.Search.Reranker.Policy = other.Search.Reranker.Policy
 	}
 
 	// Embeddings
@@ -551,6 +599,28 @@ func (c *Config) mergeWith(other *Config) {
 	}
 }
 
+func appendUniqueStrings(base []string, values ...string) []string {
+	seen := make(map[string]struct{}, len(base)+len(values))
+	out := make([]string, 0, len(base)+len(values))
+	for _, value := range append(base, values...) {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func validateRerankerPolicy(policy string) error {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case "", "auto", "always", "never":
+		return nil
+	default:
+		return fmt.Errorf("search.reranker.policy must be one of 'auto', 'always', or 'never', got %q", policy)
+	}
+}
+
 // applyEnvOverrides applies AMANMCP_* environment variable overrides.
 func (c *Config) applyEnvOverrides() {
 	// Search weights (BUG-RR1 fix: support explicit zero values via env vars)
@@ -569,6 +639,9 @@ func (c *Config) applyEnvOverrides() {
 		if k, err := strconv.Atoi(v); err == nil && k > 0 {
 			c.Search.RRFConstant = k
 		}
+	}
+	if v := os.Getenv("AMANMCP_RERANKER_POLICY"); v != "" {
+		c.Search.Reranker.Policy = v
 	}
 
 	if v := os.Getenv("AMANMCP_EMBEDDINGS_PROVIDER"); v != "" {
@@ -795,6 +868,17 @@ func (c *Config) Validate() error {
 	if c.Search.ChunkSize < 0 {
 		return fmt.Errorf("chunk_size must be non-negative, got %d", c.Search.ChunkSize)
 	}
+	if err := validateSearchProfiles(c.Search.Profiles); err != nil {
+		return err
+	}
+	normalizedLanguages, err := language.NormalizeUserDefinitions(c.Search.Languages)
+	if err != nil {
+		return fmt.Errorf("search.languages: %w", err)
+	}
+	c.Search.Languages = normalizedLanguages
+	if err := validateRerankerPolicy(c.Search.Reranker.Policy); err != nil {
+		return err
+	}
 
 	// Validate provider (yzma removed in v0.1.67, empty string allowed for auto-detection)
 	// BUG-060 FIX: Added 'mlx' to valid providers list
@@ -859,6 +943,20 @@ func (c *Config) MergeNewDefaults() []string {
 	if c.Search.RRFConstant == 0 {
 		c.Search.RRFConstant = defaults.Search.RRFConstant
 		added = append(added, "search.rrf_constant")
+	}
+	if len(c.Search.Profiles) == 0 {
+		c.Search.Profiles = cloneSearchProfiles(defaults.Search.Profiles)
+		added = append(added, "search.profiles")
+	} else {
+		before := len(c.Search.Profiles)
+		c.Search.Profiles = mergeSearchProfiles(defaults.Search.Profiles, c.Search.Profiles)
+		if len(c.Search.Profiles) > before {
+			added = append(added, "search.profiles")
+		}
+	}
+	if c.Search.Reranker.Policy == "" {
+		c.Search.Reranker.Policy = defaults.Search.Reranker.Policy
+		added = append(added, "search.reranker.policy")
 	}
 
 	// Embeddings - thermal management (added in v0.1.56)

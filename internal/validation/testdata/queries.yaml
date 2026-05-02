@@ -1,209 +1,1079 @@
 # Validation Queries
 # ===================
-# Data-driven validation queries for testing search quality.
+# Single source of truth for legacy validation and the F37 graded search corpus.
 #
-# This file is loaded at runtime - no rebuild required to modify queries.
-# Follow the Unix Philosophy: "Data-driven behavior"
+# Compatibility:
+#   - tier1, tier2, and negative keep the existing validation behavior.
+#   - expected remains a legacy shorthand and maps to grade-3 expected_results.
+#   - graded entries are for the F37 eval runner and are not executed by the
+#     legacy Tier 1/Tier 2/negative integration tests.
 #
-# Query Structure:
-#   id:       Unique identifier (T1-Q1, T2-Q1, N-Q1)
-#   name:     Human-readable description
-#   query:    The search query to execute
-#   tool:     MCP tool to use (search, search_code, search_docs)
-#   expected: File paths or prefixes that should appear in results
-#   notes:    Optional explanation (for maintainers)
+# F37 fields:
+#   id, name, query, tool, class, job, expected_results, holdout, source, notes
 #
-# Expected Matching:
-#   - Prefix match: "internal/search/" matches "internal/search/engine.go"
-#   - Contains match: "fusion.go" matches "internal/search/fusion.go"
-#   - Multiple expected: ANY match = pass
+# Allowed classes:
+#   exact_identifier, path_lookup, config_error, natural_language_intent,
+#   caller_callee, impact_analysis, docs_to_code, test_to_implementation,
+#   adr_to_code, cross_file_subsystem, negative_adversarial
 #
-# Design Principles (Updated 2026-01-15):
-#   1. Queries must not match test infrastructure (avoid dogfood script phrases)
-#   2. Expected results must be indexed (no docs/** expectations)
-#   3. Queries should be specific enough to avoid ambiguity
-#   4. Test semantic understanding, not just keyword matching
+# Allowed jobs:
+#   code, project_memory, decision_lookup, pm_inspection, exact_lookup, general
 
 tier1:
-  # === Code Location Queries ===
-  # These test semantic understanding of WHERE code lives
-
   - id: T1-Q1
     name: HNSW vector storage
     query: "hnsw.go VectorStore"
     tool: search
-    expected:
-      - internal/store/hnsw.go
-    notes: "Filename + type name targets vector store implementation"
+    class: exact_identifier
+    job: exact_lookup
+    expected: [internal/store/hnsw.go]
+    expected_results:
+      - path: internal/store/hnsw.go
+        symbol: HNSWStore
+        grade: 3
+        rationale: "Canonical vector store implementation."
+    holdout: false
+    source: dogfood-tier1
+    notes: "Filename plus type name targets vector store implementation."
 
   - id: T1-Q2
     name: RRF fusion algorithm
     query: "RRF fusion algorithm reciprocal rank"
     tool: search
-    expected:
-      - internal/search/fusion.go
-      - internal/search/multi_fusion.go
-    notes: "Algorithm-specific terms find fusion implementation"
+    class: exact_identifier
+    job: code
+    expected: [internal/search/fusion.go, internal/search/multi_fusion.go]
+    expected_results:
+      - path: internal/search/fusion.go
+        symbol: Fuse
+        grade: 3
+        rationale: "Owns reciprocal-rank fusion behavior."
+      - path: internal/search/multi_fusion.go
+        grade: 2
+        rationale: "Supports multi-query fusion."
+    holdout: false
+    source: dogfood-tier1
+    notes: "Algorithm-specific terms find fusion implementation."
 
   - id: T1-Q3
     name: Embedder interface
-    query: "Embedder interface definition"
-    tool: search
-    expected:
-      - internal/embed/
-    notes: "Interface and factory definitions in embed package"
+    query: "Embedder"
+    tool: search_code
+    class: exact_identifier
+    job: exact_lookup
+    expected: [internal/embed/]
+    expected_results:
+      - path: internal/embed/types.go
+        symbol: Embedder
+        grade: 3
+        rationale: "Defines the embedder interface contract."
+    holdout: false
+    source: dogfood-tier1
+    notes: "Exact exported interface name in embed package."
 
   - id: T1-Q4
     name: MCP tool registration
     query: "mcp.AddTool server registration"
     tool: search
-    expected:
-      - internal/mcp/server.go
-    notes: "Exact function name targets registration code"
-
-  # === Architecture Queries ===
-  # These test understanding of system components
+    class: exact_identifier
+    job: exact_lookup
+    expected: [internal/mcp/server.go]
+    expected_results:
+      - path: internal/mcp/server.go
+        symbol: registerTools
+        grade: 3
+        rationale: "Registers the MCP search tools."
+    holdout: false
+    source: dogfood-tier1
+    notes: "Exact function name targets registration code."
 
   - id: T1-Q5
     name: Tree-sitter chunking
     query: "tree-sitter parser chunking"
     tool: search
-    expected:
-      - internal/chunk/parser.go
-      - internal/chunk/code_chunker.go
-    notes: "Tree-sitter specific to chunk package"
+    class: natural_language_intent
+    job: code
+    expected: [internal/chunk/parser.go, internal/chunk/code_chunker.go]
+    expected_results:
+      - path: internal/chunk/parser.go
+        grade: 3
+        rationale: "Owns parser integration for tree-sitter chunking."
+      - path: internal/chunk/code_chunker.go
+        grade: 2
+        rationale: "Uses parsed symbols to build chunks."
+    holdout: false
+    source: dogfood-tier1
+    notes: "Tree-sitter specific to chunk package."
 
   - id: T1-Q6
     name: BM25 search
-    query: "BM25 keyword search scoring"
-    tool: search
-    expected:
-      - internal/store/bm25.go
-      - internal/store/sqlite_bm25.go
-    notes: "BM25 algorithm in store package"
+    query: "SQLiteBM25Index"
+    tool: search_code
+    class: exact_identifier
+    job: exact_lookup
+    expected: [internal/store/sqlite_bm25.go, internal/store/bm25.go]
+    expected_results:
+      - path: internal/store/sqlite_bm25.go
+        symbol: SQLiteBM25Index
+        grade: 3
+        rationale: "Owns the active SQLite BM25 implementation."
+      - path: internal/store/bm25.go
+        grade: 2
+        rationale: "Legacy BM25 backend remains useful supporting context."
+    holdout: false
+    source: dogfood-tier1
+    notes: "BM25 algorithm in store package."
 
   - id: T1-Q7
     name: Ollama embedder
     query: "Ollama HTTP API embedding"
     tool: search
-    expected:
-      - internal/embed/ollama.go
-    notes: "Specific embedder implementation"
+    class: exact_identifier
+    job: code
+    expected: [internal/embed/ollama.go]
+    expected_results:
+      - path: internal/embed/ollama.go
+        symbol: OllamaEmbedder
+        grade: 3
+        rationale: "Owns Ollama HTTP embedding calls."
+    holdout: false
+    source: dogfood-tier1
+    notes: "Specific embedder implementation."
 
   - id: T1-Q8
     name: File watcher
     query: "file watcher debouncer"
     tool: search
-    expected:
-      - internal/watcher/debouncer.go
-    notes: "Specific component in watcher package"
-
-  # === Symbol Queries ===
-  # These use search_code for symbol-aware search
+    class: path_lookup
+    job: code
+    expected: [internal/watcher/debouncer.go]
+    expected_results:
+      - path: internal/watcher/debouncer.go
+        grade: 3
+        rationale: "Canonical debouncer implementation for file watching."
+    holdout: false
+    source: dogfood-tier1
+    notes: "Specific component in watcher package."
 
   - id: T1-Q9
     name: Chunk type definition
     query: "type Chunk struct"
     tool: search_code
-    expected:
-      - internal/chunk/types.go
-    notes: "Exact type definition pattern"
+    class: exact_identifier
+    job: exact_lookup
+    expected: [internal/chunk/types.go]
+    expected_results:
+      - path: internal/chunk/types.go
+        grade: 3
+        rationale: "Defines the Chunk type."
+    holdout: false
+    source: dogfood-tier1
+    notes: "Exact type definition pattern."
 
   - id: T1-Q10
     name: Config type definition
     query: "type Config struct"
     tool: search_code
-    expected:
-      - internal/config/config.go
-      - internal/daemon/config.go
-    notes: "Config struct in config package"
+    class: exact_identifier
+    job: exact_lookup
+    expected: [internal/config/config.go, internal/daemon/config.go]
+    expected_results:
+      - path: internal/config/config.go
+        grade: 3
+        rationale: "Primary user configuration type."
+      - path: internal/daemon/config.go
+        grade: 2
+        rationale: "Daemon-specific configuration support."
+    holdout: false
+    source: dogfood-tier1
+    notes: "Config struct in config package."
 
   - id: T1-Q11
     name: OllamaEmbedder type
     query: "OllamaEmbedder"
     tool: search_code
-    expected:
-      - internal/embed/ollama.go
-    notes: "Specific type name"
+    class: exact_identifier
+    job: exact_lookup
+    expected: [internal/embed/ollama.go]
+    expected_results:
+      - path: internal/embed/ollama.go
+        grade: 3
+        rationale: "Exact type owner."
+    holdout: false
+    source: dogfood-tier1
+    notes: "Specific type name."
 
   - id: T1-Q12
     name: SearchOptions type
     query: "SearchOptions"
     tool: search_code
-    expected:
-      - internal/search/options.go
-      - internal/search/types.go
-    notes: "SearchOptions struct in search package"
+    class: exact_identifier
+    job: exact_lookup
+    expected: [internal/search/types.go, internal/search/options.go]
+    expected_results:
+      - path: internal/search/types.go
+        symbol: SearchOptions
+        grade: 3
+        rationale: "Primary options type definition."
+      - path: internal/search/options.go
+        grade: 2
+        rationale: "Search option validation and filtering helpers."
+    holdout: false
+    source: dogfood-tier1
+    notes: "SearchOptions struct in search package."
 
 tier2:
-  # === Tier 2: Documentation & Advanced Queries ===
-  # Lower priority, may have more variable results
-  # Note: Using 'search' instead of 'search_docs' since our docs are indexed as regular files
-
   - id: T2-Q1
     name: Configuration package
     query: ".amanmcp.yaml configuration"
-    tool: search
-    expected:
-      - internal/config/
-      - README.md
-    notes: "Config implementation and docs both valid"
+    tool: search_docs
+    class: docs_to_code
+    job: project_memory
+    expected: [.aman-pm/product/F02-configuration.md, docs/reference/error-codes.md]
+    expected_results:
+      - path: .aman-pm/product/F02-configuration.md
+        grade: 3
+        rationale: "Product source of truth for .amanmcp.yaml behavior."
+      - path: docs/reference/error-codes.md
+        grade: 2
+        rationale: "User-facing configuration recovery guidance."
+    holdout: false
+    source: dogfood-tier2
+    notes: "Config implementation and docs both valid."
 
   - id: T2-Q2
     name: Installation instructions
     query: "brew tap install amanmcp"
-    tool: search
-    expected:
-      - README.md
-      - internal/lifecycle/
-    notes: "Installation in README or lifecycle package"
+    tool: search_docs
+    class: docs_to_code
+    job: project_memory
+    expected: [README.md, internal/lifecycle/]
+    expected_results:
+      - path: README.md
+        grade: 3
+        rationale: "User-facing installation guidance."
+      - path: internal/lifecycle/
+        grade: 2
+        rationale: "Lifecycle code can support install behavior."
+    holdout: false
+    source: dogfood-tier2
+    notes: "Installation in README or lifecycle package."
 
   - id: T2-Q3
     name: Error handling
     query: "error handling retry"
     tool: search_code
-    expected:
-      - internal/embed/retry.go
-      - internal/
-    notes: "Retry logic in embed package"
+    class: caller_callee
+    job: code
+    expected: [internal/embed/retry.go, internal/]
+    expected_results:
+      - path: internal/embed/retry.go
+        symbol: Retry
+        grade: 3
+        rationale: "Owns retry error handling."
+    holdout: false
+    source: dogfood-tier2
+    notes: "Retry logic in embed package."
 
   - id: T2-Q4
     name: Query decomposition
     query: "query decomposition multi-query"
     tool: search_code
-    expected:
-      - internal/search/decomposer.go
-      - internal/search/multi_query.go
-    notes: "Multi-query feature in search package"
+    class: cross_file_subsystem
+    job: code
+    expected: [internal/search/decomposer.go, internal/search/multi_query.go]
+    expected_results:
+      - path: internal/search/decomposer.go
+        symbol: PatternDecomposer
+        grade: 3
+        rationale: "Owns query decomposition."
+      - path: internal/search/multi_query.go
+        grade: 2
+        rationale: "Executes decomposed multi-query search."
+    holdout: false
+    source: dogfood-tier2
+    notes: "Multi-query feature in search package."
 
 negative:
-  # === Negative Tests ===
-  # These should NOT crash, regardless of results
-
   - id: N-Q1
     name: Non-existent symbol
     query: "xyznonexistent123"
     tool: search
+    class: negative_adversarial
+    job: general
     expected: []
-    notes: "Should return empty, not crash"
+    holdout: false
+    source: dogfood-negative
+    notes: "Should return empty, not crash."
 
   - id: N-Q2
     name: SQL injection attempt
     query: "func(); DROP TABLE"
     tool: search
+    class: negative_adversarial
+    job: general
     expected: []
-    notes: "Tests input sanitization"
+    holdout: false
+    source: dogfood-negative
+    notes: "Tests input sanitization."
 
   - id: N-Q3
     name: Empty query
     query: ""
     tool: search
+    class: negative_adversarial
+    job: general
     expected: []
-    notes: "Empty query should be handled gracefully"
+    holdout: false
+    source: dogfood-negative
+    notes: "Empty query should be handled gracefully."
 
   - id: N-Q4
     name: Single character
     query: "a"
     tool: search
+    class: negative_adversarial
+    job: general
     expected: []
-    notes: "Very short queries should not crash"
+    holdout: false
+    source: dogfood-negative
+    notes: "Very short queries should not crash."
+
+  - id: N-Q5
+    name: Generated eval report path remains excluded
+    query: ".aman-pm/validation/search-eval/latest.json"
+    tool: search
+    class: negative_adversarial
+    job: exact_lookup
+    expected_results:
+      - path: .aman-pm/validation/search-eval/latest.json
+        grade: 0
+        rationale: "Generated validation reports are excluded from the searchable corpus."
+    holdout: false
+    source: sprint13-exact-gate
+    notes: "Exact lookup must not bypass generated-file exclusions."
+
+  - id: N-Q6
+    name: Git internals remain excluded
+    query: ".git/config"
+    tool: search
+    class: negative_adversarial
+    job: exact_lookup
+    expected_results:
+      - path: .git/config
+        grade: 0
+        rationale: "Git internals are excluded even for exact path lookup."
+    holdout: false
+    source: sprint13-exact-gate
+    notes: "Exact lookup must not bypass .gitignore-style exclusions."
+
+graded:
+  - id: PATH-Q01
+    name: MCP server file path lookup
+    query: "internal/mcp/server.go"
+    tool: search
+    class: path_lookup
+    job: exact_lookup
+    expected_results:
+      - path: internal/mcp/server.go
+        grade: 3
+        rationale: "Direct path query should retrieve the file."
+    holdout: false
+    source: manual
+
+  - id: PATH-Q02
+    name: SQLite BM25 path lookup
+    query: "internal/store/sqlite_bm25.go"
+    tool: search
+    class: path_lookup
+    job: exact_lookup
+    expected_results:
+      - path: internal/store/sqlite_bm25.go
+        grade: 3
+        rationale: "Direct backend file path."
+    holdout: false
+    source: manual
+
+  - id: PATH-Q03
+    name: Chunk extractor path lookup
+    query: "internal/chunk/extractor.go"
+    tool: search
+    class: path_lookup
+    job: exact_lookup
+    expected_results:
+      - path: internal/chunk/extractor.go
+        grade: 3
+        rationale: "Direct chunk extractor file path."
+    holdout: false
+    source: manual
+
+  - id: EXACT-Q01
+    name: Mixed-case SearchOptions lookup
+    query: "SearchOptions"
+    tool: search_code
+    class: exact_identifier
+    job: exact_lookup
+    expected_results:
+      - path: internal/search/types.go
+        symbol: SearchOptions
+        grade: 3
+        rationale: "Mixed-case type identifier should remain lexical-preserving."
+      - path: internal/search/options.go
+        grade: 2
+        rationale: "Search options helpers are useful secondary evidence."
+    holdout: false
+    source: sprint13-exact-gate
+
+  - id: EXACT-Q02
+    name: Punctuation-heavy MCP tool registration lookup
+    query: "mcp.AddTool(s.mcp, &mcp.Tool"
+    tool: search_code
+    class: exact_identifier
+    job: exact_lookup
+    expected_results:
+      - path: internal/mcp/server.go
+        symbol: registerTools
+        grade: 3
+        rationale: "Punctuation-heavy SDK call should find the registration owner."
+    holdout: false
+    source: sprint13-exact-gate
+
+  - id: QUOTE-Q01
+    name: Query parameter literal lookup
+    query: "\"query parameter is required\""
+    tool: search_code
+    class: quoted_string
+    job: exact_lookup
+    expected_results:
+      - path: internal/mcp/server.go
+        grade: 3
+        rationale: "MCP handlers own the user-facing validation literal."
+      - path: internal/validation/validation.go
+        grade: 2
+        rationale: "Validation adapter uses the same literal for eval behavior."
+    holdout: false
+    source: sprint13-exact-gate
+
+  - id: QUOTE-Q02
+    name: Search quality schema literal lookup
+    query: "\"search_quality.v1\""
+    tool: search_code
+    class: quoted_string
+    job: exact_lookup
+    expected_results:
+      - path: internal/mcp/search_output.go
+        grade: 3
+        rationale: "Search output schema version constant owns the literal."
+    holdout: false
+    source: sprint13-exact-gate
+
+  - id: QUOTE-Q03
+    name: Vector unavailable literal lookup
+    query: "\"vector_unavailable\""
+    tool: search_code
+    class: quoted_string
+    job: exact_lookup
+    expected_results:
+      - path: internal/mcp/search_output.go
+        grade: 3
+        rationale: "Search quality degraded-mode literal is defined in structured MCP output."
+    holdout: false
+    source: sprint13-exact-gate
+
+  - id: CONFIG-Q01
+    name: Default search weights config
+    query: "default BM25 semantic weights configuration"
+    tool: search_code
+    class: config_error
+    job: code
+    expected_results:
+      - path: internal/config/config.go
+        grade: 3
+        rationale: "Configuration defaults define search weights."
+    holdout: false
+    source: manual
+
+  - id: CONFIG-Q02
+    name: Exclusion pattern configuration
+    query: "paths exclude gitignore configuration"
+    tool: search_code
+    class: config_error
+    job: code
+    expected_results:
+      - path: internal/config/config.go
+        grade: 3
+        rationale: "Config schema owns path exclusion settings."
+      - path: internal/gitignore/gitignore.go
+        grade: 2
+        rationale: "Gitignore matcher enforces exclusions."
+    holdout: false
+    source: manual
+
+  - id: NL-Q01
+    name: How indexing skips unchanged files
+    query: "how does indexing avoid reprocessing unchanged files"
+    tool: search_code
+    class: natural_language_intent
+    job: code
+    expected_results:
+      - path: internal/index/runner.go
+        grade: 3
+        rationale: "Index runner coordinates incremental indexing."
+      - path: internal/store/metadata.go
+        grade: 2
+        rationale: "Metadata stores file hashes used for change detection."
+    holdout: false
+    source: manual
+
+  - id: CALL-Q01
+    name: Search engine caller path
+    query: "MCP server calls search engine"
+    tool: search_code
+    class: caller_callee
+    job: code
+    expected_results:
+      - path: internal/mcp/server.go
+        grade: 3
+        rationale: "MCP handlers call the search engine."
+      - path: internal/search/engine.go
+        grade: 2
+        rationale: "Search engine callee implementation."
+    holdout: false
+    source: manual
+
+  - id: CALL-Q02
+    name: Embedder factory caller
+    query: "where is NewEmbedder called when validation starts"
+    tool: search_code
+    class: caller_callee
+    job: code
+    expected_results:
+      - path: internal/validation/validation.go
+        grade: 3
+        rationale: "Validation setup calls embed.NewEmbedder."
+      - path: internal/embed/factory.go
+        grade: 2
+        rationale: "Factory creates embedder implementations."
+    holdout: false
+    source: manual
+
+  - id: IMPACT-Q01
+    name: Changing RRF score impact
+    query: "what changes if reciprocal rank fusion scoring changes"
+    tool: search_code
+    class: impact_analysis
+    job: code
+    expected_results:
+      - path: internal/search/fusion.go
+        grade: 3
+        rationale: "Primary scoring function impacted by RRF changes."
+      - path: internal/search/fusion_test.go
+        grade: 2
+        rationale: "Regression tests for RRF behavior."
+    holdout: false
+    source: manual
+
+  - id: IMPACT-Q02
+    name: Changing chunk symbol extraction impact
+    query: "what is affected by changing symbol extraction"
+    tool: search_code
+    class: impact_analysis
+    job: code
+    expected_results:
+      - path: internal/chunk/extractor.go
+        grade: 3
+        rationale: "Owns extracted symbol metadata."
+      - path: internal/chunk/parser.go
+        grade: 2
+        rationale: "Parser supplies syntax tree input."
+    holdout: false
+    source: manual
+
+  - id: IMPACT-Q03
+    name: Changing gitignore matching impact
+    query: "what is affected by changing gitignore exclusion matching"
+    tool: search_code
+    class: impact_analysis
+    job: code
+    expected_results:
+      - path: internal/gitignore/gitignore.go
+        grade: 3
+        rationale: "Owns ignore pattern matching semantics."
+      - path: internal/scanner/scanner.go
+        grade: 2
+        rationale: "Scanner applies exclusions during traversal."
+    holdout: false
+    source: manual
+
+  - id: DOC-Q01
+    name: Testing guide to validation implementation
+    query: "validation test system loads queries yaml at runtime"
+    tool: search_code
+    class: docs_to_code
+    job: project_memory
+    expected_results:
+      - path: internal/validation/validation.go
+        grade: 3
+        rationale: "Loader implements runtime query loading."
+      - path: internal/validation/validation_test.go
+        grade: 2
+        rationale: "Tests exercise validation behavior."
+    holdout: false
+    source: manual
+
+  - id: DOC-Q02
+    name: Configuration docs to loader
+    query: "configuration yaml defaults and load"
+    tool: search_code
+    class: docs_to_code
+    job: project_memory
+    expected_results:
+      - path: internal/config/config.go
+        grade: 3
+        rationale: "Configuration loader and defaults implementation."
+    holdout: false
+    source: manual
+
+  - id: TEST-Q01
+    name: Classifier tests to implementation
+    query: "TestClassifyQueryType classifier implementation"
+    tool: search_code
+    class: test_to_implementation
+    job: code
+    expected_results:
+      - path: internal/search/classifier.go
+        grade: 3
+        rationale: "Classifier implementation behind classifier tests."
+      - path: internal/search/classifier_test.go
+        grade: 2
+        rationale: "Focused test coverage for classifier behavior."
+    holdout: false
+    source: manual
+
+  - id: TEST-Q02
+    name: Scanner tests to implementation
+    query: "scanner excludes node_modules git directories test"
+    tool: search_code
+    class: test_to_implementation
+    job: code
+    expected_results:
+      - path: internal/scanner/scanner.go
+        grade: 3
+        rationale: "Scanner applies file traversal and exclusion logic."
+      - path: internal/scanner/scanner_test.go
+        grade: 2
+        rationale: "Regression tests for scanner behavior."
+    holdout: false
+    source: manual
+
+  - id: TEST-Q03
+    name: MCP tools tests to handlers
+    query: "search_code tool validation tests"
+    tool: search_code
+    class: test_to_implementation
+    job: code
+    expected_results:
+      - path: internal/mcp/server.go
+        grade: 3
+        rationale: "Tool handlers live in the MCP server."
+      - path: internal/mcp/tools_test.go
+        grade: 2
+        rationale: "Tests cover search_code input behavior."
+    holdout: false
+    source: manual
+
+  - id: ADR-Q01
+    name: ADR RRF to implementation
+    query: "ADR-004 hybrid search RRF implementation"
+    tool: search_code
+    class: adr_to_code
+    job: decision_lookup
+    expected_results:
+      - path: internal/search/fusion.go
+        grade: 3
+        rationale: "Code implementation of the RRF decision."
+      - path: internal/search/engine.go
+        grade: 2
+        rationale: "Search engine applies fused results."
+    holdout: false
+    source: manual
+
+  - id: ADR-Q02
+    name: ADR tree-sitter to implementation
+    query: "ADR-003 tree-sitter chunking implementation"
+    tool: search_code
+    class: adr_to_code
+    job: decision_lookup
+    expected_results:
+      - path: internal/chunk/parser.go
+        grade: 3
+        rationale: "Parser implements tree-sitter integration."
+      - path: internal/chunk/languages.go
+        grade: 2
+        rationale: "Language definitions support tree-sitter parsing."
+    holdout: false
+    source: manual
+
+  - id: ADR-Q03
+    name: ADR contextual retrieval to implementation
+    query: "ADR-033 contextual retrieval implementation"
+    tool: search_code
+    class: adr_to_code
+    job: decision_lookup
+    expected_results:
+      - path: internal/index/contextual.go
+        grade: 3
+        rationale: "Contextual indexing implementation."
+      - path: internal/index/contextual_pattern.go
+        grade: 2
+        rationale: "Pattern-based contextual fallback."
+    holdout: false
+    source: manual
+
+  - id: ADR-DOC-Q01
+    name: Current ADR lookup through docs mode
+    query: "AmanMCP Roadmap Execution Substrate ADR"
+    tool: search_docs
+    mode: decisions
+    class: natural_language_intent
+    job: decision_lookup
+    expected_results:
+      - path: .aman-pm/decisions/ADR-039-roadmap-execution-substrate.md
+        grade: 3
+        rationale: "Current human-authored ADR for the roadmap execution substrate."
+    holdout: false
+    source: manual
+
+  - id: ADR-DOC-Q02
+    name: Historical ADR lookup through explicit history mode
+    query: "MLX default embedder superseded by ADR-037"
+    tool: search_docs
+    mode: decision-history
+    class: natural_language_intent
+    job: decision_lookup
+    expected_results:
+      - path: .aman-pm/decisions/ADR-035-mlx-default-embedder.md
+        grade: 3
+        rationale: "Superseded ADR remains retrievable only through explicit history mode."
+      - path: .aman-pm/decisions/ADR-037-ollama-default-embedder.md
+        grade: 2
+        rationale: "Current replacement decision provides context for the supersession."
+    holdout: false
+    source: manual
+
+  - id: CROSS-Q01
+    name: Search request subsystem
+    query: "search request flows from MCP handler through engine to stores"
+    tool: search_code
+    class: cross_file_subsystem
+    job: code
+    expected_results:
+      - path: internal/mcp/server.go
+        grade: 3
+        rationale: "Request entry point."
+      - path: internal/search/engine.go
+        grade: 3
+        rationale: "Coordinates BM25 and vector search."
+      - path: internal/store/sqlite_bm25.go
+        grade: 2
+        rationale: "Keyword backend called by engine."
+    holdout: false
+    source: manual
+
+  - id: CROSS-Q02
+    name: Indexing subsystem
+    query: "indexing pipeline scanner chunker embedder metadata store"
+    tool: search_code
+    class: cross_file_subsystem
+    job: code
+    expected_results:
+      - path: internal/index/runner.go
+        grade: 3
+        rationale: "Coordinates indexing pipeline."
+      - path: internal/scanner/scanner.go
+        grade: 2
+        rationale: "Discovers files for indexing."
+      - path: internal/chunk/code_chunker.go
+        grade: 2
+        rationale: "Chunks code before embedding."
+    holdout: false
+    source: manual
+
+  - id: PM-Q01
+    name: Project memory query metrics
+    query: "zero result query telemetry project memory"
+    tool: search_code
+    class: natural_language_intent
+    job: project_memory
+    expected_results:
+      - path: internal/telemetry/query_metrics.go
+        grade: 3
+        rationale: "Defines query metrics captured for later recall."
+      - path: internal/telemetry/store.go
+        grade: 2
+        rationale: "Persists telemetry records."
+    holdout: false
+    source: manual
+
+  - id: PM-Q02
+    name: PM inspection validation corpus
+    query: "query corpus schema validation duplicate IDs"
+    tool: search_code
+    class: config_error
+    job: pm_inspection
+    expected_results:
+      - path: internal/validation/validation.go
+        grade: 3
+        rationale: "Schema validator rejects malformed corpus data."
+      - path: internal/validation/validation_test.go
+        grade: 2
+        rationale: "Tests cover malformed corpus rejection."
+    holdout: false
+    source: manual
+
+  - id: PM-Q03
+    name: PM inspection config defaults
+    query: "validation of config edge cases"
+    tool: search_code
+    class: config_error
+    job: pm_inspection
+    expected_results:
+      - path: internal/config/config_edge_cases_test.go
+        grade: 3
+        rationale: "Documents config validation edge cases."
+      - path: internal/config/config.go
+        grade: 2
+        rationale: "Implements config validation and defaults."
+    holdout: false
+    source: manual
+
+  - id: PM-Q04
+    name: Project memory zero result store
+    query: "record zero result queries for later search quality analysis"
+    tool: search_code
+    class: natural_language_intent
+    job: project_memory
+    expected_results:
+      - path: internal/telemetry/store.go
+        grade: 3
+        rationale: "Persists zero-result query telemetry."
+      - path: internal/telemetry/query_metrics.go
+        grade: 2
+        rationale: "Defines telemetry metrics used for search quality analysis."
+    holdout: false
+    source: manual
+
+  - id: NEG-Q05
+    name: Test fixture pollution trap
+    query: "validation query should not match this corpus file"
+    tool: search
+    class: negative_adversarial
+    job: general
+    expected_results:
+      - path: internal/validation/testdata/queries.yaml
+        grade: 0
+        rationale: "Validation corpus itself is excluded and should not be the answer."
+    holdout: false
+    source: manual
+
+  - id: NEG-Q06
+    name: Archive material trap
+    query: "deprecated validation v0.2 pointer archive"
+    tool: search
+    class: negative_adversarial
+    job: general
+    expected_results:
+      - path: archive/
+        grade: 0
+        rationale: "Archive content is stale and excluded from the active index."
+    holdout: false
+    source: manual
+
+  - id: NEG-Q07
+    name: Generated output trap
+    query: "latest eval report generated markdown search-eval"
+    tool: search
+    class: negative_adversarial
+    job: general
+    expected_results:
+      - path: .aman-pm/validation/search-eval/latest.md
+        grade: 0
+        rationale: "Generated reports must not become retrieval evidence."
+    holdout: false
+    source: manual
+
+  - id: HOLDOUT-Q01
+    name: Holdout exact option query
+    query: "WithMultiQuerySearch option"
+    tool: search_code
+    class: exact_identifier
+    job: exact_lookup
+    expected_results:
+      - path: internal/search/options.go
+        symbol: WithMultiQuerySearch
+        grade: 3
+        rationale: "Exact option owner."
+    holdout: true
+    source: holdout
+
+  - id: HOLDOUT-Q02
+    name: Holdout path telemetry store
+    query: "internal/telemetry/store.go"
+    tool: search
+    class: path_lookup
+    job: exact_lookup
+    expected_results:
+      - path: internal/telemetry/store.go
+        grade: 3
+        rationale: "Direct path query for telemetry store."
+    holdout: true
+    source: holdout
+
+  - id: HOLDOUT-Q03
+    name: Holdout config preflight
+    query: "preflight checks validate ollama mlx configuration"
+    tool: search_code
+    class: config_error
+    job: code
+    expected_results:
+      - path: internal/preflight/check.go
+        grade: 3
+        rationale: "Preflight checker validates local dependencies."
+    holdout: true
+    source: holdout
+
+  - id: HOLDOUT-Q04
+    name: Holdout natural language reranker
+    query: "how are search results reranked after retrieval"
+    tool: search_code
+    class: natural_language_intent
+    job: code
+    expected_results:
+      - path: internal/search/mlx_reranker.go
+        grade: 3
+        rationale: "Reranker implementation for search results."
+      - path: internal/search/engine.go
+        grade: 2
+        rationale: "Engine integrates reranking."
+    holdout: true
+    source: holdout
+
+  - id: HOLDOUT-Q05
+    name: Holdout caller callee resources
+    query: "MCP read resource path validation handler"
+    tool: search_code
+    class: caller_callee
+    job: code
+    expected_results:
+      - path: internal/mcp/resources.go
+        grade: 3
+        rationale: "Resource handler validates and reads paths."
+    holdout: true
+    source: holdout
+
+  - id: HOLDOUT-Q06
+    name: Holdout impact embedder dimension
+    query: "what breaks if embedding dimensions change"
+    tool: search_code
+    class: impact_analysis
+    job: code
+    expected_results:
+      - path: internal/search/engine_test.go
+        grade: 3
+        rationale: "Tests dimension mismatch failure paths."
+      - path: internal/embed/model.go
+        grade: 2
+        rationale: "Embedding model metadata includes dimensions."
+    holdout: true
+    source: holdout
+
+  - id: HOLDOUT-Q07
+    name: Holdout docs to command reference
+    query: "serve command stdin validation implementation"
+    tool: search_code
+    class: docs_to_code
+    job: project_memory
+    expected_results:
+      - path: cmd/amanmcp/cmd/serve.go
+        grade: 3
+        rationale: "Serve command implements stdin validation behavior."
+      - path: cmd/amanmcp/cmd/serve_test.go
+        grade: 2
+        rationale: "Tests cover serve startup validation."
+    holdout: true
+    source: holdout
+
+  - id: HOLDOUT-Q08
+    name: Holdout test to implementation
+    query: "TestParseQueryConfig malformed corpus implementation"
+    tool: search_code
+    class: test_to_implementation
+    job: code
+    expected_results:
+      - path: internal/validation/validation.go
+        grade: 3
+        rationale: "Implements corpus parsing and validation."
+      - path: internal/validation/validation_test.go
+        grade: 2
+        rationale: "Contains malformed corpus tests."
+    holdout: true
+    source: holdout
+
+  - id: HOLDOUT-Q09
+    name: Holdout ADR query expansion
+    query: "ADR-034 query expansion BM25 code"
+    tool: search_code
+    class: adr_to_code
+    job: decision_lookup
+    expected_results:
+      - path: internal/search/expander.go
+        grade: 3
+        rationale: "Implements query expansion."
+      - path: internal/search/expander_test.go
+        grade: 2
+        rationale: "Tests expansion behavior."
+    holdout: true
+    source: holdout
+
+  - id: HOLDOUT-Q10
+    name: Holdout cross-file embedder cache
+    query: "cached embedder lock factory integration"
+    tool: search_code
+    class: cross_file_subsystem
+    job: code
+    expected_results:
+      - path: internal/embed/cached.go
+        grade: 3
+        rationale: "Cached embedder wrapper."
+      - path: internal/embed/lock.go
+        grade: 2
+        rationale: "Coordinates embedding model lock."
+      - path: internal/embed/factory.go
+        grade: 2
+        rationale: "Factory wires embedder implementations."
+    holdout: true
+    source: holdout
+
+  - id: HOLDOUT-Q11
+    name: Holdout PM inspection changelog trap
+    query: "unreleased changelog validation artifact"
+    tool: search
+    class: negative_adversarial
+    job: pm_inspection
+    expected_results:
+      - path: .aman-pm/changelog/unreleased.md
+        grade: 0
+        rationale: "PM changelog is excluded and should not be retrieval evidence."
+    holdout: true
+    source: holdout
+
+  - id: HOLDOUT-Q12
+    name: Holdout impossible symbol
+    query: "DefinitelyNotARealAmanMCPSymbol999"
+    tool: search_code
+    class: negative_adversarial
+    job: general
+    expected_results: []
+    holdout: true
+    source: holdout
+    notes: "Should not crash and should not produce high-confidence answers."

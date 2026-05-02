@@ -641,6 +641,50 @@ func TestApplyTestFilePenalty_ReorderByScore(t *testing.T) {
 	assert.Equal(t, 0.5, penalized[1].Score)
 }
 
+func TestApplyExactMatchBoost_RanksExactSymbolAboveReferences(t *testing.T) {
+	results := []*SearchResult{
+		{
+			Chunk: &store.Chunk{
+				FilePath: "internal/embed/factory.go",
+				Content:  "return NewOllamaEmbedder(ctx, cfg)",
+				Symbols:  []*store.Symbol{{Name: "NewOllamaEmbedder", Type: store.SymbolTypeFunction}},
+			},
+			Score: 1.0,
+		},
+		{
+			Chunk: &store.Chunk{
+				FilePath: "internal/embed/ollama.go",
+				Content:  "type OllamaEmbedder struct {}",
+				Symbols:  []*store.Symbol{{Name: "OllamaEmbedder", Type: store.SymbolTypeType}},
+			},
+			Score: 0.5,
+		},
+	}
+
+	boosted := ApplyExactMatchBoost(results, "OllamaEmbedder")
+
+	assert.Equal(t, "internal/embed/ollama.go", boosted[0].Chunk.FilePath)
+	assert.Greater(t, boosted[0].Score, boosted[1].Score)
+}
+
+func TestApplyExactMatchBoost_RanksQuotedContentMatch(t *testing.T) {
+	results := []*SearchResult{
+		{
+			Chunk: &store.Chunk{FilePath: "internal/other.go", Content: "query parsing"},
+			Score: 1.0,
+		},
+		{
+			Chunk: &store.Chunk{FilePath: "internal/mcp/server.go", Content: `return nil, fmt.Errorf("query parameter is required")`},
+			Score: 0.9,
+		},
+	}
+
+	boosted := ApplyExactMatchBoost(results, `"query parameter is required"`)
+
+	assert.Equal(t, "internal/mcp/server.go", boosted[0].Chunk.FilePath)
+	assert.Greater(t, boosted[0].Score, boosted[1].Score)
+}
+
 // BenchmarkIsTestFile measures test file detection performance.
 func BenchmarkIsTestFile(b *testing.B) {
 	paths := []string{

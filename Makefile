@@ -9,9 +9,9 @@
 
 # ============================================================================
 # Tool Versions (Single Source of Truth - ADR-011)
-# Last reviewed: 2025-12-28
+# Last reviewed: 2026-05-01
 # ============================================================================
-GO_VERSION = 1.25.5
+GO_VERSION = 1.25.9
 GOLANGCI_LINT_VERSION = v2.7.2
 
 # Go tools (use go run for portability - no need to install locally)
@@ -34,7 +34,7 @@ LDFLAGS := -X github.com/Aman-CERP/amanmcp/pkg/version.Version=$(VERSION) \
 # CGO is required for tree-sitter code parsing only
 # USearch removed in v0.1.38 - now using coder/hnsw (pure Go)
 
-.PHONY: help build build-logs test test-race test-cover test-cover-html lint lint-fix lint-fast ci-check ci-check-quick clean verify-checkpoint verify-docs verify-ssot verify-all install install-user install-local install-local-logs install-local-all uninstall uninstall-local install-mlx start-mlx install-ollama start-ollama stop-ollama switch-backend-mlx switch-backend-ollama verify-install validate validate-tier1 validate-tier2 validate-all
+.PHONY: help build build-logs test test-race test-cover test-cover-html lint lint-fix lint-fast ci-check ci-check-quick amanpm-check-constants amanpm-validate amanpm-db-sync amanpm-db-rebuild amanpm-index-generate amanpm-comply amanpm-comply-guard amanpm-verify-release-claims clean verify-checkpoint verify-docs verify-ssot verify-all install install-user install-local install-local-logs install-local-all uninstall uninstall-local install-mlx start-mlx install-ollama start-ollama stop-ollama switch-backend-mlx switch-backend-ollama verify-install validate validate-tier1 validate-tier2 validate-all eval-search-quick eval-search-graph eval-search-baseline
 
 # ============================================================================
 # Help
@@ -76,11 +76,21 @@ help:
 	@echo "  make validate-tier2     - Run Tier 2 tests (should pass 75%)"
 	@echo "  make validate-all       - Run full validation suite"
 	@echo "  make validate-bench     - Run validation benchmarks"
+	@echo "  make eval-search-quick  - Run quick search eval subset"
+	@echo "  make eval-search-graph  - Run graph-heavy search eval gate report"
+	@echo "  make eval-search-baseline - Regenerate locked search eval baselines"
 	@echo ""
 	@echo "Quality Commands:"
 	@echo "  make lint               - Run golangci-lint"
 	@echo "  make ci-check           - Run FULL CI validation locally"
 	@echo "  make ci-check-quick     - Run quick CI validation"
+	@echo "  make amanpm-check-constants - Check PM scripts for stale local constants"
+	@echo "  make amanpm-validate    - Validate AmanPM file SSOT"
+	@echo "  make amanpm-db-sync     - Rebuild disposable AmanPM SQLite read model"
+	@echo "  make amanpm-db-rebuild  - Delete and rebuild AmanPM SQLite read model"
+	@echo "  make amanpm-index-generate - Regenerate AmanPM backlog indexes"
+	@echo "  make amanpm-comply      - Run advisory AmanPM compliance"
+	@echo "  make amanpm-comply-guard - Run blocking AmanPM compliance"
 	@echo ""
 	@echo "Quick Start (Apple Silicon):"
 	@echo "  1. make install-local   - Install amanmcp"
@@ -170,6 +180,21 @@ validate-bench:
 ## Alias for validate-tier1
 validate: validate-tier1
 
+## Run quick search eval subset and write latest reports
+eval-search-quick:
+	@echo "Running quick search eval subset..."
+	@CGO_ENABLED=1 go run ./cmd/amanmcp eval search --subset quick --output both --out-dir .aman-pm/validation/search-eval --fail-on-regression
+
+## Run graph-heavy eval gate report with exact-lookup non-regression rows
+eval-search-graph:
+	@echo "Running graph-heavy search eval gate..."
+	@CGO_ENABLED=1 go run ./cmd/amanmcp eval search --subset graph --baseline .aman-pm/validation/search-eval/baseline.json --output both --out-dir .aman-pm/validation/search-eval
+
+## Regenerate full search eval baseline and token-budget artifacts
+eval-search-baseline:
+	@echo "Regenerating full search eval baseline..."
+	@CGO_ENABLED=1 go run ./cmd/amanmcp eval search --subset full --include-holdout --output both --out-dir .aman-pm/validation/search-eval --save-baseline
+
 # ============================================================================
 # Linting
 # ============================================================================
@@ -202,6 +227,28 @@ ci-check-quick:
 	@echo "This runs critical checks only (tests + lint)."
 	@echo ""
 	@./scripts/ci-parity-check.sh --quick
+
+amanpm-check-constants:
+	@python3 .aman-pm/scripts/check_pm_constants.py
+
+amanpm-validate:
+	@python3 .aman-pm/scripts/validate.py --pm-dir .aman-pm
+
+amanpm-db-sync:
+	@python3 .aman-pm/scripts/sync.py --pm-dir .aman-pm --db .amanmcp/amanpm-read-model.sqlite
+
+amanpm-db-rebuild:
+	@rm -f .amanmcp/amanpm-read-model.sqlite
+	@python3 .aman-pm/scripts/sync.py --pm-dir .aman-pm --db .amanmcp/amanpm-read-model.sqlite
+
+amanpm-index-generate:
+	@python3 .aman-pm/scripts/generate_index.py
+
+amanpm-comply:
+	@python3 .aman-pm/scripts/comply.py --pm-dir .aman-pm --mode advisory --db .amanmcp/amanpm-read-model.sqlite
+
+amanpm-comply-guard:
+	@python3 .aman-pm/scripts/comply.py --pm-dir .aman-pm --mode guard --db .amanmcp/amanpm-read-model.sqlite
 
 # Fast commit check (no tests, lint-fast only) - used by pre-commit hook
 ci-check-commit:
@@ -370,7 +417,12 @@ verify-docs:
 verify-ssot:
 	@./scripts/verify-ssot-consistency.sh
 
-# Run all verification checks
+# Verify AmanPM "done" claims against verifiable git tags (POL-014).
+# AmanPM-substrate target — follows the amanpm-* naming convention.
+amanpm-verify-release-claims:
+	@./scripts/amanpm/verify-release-claims.sh
+
+# Run all product verification checks (kept separate from amanpm-* substrate checks).
 verify-all: verify-docs verify-checkpoint verify-ssot
 	@echo "All verification checks complete"
 

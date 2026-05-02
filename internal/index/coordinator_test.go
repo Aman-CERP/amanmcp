@@ -13,8 +13,10 @@ import (
 
 	"github.com/Aman-CERP/amanmcp/internal/chunk"
 	"github.com/Aman-CERP/amanmcp/internal/embed"
+	"github.com/Aman-CERP/amanmcp/internal/language"
 	"github.com/Aman-CERP/amanmcp/internal/scanner"
 	"github.com/Aman-CERP/amanmcp/internal/search"
+	"github.com/Aman-CERP/amanmcp/internal/secrets"
 	"github.com/Aman-CERP/amanmcp/internal/store"
 	"github.com/Aman-CERP/amanmcp/internal/watcher"
 )
@@ -117,6 +119,79 @@ func hello() {
 	results, err := coord.config.Engine.Search(ctx, "hello", search.SearchOptions{Limit: 10})
 	require.NoError(t, err)
 	assert.NotEmpty(t, results, "expected search results for indexed file")
+}
+
+func TestCoordinator_HandleEvents_UsesConfiguredLanguageRegistry(t *testing.T) {
+	coord, tempDir, cleanup := setupTestCoordinator(t)
+	defer cleanup()
+
+	defs := []language.Definition{
+		{
+			Name:        "elixir_custom",
+			Extensions:  []string{".exx"},
+			ContentType: language.ContentTypeCode,
+			Parser:      language.ParserLineFallback,
+		},
+	}
+	registry, err := language.NewRegistry(defs)
+	require.NoError(t, err)
+	codeChunker, err := chunk.NewCodeChunkerWithLanguageDefinitions(chunk.CodeChunkerOptions{}, defs)
+	require.NoError(t, err)
+	defer codeChunker.Close()
+
+	coord.config.LanguageRegistry = registry
+	coord.config.CodeChunker = codeChunker
+
+	ctx := context.Background()
+	testFile := filepath.Join(tempDir, "worker.exx")
+	content := "defmodule Worker do\n  def configured_language_marker, do: :ok\nend\n"
+	require.NoError(t, os.WriteFile(testFile, []byte(content), 0o644))
+
+	err = coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "worker.exx", Operation: watcher.OpCreate, IsDir: false, Timestamp: time.Now()},
+	})
+	require.NoError(t, err)
+
+	fileID := generateFileID(coord.config.ProjectID, "worker.exx")
+	chunks, err := coord.config.Metadata.GetChunksByFile(ctx, fileID)
+	require.NoError(t, err)
+	require.NotEmpty(t, chunks)
+	assert.Equal(t, "elixir_custom", chunks[0].Language)
+	assert.Equal(t, store.ContentTypeText, chunks[0].ContentType)
+
+	results, err := coord.config.Engine.Search(ctx, "configured_language_marker", search.SearchOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.NotEmpty(t, results)
+}
+
+func TestCoordinator_HandleEvents_AppliesSecretGuardBeforeIndexing(t *testing.T) {
+	coord, tempDir, cleanup := setupTestCoordinator(t)
+	defer cleanup()
+	coord.config.SecretScanner = secrets.NewScanner(secrets.DefaultPolicy())
+
+	ctx := context.Background()
+	testFile := filepath.Join(tempDir, "leaky.go")
+	content := `package main
+
+const privateKey = ` + "`" + `-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASC
+-----END PRIVATE KEY-----` + "`" + `
+`
+	require.NoError(t, os.WriteFile(testFile, []byte(content), 0o644))
+
+	err := coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "leaky.go", Operation: watcher.OpCreate, IsDir: false, Timestamp: time.Now()},
+	})
+	require.NoError(t, err)
+
+	fileID := generateFileID(coord.config.ProjectID, "leaky.go")
+	chunks, err := coord.config.Metadata.GetChunksByFile(ctx, fileID)
+	require.NoError(t, err)
+	assert.Empty(t, chunks)
+
+	results, err := coord.config.Engine.Search(ctx, "privateKey", search.SearchOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, results)
 }
 
 func TestCoordinator_HandleEvents_Modify(t *testing.T) {

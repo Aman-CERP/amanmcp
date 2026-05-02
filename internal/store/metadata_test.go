@@ -362,6 +362,68 @@ func TestSQLiteStore_SymbolSearch(t *testing.T) {
 	assert.Contains(t, names, "HandleLogout")
 }
 
+func TestSQLiteStore_GetChunksBySymbol_ExactName(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+
+	project := &Project{ID: "proj-symbol-chunks", Name: "symbol-chunks", RootPath: "/symbols"}
+	require.NoError(t, store.SaveProject(ctx, project))
+
+	file := &File{
+		ID:          "file-symbol-chunks",
+		ProjectID:   project.ID,
+		Path:        "search/types.go",
+		Size:        1000,
+		ModTime:     time.Now(),
+		ContentHash: "symbolchunks",
+		Language:    "go",
+		ContentType: "code",
+		IndexedAt:   time.Now(),
+	}
+	require.NoError(t, store.SaveFiles(ctx, []*File{file}))
+
+	chunks := []*Chunk{
+		{
+			ID:          "chunk-search-options",
+			FileID:      file.ID,
+			FilePath:    "search/types.go",
+			Content:     "type SearchOptions struct {}",
+			ContentType: ContentTypeCode,
+			Language:    "go",
+			StartLine:   10,
+			EndLine:     20,
+			Symbols: []*Symbol{
+				{Name: "SearchOptions", Type: SymbolTypeType, StartLine: 10, EndLine: 20},
+			},
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		},
+		{
+			ID:          "chunk-search-options-helper",
+			FileID:      file.ID,
+			FilePath:    "search/options.go",
+			Content:     "func ValidateOptions(opts SearchOptions) error { return nil }",
+			ContentType: ContentTypeCode,
+			Language:    "go",
+			StartLine:   30,
+			EndLine:     40,
+			Symbols: []*Symbol{
+				{Name: "ValidateOptions", Type: SymbolTypeFunction, StartLine: 30, EndLine: 40},
+			},
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		},
+	}
+	require.NoError(t, store.SaveChunks(ctx, chunks))
+
+	results, err := store.GetChunksBySymbol(ctx, "SearchOptions", 10)
+
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "chunk-search-options", results[0].ID)
+	assert.Equal(t, "SearchOptions", results[0].Symbols[0].Name)
+}
+
 // TS05: Cascading Delete
 func TestSQLiteStore_CascadingDelete(t *testing.T) {
 	store, _ := newTestStore(t)
@@ -697,7 +759,7 @@ func TestSQLiteStore_ListFiles_Pagination(t *testing.T) {
 	// And: requesting final page
 	page3, cursor3, err := store.ListFiles(ctx, "proj-page", cursor2, 2)
 	require.NoError(t, err)
-	assert.Len(t, page3, 1) // Only 1 file left
+	assert.Len(t, page3, 1)  // Only 1 file left
 	assert.Empty(t, cursor3) // No more pages
 
 	// Then: all files were returned across pages
@@ -826,7 +888,6 @@ func TestSQLiteStore_GetFilePathsByProject_NonExistent(t *testing.T) {
 	assert.Empty(t, paths)
 }
 
-
 // Test State Operations (key-value store)
 func TestSQLiteStore_State_SetAndGet(t *testing.T) {
 	store, _ := newTestStore(t)
@@ -892,8 +953,8 @@ func TestSQLiteStore_State_MultipleKeys(t *testing.T) {
 
 	// Given: multiple keys are set
 	keys := map[string]string{
-		"key1": "value1",
-		"key2": "value2",
+		"key1":           "value1",
+		"key2":           "value2",
 		"gitignore_hash": "abc123",
 	}
 	for k, v := range keys {

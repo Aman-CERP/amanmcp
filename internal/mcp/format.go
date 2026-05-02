@@ -9,15 +9,28 @@ import (
 
 // FormatSearchResults formats generic search results as markdown.
 func FormatSearchResults(query string, results []*search.SearchResult) string {
+	return FormatSearchResultsWithProfileMismatches(query, results, nil)
+}
+
+// FormatSearchResultsWithProfileMismatches formats generic search results as
+// markdown and includes actionable profile-filter diagnostics when available.
+func FormatSearchResultsWithProfileMismatches(query string, results []*search.SearchResult, mismatches []search.ProfileMismatch) string {
 	// Filter out nil chunks
 	validResults := filterValidResults(results)
 
 	if len(validResults) == 0 {
+		if len(mismatches) > 0 {
+			return fmt.Sprintf("No results found for \"%s\"\n\n%s", query, formatProfileMismatchHint(mismatches))
+		}
 		return fmt.Sprintf("No results found for \"%s\"", query)
 	}
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("## Search Results for \"%s\"\n\n", query))
+	if len(mismatches) > 0 {
+		sb.WriteString(formatProfileMismatchHint(mismatches))
+		sb.WriteString("\n\n")
+	}
 	sb.WriteString(fmt.Sprintf("Found %d result", len(validResults)))
 	if len(validResults) != 1 {
 		sb.WriteString("s")
@@ -29,6 +42,19 @@ func FormatSearchResults(query string, results []*search.SearchResult) string {
 	}
 
 	return sb.String()
+}
+
+func formatProfileMismatchHint(mismatches []search.ProfileMismatch) string {
+	if len(mismatches) == 0 {
+		return ""
+	}
+	first := mismatches[0]
+	return fmt.Sprintf(
+		"**Profile mismatch:** %d result(s) were excluded by the selected profile. Select profile `%s` to inspect `%s`.",
+		len(mismatches),
+		first.RequiredProfile,
+		first.SourcePath,
+	)
 }
 
 // FormatCodeResults formats code-specific results with syntax highlighting.
@@ -185,6 +211,29 @@ func ToSearchResultOutput(r *search.SearchResult) SearchResultOutput {
 		Language:     r.Chunk.Language,
 		MatchedTerms: r.MatchedTerms,
 		InBothLists:  r.InBothLists,
+	}
+
+	sourceMeta := r.SourceMetadata
+	if sourceMeta.SourceClass == "" {
+		sourceMeta = search.SourceMetadataFromChunk(r.Chunk)
+	}
+	output.SourceClass = string(sourceMeta.SourceClass)
+	output.Authority = string(sourceMeta.Authority)
+	output.Profile = string(sourceMeta.Profile)
+	output.SourcePath = sourceMeta.SourcePath
+	output.GitStatus = sourceMeta.GitStatus
+	output.SourceHash = sourceMeta.SourceHash
+	output.Generated = sourceMeta.Generated
+	output.Stale = sourceMeta.Stale
+	output.FreshnessReason = sourceMeta.FreshnessReason
+	output.DecisionStatus = string(sourceMeta.DecisionStatus)
+	output.Supersedes = append([]string(nil), sourceMeta.Supersedes...)
+	output.SupersededBy = append([]string(nil), sourceMeta.SupersededBy...)
+	if sourceMeta.LastModified != nil {
+		output.LastModified = sourceMeta.LastModified.Format("2006-01-02T15:04:05Z07:00")
+	}
+	if sourceMeta.CurrentAsOf != nil {
+		output.CurrentAsOf = sourceMeta.CurrentAsOf.Format("2006-01-02T15:04:05Z07:00")
 	}
 
 	// Extract primary symbol info if available

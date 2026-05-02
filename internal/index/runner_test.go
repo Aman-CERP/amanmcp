@@ -14,14 +14,14 @@ import (
 
 // MockRenderer implements ui.Renderer for testing.
 type MockRenderer struct {
-	StartCalled         bool
-	StopCalled          bool
-	CompleteCalled      bool
-	ProgressEvents      []ui.ProgressEvent
-	ErrorEvents         []ui.ErrorEvent
-	CompletionStats     ui.CompletionStats
-	StartError          error
-	ShouldFailOnStart   bool
+	StartCalled       bool
+	StopCalled        bool
+	CompleteCalled    bool
+	ProgressEvents    []ui.ProgressEvent
+	ErrorEvents       []ui.ErrorEvent
+	CompletionStats   ui.CompletionStats
+	StartError        error
+	ShouldFailOnStart bool
 }
 
 func (m *MockRenderer) Start(ctx context.Context) error {
@@ -52,30 +52,30 @@ func (m *MockRenderer) Stop() error {
 
 // MockMetadataStore implements store.MetadataStore for testing.
 type MockMetadataStore struct {
-	SaveProjectCalled       bool
-	SaveFilesCalled         bool
-	SaveChunksCalled        bool
-	SaveEmbeddingsCalled    bool
-	UpdateStatsCalled       bool
-	ClearCheckpointCalled   bool
-	SetStateCalled          bool
+	SaveProjectCalled     bool
+	SaveFilesCalled       bool
+	SaveChunksCalled      bool
+	SaveEmbeddingsCalled  bool
+	UpdateStatsCalled     bool
+	ClearCheckpointCalled bool
+	SetStateCalled        bool
 
-	ProjectSaved            *store.Project
-	FilesSaved              []*store.File
-	ChunksSaved             []*store.Chunk
-	EmbeddingsSaved         map[string][]float32
+	ProjectSaved    *store.Project
+	FilesSaved      []*store.File
+	ChunksSaved     []*store.Chunk
+	EmbeddingsSaved map[string][]float32
 
-	AllEmbeddings           map[string][]float32
-	CheckpointToLoad        *store.IndexCheckpoint
+	AllEmbeddings    map[string][]float32
+	CheckpointToLoad *store.IndexCheckpoint
 
 	// BUG-042: Track SetState calls for dimension/model verification
-	StateValues             map[string]string
+	StateValues map[string]string
 
-	SaveProjectError        error
-	SaveFilesError          error
-	SaveChunksError         error
-	SaveEmbeddingsError     error
-	GetAllEmbeddingsError   error
+	SaveProjectError      error
+	SaveFilesError        error
+	SaveChunksError       error
+	SaveEmbeddingsError   error
+	GetAllEmbeddingsError error
 }
 
 func (m *MockMetadataStore) SaveProject(ctx context.Context, project *store.Project) error {
@@ -153,6 +153,10 @@ func (m *MockMetadataStore) GetChunksByFile(ctx context.Context, fileID string) 
 	return nil, nil
 }
 
+func (m *MockMetadataStore) GetChunksBySymbol(ctx context.Context, name string, limit int) ([]*store.Chunk, error) {
+	return nil, nil
+}
+
 func (m *MockMetadataStore) DeleteChunks(ctx context.Context, ids []string) error {
 	return nil
 }
@@ -224,11 +228,11 @@ func (m *MockMetadataStore) Close() error {
 
 // MockBM25Index implements store.BM25Index for testing.
 type MockBM25Index struct {
-	IndexCalled  bool
-	SaveCalled   bool
-	Documents    []*store.Document
-	IndexError   error
-	SaveError    error
+	IndexCalled bool
+	SaveCalled  bool
+	Documents   []*store.Document
+	IndexError  error
+	SaveError   error
 }
 
 func (m *MockBM25Index) Index(ctx context.Context, docs []*store.Document) error {
@@ -272,12 +276,12 @@ func (m *MockBM25Index) Close() error {
 
 // MockVectorStore implements store.VectorStore for testing.
 type MockVectorStore struct {
-	AddCalled   bool
-	SaveCalled  bool
-	IDs         []string
-	Vectors     [][]float32
-	AddError    error
-	SaveError   error
+	AddCalled  bool
+	SaveCalled bool
+	IDs        []string
+	Vectors    [][]float32
+	AddError   error
+	SaveError  error
 }
 
 func (m *MockVectorStore) Add(ctx context.Context, ids []string, vectors [][]float32) error {
@@ -373,13 +377,13 @@ func (m *MockEmbedder) Close() error {
 	return nil
 }
 
-func (m *MockEmbedder) SetBatchIndex(idx int) {}
+func (m *MockEmbedder) SetBatchIndex(idx int)      {}
 func (m *MockEmbedder) SetFinalBatch(isFinal bool) {}
 
 // MockChunker implements chunk.Chunker for testing.
 type MockChunker struct {
-	Chunks     []*chunk.Chunk
-	ChunkError error
+	Chunks      []*chunk.Chunk
+	ChunkError  error
 	CloseCalled bool
 }
 
@@ -646,7 +650,7 @@ func TestRunner_StoresEmbeddingMetadata(t *testing.T) {
 	}
 	embedder := &MockEmbedder{
 		DimensionsValue: 768,
-		ModelNameValue:  "embeddinggemma:latest",
+		ModelNameValue:  "embeddinggemma:300m",
 	}
 
 	runner, err := NewRunner(RunnerDependencies{
@@ -698,8 +702,8 @@ func TestRunner_StoresEmbeddingMetadata(t *testing.T) {
 	storedModel, hasModel := metadata.StateValues[store.StateKeyIndexModel]
 	if !hasModel {
 		t.Errorf("Expected %s to be stored, but it was not", store.StateKeyIndexModel)
-	} else if storedModel != "embeddinggemma:latest" {
-		t.Errorf("StateKeyIndexModel = %q, want %q", storedModel, "embeddinggemma:latest")
+	} else if storedModel != "embeddinggemma:300m" {
+		t.Errorf("StateKeyIndexModel = %q, want %q", storedModel, "embeddinggemma:300m")
 	}
 }
 

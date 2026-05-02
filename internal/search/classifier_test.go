@@ -14,9 +14,9 @@ import (
 
 func TestWeightsForQueryType(t *testing.T) {
 	tests := []struct {
-		name        string
-		queryType   QueryType
-		wantBM25    float64
+		name         string
+		queryType    QueryType
+		wantBM25     float64
 		wantSemantic float64
 	}{
 		{
@@ -357,7 +357,7 @@ func TestClassifierConfig_Defaults(t *testing.T) {
 
 	assert.Equal(t, "llama3.2:1b", cfg.Model)
 	assert.Equal(t, 2_000_000_000, int(cfg.Timeout.Nanoseconds())) // 2s
-	assert.Equal(t, 10000, cfg.CacheSize) // QW-2: Increased for better hit rate
+	assert.Equal(t, 10000, cfg.CacheSize)                          // QW-2: Increased for better hit rate
 	assert.Equal(t, "http://localhost:11434", cfg.OllamaHost)
 }
 

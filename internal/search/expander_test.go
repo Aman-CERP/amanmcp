@@ -126,6 +126,24 @@ func TestQueryExpander_Expand_DeduplicatesTerms(t *testing.T) {
 	assert.LessOrEqual(t, count, 2, "should not have many duplicate 'func' terms")
 }
 
+func TestQueryExpander_Expand_PreservesExactLexicalQueries(t *testing.T) {
+	expander := NewQueryExpander()
+
+	tests := []string{
+		"OllamaEmbedder",
+		"Embedder",
+		"internal/embed/ollama.go",
+		`"query parameter is required"`,
+		"ERR_INDEX_FAILED",
+	}
+
+	for _, query := range tests {
+		t.Run(query, func(t *testing.T) {
+			assert.Equal(t, query, expander.Expand(query))
+		})
+	}
+}
+
 func TestQueryExpander_Expand_EmptyQuery(t *testing.T) {
 	expander := NewQueryExpander()
 

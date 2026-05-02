@@ -115,7 +115,7 @@ release:
     brew install --cask amanmcp
     ```
 
-    ### Universal Install Script (macOS & Linux)
+    ### Install Script (macOS arm64)
     ```bash
     curl -sSL https://raw.githubusercontent.com/Aman-CERP/amanmcp/main/scripts/install.sh | sh
     ```
@@ -141,7 +141,7 @@ homebrew_casks:
     # Casks use Casks/ directory by default
     homepage: "https://github.com/Aman-CERP/amanmcp"
     description: "Local-first RAG MCP server for AI coding assistants"
-    license: "MIT"
+    license: "Apache-2.0"
     # Handle unsigned binaries on macOS (remove quarantine bit)
     hooks:
       post:

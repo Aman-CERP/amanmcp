@@ -19,9 +19,9 @@ import (
 // - CodeSearchNet vocabulary gap: arxiv.org/pdf/1909.09436
 // - Query expansion techniques: opensourceconnections.com/blog/2021/10/19/fundamentals-of-query-rewriting-part-1-introduction-to-query-expansion/
 type QueryExpander struct {
-	synonyms       map[string][]string
-	maxExpansions  int  // Max synonyms per term (default: 3)
-	includeCasing  bool // Include case variants (default: true)
+	synonyms      map[string][]string
+	maxExpansions int  // Max synonyms per term (default: 3)
+	includeCasing bool // Include case variants (default: true)
 }
 
 // QueryExpanderOption configures the query expander.
@@ -80,6 +80,10 @@ func NewQueryExpander(opts ...QueryExpanderOption) *QueryExpander {
 // 3. Add casing variants (for Go naming conventions)
 // 4. Deduplicate terms
 func (e *QueryExpander) Expand(query string) string {
+	if shouldPreserveExactLexicalQuery(query) {
+		return strings.TrimSpace(query)
+	}
+
 	terms := tokenize(query)
 	if len(terms) == 0 {
 		return query
@@ -128,6 +132,29 @@ func (e *QueryExpander) Expand(query string) string {
 	}
 
 	return strings.Join(expanded, " ")
+}
+
+func shouldPreserveExactLexicalQuery(query string) bool {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return false
+	}
+
+	if quotedPattern.MatchString(query) ||
+		filePathPattern.MatchString(query) ||
+		errorCodePattern.MatchString(query) {
+		return true
+	}
+
+	if strings.Contains(query, " ") {
+		return false
+	}
+
+	return camelCasePattern.MatchString(query) ||
+		pascalCasePattern.MatchString(query) ||
+		exportedIdentifierPattern.MatchString(query) ||
+		snakeCasePattern.MatchString(query) ||
+		screamingSnakePattern.MatchString(query)
 }
 
 // ExpandToTerms returns expanded terms as a slice (useful for multi-query search).

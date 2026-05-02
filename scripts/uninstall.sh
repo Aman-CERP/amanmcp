@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # AmanMCP Uninstall Script
-# Usage: curl -sSL https://raw.githubusercontent.com/amanmcp/amanmcp/main/scripts/uninstall.sh | sh
+# Usage: curl -sSL https://raw.githubusercontent.com/Aman-CERP/amanmcp/main/scripts/uninstall.sh | sh
 #
 # This script removes:
 # - The amanmcp binary from ~/.local/bin/

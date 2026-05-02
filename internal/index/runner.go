@@ -10,12 +10,15 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/Aman-CERP/amanmcp/internal/chunk"
 	"github.com/Aman-CERP/amanmcp/internal/config"
 	"github.com/Aman-CERP/amanmcp/internal/embed"
+	"github.com/Aman-CERP/amanmcp/internal/language"
 	"github.com/Aman-CERP/amanmcp/internal/scanner"
+	"github.com/Aman-CERP/amanmcp/internal/secrets"
 	"github.com/Aman-CERP/amanmcp/internal/store"
 	"github.com/Aman-CERP/amanmcp/internal/ui"
 )
@@ -87,19 +90,24 @@ type RunnerDependencies struct {
 
 	// MarkdownChunker for chunking markdown files.
 	MarkdownChunker chunk.Chunker
+
+	// SecretScanner gates content before chunking, embedding, BM25, and vector indexing.
+	SecretScanner *secrets.Scanner
 }
 
 // Runner executes indexing operations with progress reporting.
 // It accepts injected dependencies for testability and reusability.
 type Runner struct {
-	renderer        ui.Renderer
-	config          *config.Config
-	metadata        store.MetadataStore
-	bm25            store.BM25Index
-	vector          store.VectorStore
-	embedder        embed.Embedder
-	codeChunker     chunk.Chunker
-	markdownChunker chunk.Chunker
+	renderer         ui.Renderer
+	config           *config.Config
+	metadata         store.MetadataStore
+	bm25             store.BM25Index
+	vector           store.VectorStore
+	embedder         embed.Embedder
+	codeChunker      chunk.Chunker
+	markdownChunker  chunk.Chunker
+	languageRegistry *language.Registry
+	secretScanner    *secrets.Scanner
 }
 
 // NewRunner creates a Runner with injected dependencies.
@@ -126,7 +134,11 @@ func NewRunner(deps RunnerDependencies) (*Runner, error) {
 	// Use provided chunkers or create defaults
 	codeChunker := deps.CodeChunker
 	if codeChunker == nil {
-		codeChunker = chunk.NewCodeChunker()
+		var chunkerErr error
+		codeChunker, chunkerErr = chunk.NewCodeChunkerWithLanguageDefinitions(chunk.CodeChunkerOptions{}, deps.Config.Search.Languages)
+		if chunkerErr != nil {
+			return nil, fmt.Errorf("failed to create code chunker: %w", chunkerErr)
+		}
 	}
 
 	markdownChunker := deps.MarkdownChunker
@@ -134,15 +146,26 @@ func NewRunner(deps RunnerDependencies) (*Runner, error) {
 		markdownChunker = chunk.NewMarkdownChunker()
 	}
 
+	secretScanner := deps.SecretScanner
+	if secretScanner == nil {
+		secretScanner = secrets.NewScanner(secrets.DefaultPolicy())
+	}
+	languageRegistry, registryErr := language.NewRegistry(deps.Config.Search.Languages)
+	if registryErr != nil {
+		return nil, fmt.Errorf("failed to create language registry: %w", registryErr)
+	}
+
 	return &Runner{
-		renderer:        deps.Renderer,
-		config:          deps.Config,
-		metadata:        deps.Metadata,
-		bm25:            deps.BM25,
-		vector:          deps.Vector,
-		embedder:        deps.Embedder,
-		codeChunker:     codeChunker,
-		markdownChunker: markdownChunker,
+		renderer:         deps.Renderer,
+		config:           deps.Config,
+		metadata:         deps.Metadata,
+		bm25:             deps.BM25,
+		vector:           deps.Vector,
+		embedder:         deps.Embedder,
+		codeChunker:      codeChunker,
+		markdownChunker:  markdownChunker,
+		languageRegistry: languageRegistry,
+		secretScanner:    secretScanner,
 	}, nil
 }
 
@@ -388,6 +411,7 @@ func (r *Runner) scanFiles(ctx context.Context, root string) ([]*scanner.FileInf
 		ExcludePatterns:  excludePatterns,
 		RespectGitignore: true,
 		Workers:          runtime.NumCPU(),
+		LanguageRegistry: r.languageRegistry,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to start scanning: %w", err)
@@ -448,6 +472,17 @@ func (r *Runner) chunkFiles(ctx context.Context, files []*scanner.FileInfo, proj
 			continue
 		}
 
+		secretResult := r.secretScanner.GuardContent(secrets.ContentInput{
+			Path:    file.Path,
+			Content: content,
+			Source:  secrets.SourceIndex,
+		})
+		warnCount += r.reportSecretWarnings(secretResult.Warnings)
+		if secretResult.Blocked {
+			continue
+		}
+		content = secretResult.Content
+
 		// Create store file record
 		storeFile := &store.File{
 			ID:          hashString(file.Path),
@@ -489,11 +524,48 @@ func (r *Runner) chunkFiles(ctx context.Context, files []*scanner.FileInfo, proj
 			continue
 		}
 
+		annotateSecretScan(chunks, secretResult)
 		allChunks = append(allChunks, chunks...)
 	}
 
 	slog.Info("index_chunking_complete", slog.Int("chunks", len(allChunks)), slog.Int("files", len(storeFiles)))
 	return allChunks, storeFiles, warnCount
+}
+
+func (r *Runner) reportSecretWarnings(warnings []secrets.Warning) int {
+	for _, warning := range warnings {
+		r.renderer.AddError(ui.ErrorEvent{
+			File:   warning.FilePath,
+			Err:    warning,
+			IsWarn: true,
+		})
+		slog.Warn("pre_index_secret_detected",
+			slog.String("file", warning.FilePath),
+			slog.String("detector_id", warning.DetectorID),
+			slog.String("confidence", string(warning.Confidence)),
+			slog.String("action", string(warning.Action)),
+			slog.String("location", warning.Location.String()))
+	}
+	return len(warnings)
+}
+
+func annotateSecretScan(chunks []*chunk.Chunk, result secrets.Result) {
+	if len(result.Warnings) == 0 {
+		return
+	}
+
+	detectors := make([]string, 0, len(result.Warnings))
+	for _, warning := range result.Warnings {
+		detectors = append(detectors, warning.DetectorID)
+	}
+	for _, c := range chunks {
+		if c.Metadata == nil {
+			c.Metadata = make(map[string]string)
+		}
+		c.Metadata["secret_scan_action"] = string(result.Action)
+		c.Metadata["secret_scan_detectors"] = strings.Join(detectors, ",")
+		c.Metadata["secret_scan_warning_count"] = fmt.Sprintf("%d", len(result.Warnings))
+	}
 }
 
 // enrichWithContext adds LLM-generated context to chunks (CR-1 Contextual Retrieval).

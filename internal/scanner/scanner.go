@@ -248,8 +248,8 @@ func (s *Scanner) scanSubtreeInternal(ctx context.Context, absRoot, absSubtree s
 		}
 
 		// Detect language and content type
-		language := DetectLanguage(relPath)
-		contentType := DetectContentType(language)
+		language := DetectLanguageWithRegistry(relPath, opts.LanguageRegistry)
+		contentType := DetectContentTypeWithRegistry(language, opts.LanguageRegistry)
 
 		// Check if file matches include patterns
 		if len(opts.IncludePatterns) > 0 && !s.matchesAnyPattern(relPath, opts.IncludePatterns) {
@@ -346,8 +346,8 @@ func (s *Scanner) scan(ctx context.Context, absRoot string, opts *ScanOptions, m
 		}
 
 		// Detect language and content type
-		language := DetectLanguage(relPath)
-		contentType := DetectContentType(language)
+		language := DetectLanguageWithRegistry(relPath, opts.LanguageRegistry)
+		contentType := DetectContentTypeWithRegistry(language, opts.LanguageRegistry)
 
 		// Check if file matches include patterns
 		if len(opts.IncludePatterns) > 0 && !s.matchesAnyPattern(relPath, opts.IncludePatterns) {
@@ -454,8 +454,8 @@ func (s *Scanner) scanSubmodule(ctx context.Context, absRoot, submodulePath stri
 		}
 
 		// Detect language and content type
-		language := DetectLanguage(relFromSubmodule)
-		contentType := DetectContentType(language)
+		language := DetectLanguageWithRegistry(relFromSubmodule, opts.LanguageRegistry)
+		contentType := DetectContentTypeWithRegistry(language, opts.LanguageRegistry)
 
 		// Check if file matches include patterns (using submodule-relative path)
 		if len(opts.IncludePatterns) > 0 && !s.matchesAnyPattern(relFromSubmodule, opts.IncludePatterns) {

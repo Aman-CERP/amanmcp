@@ -23,10 +23,11 @@ import (
 // searchOptions holds CLI flags for search.
 type searchOptions struct {
 	limit    int
-	filter   string   // "all", "code", "docs"
+	filter   string // "all", "code", "docs"
 	language string
 	format   string   // "text", "json"
 	scopes   []string // path prefixes for filtering
+	profile  string   // retrieval profile
 	bm25Only bool     // FEAT-DIM1: skip semantic search, use BM25 only
 	local    bool     // Force local search (bypass daemon)
 	explain  bool     // FEAT-UNIX3: show search decision process
@@ -47,6 +48,8 @@ Examples:
   amanmcp search "authentication middleware"
   amanmcp search "handleRequest" --type code --limit 5
   amanmcp search "setup instructions" --type docs
+  amanmcp search "ADR-039" --profile project-memory
+  amanmcp search "review memo" --profile review-corpus
   amanmcp search "error handling" --format json`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -60,6 +63,7 @@ Examples:
 	cmd.Flags().StringVarP(&opts.language, "language", "l", "", "Filter by language (e.g., go, python)")
 	cmd.Flags().StringVarP(&opts.format, "format", "f", "text", "Output format: text, json")
 	cmd.Flags().StringSliceVarP(&opts.scopes, "scope", "s", nil, "Filter by path scope (repeatable, e.g., --scope services/api)")
+	cmd.Flags().StringVar(&opts.profile, "profile", "", "Retrieval profile: code, project-memory, review-corpus, archive")
 	cmd.Flags().BoolVar(&opts.bm25Only, "bm25-only", false, "Use keyword search only (skip semantic search)")
 	cmd.Flags().BoolVar(&opts.local, "local", false, "Force local search (bypass daemon)")
 	cmd.Flags().BoolVar(&opts.explain, "explain", false, "Show search decision process (BM25/vector results, weights, RRF fusion)")
@@ -77,6 +81,10 @@ func runSearch(ctx context.Context, cmd *cobra.Command, query string, opts searc
 
 	slog.Info("search_started", slog.String("query", query), slog.Int("limit", opts.limit))
 	out := output.New(cmd.OutOrStdout())
+
+	if _, err := search.ParseProfile(opts.profile); err != nil {
+		return err
+	}
 
 	// Find project root
 	root, err := config.FindProjectRoot(".")
@@ -97,13 +105,14 @@ func runSearch(ctx context.Context, cmd *cobra.Command, query string, opts searc
 	client := daemon.NewClient(daemonCfg)
 	if !opts.local && client.IsRunning() {
 		slog.Info("search_using_daemon")
-		results, err := client.Search(ctx, daemon.SearchParams{
+		response, err := client.SearchDetailed(ctx, daemon.SearchParams{
 			Query:    query,
 			RootPath: root,
 			Limit:    opts.limit,
 			Filter:   opts.filter,
 			Language: opts.language,
 			Scopes:   opts.scopes,
+			Profile:  opts.profile,
 			BM25Only: opts.bm25Only,
 			Explain:  opts.explain, // FEAT-UNIX3
 		})
@@ -112,8 +121,8 @@ func runSearch(ctx context.Context, cmd *cobra.Command, query string, opts searc
 			slog.Warn("Daemon search failed, falling back to local",
 				slog.String("error", err.Error()))
 		} else {
-			slog.Info("search_complete", slog.String("mode", "daemon"), slog.Int("results", len(results)))
-			return formatDaemonResults(cmd, out, query, results, opts.format)
+			slog.Info("search_complete", slog.String("mode", "daemon"), slog.Int("results", len(response.Results)))
+			return formatDaemonResults(cmd, out, query, response, opts.format)
 		}
 	}
 
@@ -208,24 +217,34 @@ func runLocalSearch(ctx context.Context, cmd *cobra.Command, root, query string,
 	if cfg.Search.MaxResults > 0 {
 		engineConfig.DefaultLimit = cfg.Search.MaxResults
 	}
+	engineConfig.MetadataRules = cfg.SearchMetadataRules()
+	engineConfig.ProfileRules = cfg.SearchProfileRules()
 	if cfg.Search.BM25Weight > 0 || cfg.Search.SemanticWeight > 0 {
 		engineConfig.DefaultWeights = search.Weights{
 			BM25:     cfg.Search.BM25Weight,
 			Semantic: cfg.Search.SemanticWeight,
 		}
 	}
+	engineConfig.RerankerPolicy = search.RerankerPolicy(cfg.Search.Reranker.Policy)
 	// FEAT-QI3: Add multi-query decomposition for generic queries
 	engine := search.New(bm25, vector, embedder, metadata, engineConfig,
 		search.WithMultiQuerySearch(search.NewPatternDecomposer()))
 
 	// Build search options
+	var profileMismatches []search.ProfileMismatch
+	var queryClassification search.QueryClassification
+	var rerankerStatus search.RerankerStatus
 	searchOpts := search.SearchOptions{
-		Limit:    opts.limit,
-		Filter:   opts.filter,
-		Language: opts.language,
-		Scopes:   opts.scopes,
-		BM25Only: opts.bm25Only,
-		Explain:  opts.explain, // FEAT-UNIX3
+		Limit:               opts.limit,
+		Filter:              opts.filter,
+		Language:            opts.language,
+		Scopes:              opts.scopes,
+		Profile:             search.Profile(opts.profile),
+		ProfileMismatches:   &profileMismatches,
+		QueryClassification: &queryClassification,
+		RerankerStatus:      &rerankerStatus,
+		BM25Only:            opts.bm25Only,
+		Explain:             opts.explain, // FEAT-UNIX3
 	}
 
 	// Execute search
@@ -237,21 +256,40 @@ func runLocalSearch(ctx context.Context, cmd *cobra.Command, root, query string,
 
 	// Format and output results
 	if len(results) == 0 {
+		if len(profileMismatches) > 0 {
+			if opts.format == "json" {
+				return formatJSON(cmd, results, profileMismatches)
+			}
+			out.Status("", fmt.Sprintf("No results found for %q", query))
+			formatProfileMismatchStatus(out, profileMismatches)
+			return nil
+		}
 		out.Status("", fmt.Sprintf("No results found for %q", query))
 		return nil
 	}
 
 	switch opts.format {
 	case "json":
-		return formatJSON(cmd, results)
+		return formatJSON(cmd, results, profileMismatches)
 	default:
+		formatProfileMismatchStatus(out, profileMismatches)
 		return formatText(out, query, results)
 	}
 }
 
 // formatDaemonResults formats search results from daemon.
-func formatDaemonResults(cmd *cobra.Command, out *output.Writer, query string, results []daemon.SearchResult, format string) error {
-	if len(results) == 0 {
+func formatDaemonResults(cmd *cobra.Command, out *output.Writer, query string, response daemon.SearchResponse, format string) error {
+	if len(response.Results) == 0 {
+		if len(response.ProfileMismatches) > 0 {
+			if format == "json" {
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(response)
+			}
+			out.Status("", fmt.Sprintf("No results found for %q", query))
+			formatDaemonProfileMismatchStatus(out, response.ProfileMismatches)
+			return nil
+		}
 		out.Status("", fmt.Sprintf("No results found for %q", query))
 		return nil
 	}
@@ -260,18 +298,22 @@ func formatDaemonResults(cmd *cobra.Command, out *output.Writer, query string, r
 	case "json":
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
-		return enc.Encode(results)
+		if len(response.ProfileMismatches) > 0 {
+			return enc.Encode(response)
+		}
+		return enc.Encode(response.Results)
 	default:
 		// FEAT-UNIX3: Show explain header if first result has explain data
-		if len(results) > 0 && results[0].Explain != nil {
-			formatDaemonExplainHeader(out, results[0].Explain)
+		if len(response.Results) > 0 && response.Results[0].Explain != nil {
+			formatDaemonExplainHeader(out, response.Results[0].Explain)
 		}
 
-		out.Statusf("🔍", "Found %d results for %q:", len(results), query)
+		formatDaemonProfileMismatchStatus(out, response.ProfileMismatches)
+		out.Statusf("🔍", "Found %d results for %q:", len(response.Results), query)
 		out.Newline()
 
-		hasExplain := len(results) > 0 && results[0].Explain != nil
-		for i, r := range results {
+		hasExplain := len(response.Results) > 0 && response.Results[0].Explain != nil
+		for i, r := range response.Results {
 			location := r.FilePath
 			if r.StartLine > 0 {
 				location = fmt.Sprintf("%s:%d", r.FilePath, r.StartLine)
@@ -328,6 +370,24 @@ func formatDaemonExplainHeader(out *output.Writer, explain *daemon.ExplainData) 
 	out.Status("", fmt.Sprintf("RRF Constant: k=%d", explain.RRFConstant))
 	out.Status("", "════════════════════════════════════════")
 	out.Newline()
+}
+
+func formatProfileMismatchStatus(out *output.Writer, mismatches []search.ProfileMismatch) {
+	if len(mismatches) == 0 {
+		return
+	}
+	first := mismatches[0]
+	out.Statusf("!", "%d result(s) excluded by profile; use --profile %s to inspect %s",
+		len(mismatches), first.RequiredProfile, first.SourcePath)
+}
+
+func formatDaemonProfileMismatchStatus(out *output.Writer, mismatches []daemon.ProfileMismatchResult) {
+	if len(mismatches) == 0 {
+		return
+	}
+	first := mismatches[0]
+	out.Statusf("!", "%d result(s) excluded by profile; use --profile %s to inspect %s",
+		len(mismatches), first.RequiredProfile, first.SourcePath)
 }
 
 // formatText outputs results in human-readable format.
@@ -405,14 +465,20 @@ func formatExplainHeader(out *output.Writer, explain *search.ExplainData) {
 }
 
 // formatJSON outputs results in JSON format.
-func formatJSON(cmd *cobra.Command, results []*search.SearchResult) error {
+func formatJSON(cmd *cobra.Command, results []*search.SearchResult, mismatches []search.ProfileMismatch) error {
 	type jsonResult struct {
-		FilePath  string  `json:"file_path"`
-		StartLine int     `json:"start_line"`
-		EndLine   int     `json:"end_line"`
-		Score     float64 `json:"score"`
-		Content   string  `json:"content"`
-		Language  string  `json:"language,omitempty"`
+		FilePath    string  `json:"file_path"`
+		StartLine   int     `json:"start_line"`
+		EndLine     int     `json:"end_line"`
+		Score       float64 `json:"score"`
+		Content     string  `json:"content"`
+		Language    string  `json:"language,omitempty"`
+		SourceClass string  `json:"source_class,omitempty"`
+		Authority   string  `json:"authority,omitempty"`
+		Profile     string  `json:"profile,omitempty"`
+		SourcePath  string  `json:"source_path,omitempty"`
+		Generated   bool    `json:"generated"`
+		Stale       bool    `json:"stale"`
 	}
 
 	var output []jsonResult
@@ -421,18 +487,49 @@ func formatJSON(cmd *cobra.Command, results []*search.SearchResult) error {
 			continue
 		}
 		output = append(output, jsonResult{
-			FilePath:  r.Chunk.FilePath,
-			StartLine: r.Chunk.StartLine,
-			EndLine:   r.Chunk.EndLine,
-			Score:     r.Score,
-			Content:   r.Chunk.Content,
-			Language:  r.Chunk.Language,
+			FilePath:    r.Chunk.FilePath,
+			StartLine:   r.Chunk.StartLine,
+			EndLine:     r.Chunk.EndLine,
+			Score:       r.Score,
+			Content:     r.Chunk.Content,
+			Language:    r.Chunk.Language,
+			SourceClass: string(r.SourceMetadata.SourceClass),
+			Authority:   string(r.SourceMetadata.Authority),
+			Profile:     string(r.SourceMetadata.Profile),
+			SourcePath:  r.SourceMetadata.SourcePath,
+			Generated:   r.SourceMetadata.Generated,
+			Stale:       r.SourceMetadata.Stale,
 		})
 	}
 
 	enc := json.NewEncoder(cmd.OutOrStdout())
 	enc.SetIndent("", "  ")
+	if len(mismatches) > 0 {
+		return enc.Encode(struct {
+			Results           []jsonResult                   `json:"results"`
+			ProfileMismatches []daemon.ProfileMismatchResult `json:"profile_mismatches"`
+		}{
+			Results:           output,
+			ProfileMismatches: toDaemonProfileMismatches(mismatches),
+		})
+	}
 	return enc.Encode(output)
+}
+
+func toDaemonProfileMismatches(mismatches []search.ProfileMismatch) []daemon.ProfileMismatchResult {
+	out := make([]daemon.ProfileMismatchResult, 0, len(mismatches))
+	for _, mismatch := range mismatches {
+		out = append(out, daemon.ProfileMismatchResult{
+			SourcePath:       mismatch.SourcePath,
+			RequestedProfile: string(mismatch.RequestedProfile),
+			RequiredProfile:  string(mismatch.RequiredProfile),
+			SourceClass:      string(mismatch.SourceClass),
+			Authority:        string(mismatch.Authority),
+			Reason:           mismatch.Reason,
+			Action:           mismatch.Action,
+		})
+	}
+	return out
 }
 
 // getSnippet returns the first n lines of content.

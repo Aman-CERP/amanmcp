@@ -25,11 +25,11 @@ type Engine struct {
 	metadata   store.MetadataStore
 	config     EngineConfig
 	fusion     *RRFFusion
-	classifier Classifier                // Optional query classifier for dynamic weights
-	metrics    *telemetry.QueryMetrics   // Optional query telemetry collector
-	expander   *QueryExpander            // QI-1 Lite: Code-aware query expansion for BM25
-	reranker   Reranker                  // FEAT-RR1: Optional cross-encoder reranker
-	multiQuery *MultiQuerySearcher       // FEAT-QI3: Optional multi-query decomposition
+	classifier Classifier              // Optional query classifier for dynamic weights
+	metrics    *telemetry.QueryMetrics // Optional query telemetry collector
+	expander   *QueryExpander          // QI-1 Lite: Code-aware query expansion for BM25
+	reranker   Reranker                // FEAT-RR1: Optional cross-encoder reranker
+	multiQuery *MultiQuerySearcher     // FEAT-QI3: Optional multi-query decomposition
 	mu         sync.RWMutex
 }
 
@@ -133,6 +133,9 @@ func NewEngine(
 	if metadata == nil {
 		return nil, fmt.Errorf("%w: metadata store is required", ErrNilDependency)
 	}
+	if err := config.RerankerPolicy.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid reranker policy: %w", err)
+	}
 	e := &Engine{
 		bm25:     bm25,
 		vector:   vector,
@@ -186,9 +189,14 @@ func (e *Engine) Search(ctx context.Context, query string, opts SearchOptions) (
 
 	// Dynamic weight classification if no explicit weights provided
 	if opts.Weights == nil && e.classifier != nil {
-		_, weights, err := e.classifier.Classify(ctx, query)
+		queryType, weights, confidence, confidenceState, err := e.classifyForSearch(ctx, query)
 		if err == nil {
 			opts.Weights = &weights
+			recordQueryClassification(opts, QueryClassification{
+				Type:            queryType,
+				Confidence:      confidence,
+				ConfidenceState: confidenceState,
+			})
 		}
 		// On error, fall through to applyDefaults which uses DefaultWeights
 	}
@@ -199,24 +207,33 @@ func (e *Engine) Search(ctx context.Context, query string, opts SearchOptions) (
 	// FEAT-DIM1: Explicit BM25-only mode (user requested via --bm25-only flag)
 	if opts.BM25Only {
 		slog.Info("bm25_only mode enabled (user requested)")
-		bm25Results, bm25Err := e.bm25.Search(ctx, query, opts.Limit*2)
+		candidateLimit := candidateLimitForOptions(query, opts)
+		bm25Results, bm25Err := e.bm25.Search(ctx, query, candidateLimit)
 		if bm25Err != nil {
 			return nil, fmt.Errorf("BM25 search failed: %w", bm25Err)
 		}
 		// Fuse with no vector results (BM25-only mode)
 		fused := e.fuseResults(bm25Results, nil, &Weights{BM25: 1.0, Semantic: 0.0})
 		// FEAT-RR1: Apply reranking after fusion
-		reranked := e.rerankResults(ctx, query, fused)
+		reranked := e.rerankResults(ctx, query, fused, opts)
 		enriched, err := e.enrichResults(ctx, reranked)
+		if err != nil {
+			return nil, err
+		}
+		enriched, err = e.addExactSymbolCandidates(ctx, enriched, query, opts)
 		if err != nil {
 			return nil, err
 		}
 		// FEAT-QI5: Enrich with adjacent context if requested
 		e.enrichResultsWithAdjacent(ctx, enriched, opts.AdjacentChunks, 5)
+		// TASK-SYN42: Exact lexical lookups should rank definitions above references.
+		enriched = ApplyExactMatchBoost(enriched, query)
 		// FEAT-QI4: Apply test file penalty to prioritize real implementations
 		enriched = ApplyTestFilePenalty(enriched)
 		// BUG-066: Apply path boost to prioritize internal/ over cmd/
 		enriched = ApplyPathBoost(enriched)
+		// F39: Apply authority/freshness boost after path boosts.
+		enriched = ApplyAuthorityBoost(enriched)
 		filtered := ApplyFilters(enriched, opts)
 		if len(filtered) > opts.Limit {
 			filtered = filtered[:opts.Limit]
@@ -236,24 +253,33 @@ func (e *Engine) Search(ctx context.Context, query string, opts SearchOptions) (
 			slog.String("recovery_2", "amanmcp search --bm25-only"),
 			slog.String("info", "amanmcp index info"))
 		// Skip vector search entirely - return BM25 results only
-		bm25Results, bm25Err := e.bm25.Search(ctx, query, opts.Limit*2)
+		candidateLimit := candidateLimitForOptions(query, opts)
+		bm25Results, bm25Err := e.bm25.Search(ctx, query, candidateLimit)
 		if bm25Err != nil {
 			return nil, fmt.Errorf("BM25 search failed (semantic disabled due to dimension mismatch): %w", bm25Err)
 		}
 		// Fuse with no vector results (BM25-only mode)
 		fused := e.fuseResults(bm25Results, nil, opts.Weights)
 		// FEAT-RR1: Apply reranking after fusion
-		reranked := e.rerankResults(ctx, query, fused)
+		reranked := e.rerankResults(ctx, query, fused, opts)
 		enriched, err := e.enrichResults(ctx, reranked)
+		if err != nil {
+			return nil, err
+		}
+		enriched, err = e.addExactSymbolCandidates(ctx, enriched, query, opts)
 		if err != nil {
 			return nil, err
 		}
 		// FEAT-QI5: Enrich with adjacent context if requested
 		e.enrichResultsWithAdjacent(ctx, enriched, opts.AdjacentChunks, 5)
+		// TASK-SYN42: Exact lexical lookups should rank definitions above references.
+		enriched = ApplyExactMatchBoost(enriched, query)
 		// FEAT-QI4: Apply test file penalty to prioritize real implementations
 		enriched = ApplyTestFilePenalty(enriched)
 		// BUG-066: Apply path boost to prioritize internal/ over cmd/
 		enriched = ApplyPathBoost(enriched)
+		// F39: Apply authority/freshness boost after path boosts.
+		enriched = ApplyAuthorityBoost(enriched)
 		filtered := ApplyFilters(enriched, opts)
 		if len(filtered) > opts.Limit {
 			filtered = filtered[:opts.Limit]
@@ -265,7 +291,8 @@ func (e *Engine) Search(ctx context.Context, query string, opts SearchOptions) (
 	}
 
 	// Run searches in parallel
-	bm25Results, vecResults, searchErr := e.parallelSearch(ctx, query, opts.Limit*2)
+	candidateLimit := candidateLimitForOptions(query, opts)
+	bm25Results, vecResults, searchErr := e.parallelSearch(ctx, query, candidateLimit)
 
 	// Handle graceful degradation
 	if searchErr != nil {
@@ -280,7 +307,7 @@ func (e *Engine) Search(ctx context.Context, query string, opts SearchOptions) (
 	fused := e.fuseResults(bm25Results, vecResults, opts.Weights)
 
 	// FEAT-RR1: Apply cross-encoder reranking after fusion
-	reranked := e.rerankResults(ctx, query, fused)
+	reranked := e.rerankResults(ctx, query, fused, opts)
 
 	// Enrich results with full chunk data
 	enriched, err := e.enrichResults(ctx, reranked)
@@ -288,13 +315,22 @@ func (e *Engine) Search(ctx context.Context, query string, opts SearchOptions) (
 		return nil, err
 	}
 
+	enriched, err = e.addExactSymbolCandidates(ctx, enriched, query, opts)
+	if err != nil {
+		return nil, err
+	}
+
 	// FEAT-QI5: Enrich with adjacent context if requested
 	e.enrichResultsWithAdjacent(ctx, enriched, opts.AdjacentChunks, 5)
 
+	// TASK-SYN42: Exact lexical lookups should rank definitions above references.
+	enriched = ApplyExactMatchBoost(enriched, query)
 	// FEAT-QI4: Apply test file penalty to prioritize real implementations
 	enriched = ApplyTestFilePenalty(enriched)
 	// BUG-066: Apply path boost to prioritize internal/ over cmd/
 	enriched = ApplyPathBoost(enriched)
+	// F39: Apply authority/freshness boost after path boosts.
+	enriched = ApplyAuthorityBoost(enriched)
 
 	// Apply filters after enrichment (need chunk metadata)
 	filtered := ApplyFilters(enriched, opts)
@@ -311,6 +347,36 @@ func (e *Engine) Search(ctx context.Context, query string, opts SearchOptions) (
 	e.recordMetrics(query, e.classifyQueryType(ctx, query, opts), len(filtered), time.Since(start))
 
 	return filtered, nil
+}
+
+func candidateLimitForQuery(query string, resultLimit int) int {
+	return candidateLimitForOptions(query, SearchOptions{Limit: resultLimit})
+}
+
+func candidateLimitForOptions(query string, opts SearchOptions) int {
+	resultLimit := opts.Limit
+	if resultLimit <= 0 {
+		resultLimit = DefaultConfig().DefaultLimit
+	}
+	baseLimit := resultLimit * 2
+	if !shouldBroadenCandidatePool(query, opts) {
+		return baseLimit
+	}
+
+	exactLimit := resultLimit * 10
+	if exactLimit < 50 {
+		return 50
+	}
+	return exactLimit
+}
+
+func shouldBroadenCandidatePool(query string, opts SearchOptions) bool {
+	switch opts.Mode {
+	case SearchModeDecisions, SearchModeDecisionHistory:
+		return true
+	default:
+		return shouldPreserveExactLexicalQuery(query)
+	}
 }
 
 // attachExplainData populates ExplainData on the first result when opts.Explain is true.
@@ -579,8 +645,48 @@ func (e *Engine) applyDefaults(opts SearchOptions) SearchOptions {
 		w := e.config.DefaultWeights
 		opts.Weights = &w
 	}
+	if len(opts.ProfileRules.Profiles) == 0 {
+		opts.ProfileRules = e.config.ProfileRules
+	}
+	if len(opts.ProfileRules.Profiles) == 0 {
+		opts.ProfileRules = DefaultProfileRules()
+	}
 
 	return opts
+}
+
+type confidenceClassifier interface {
+	ClassifyWithConfidence(ctx context.Context, query string) (QueryType, Weights, float64, error)
+}
+
+func (e *Engine) classifyForSearch(ctx context.Context, query string) (QueryType, Weights, *float64, string, error) {
+	if classifier, ok := e.classifier.(confidenceClassifier); ok {
+		queryType, weights, confidence, err := classifier.ClassifyWithConfidence(ctx, query)
+		if err != nil {
+			return queryType, weights, nil, QueryClassificationConfidenceUnavailable, err
+		}
+		return queryType, weights, &confidence, QueryClassificationConfidenceAvailable, nil
+	}
+
+	queryType, weights, err := e.classifier.Classify(ctx, query)
+	if err != nil {
+		return queryType, weights, nil, QueryClassificationConfidenceUnavailable, err
+	}
+	return queryType, weights, nil, QueryClassificationConfidenceNotReported, nil
+}
+
+func recordQueryClassification(opts SearchOptions, classification QueryClassification) {
+	if opts.QueryClassification == nil {
+		return
+	}
+	*opts.QueryClassification = classification
+}
+
+func recordRerankerStatus(opts SearchOptions, status RerankerStatus) {
+	if opts.RerankerStatus == nil {
+		return
+	}
+	*opts.RerankerStatus = status
 }
 
 // parallelSearch executes BM25 and vector searches concurrently.
@@ -738,18 +844,77 @@ func (e *Engine) enrichResults(ctx context.Context, fused []*fusedResult) ([]*Se
 		}
 
 		result := &SearchResult{
-			Chunk:        chunk,
-			Score:        f.rrfScore, // Use pre-calculated RRF score (already normalized 0-1)
-			BM25Score:    f.bm25Score,
-			VecScore:     f.vecScore,
-			BM25Rank:     f.bm25Rank, // FEAT-UNIX3: Expose for explain mode
-			VecRank:      f.vecRank,  // FEAT-UNIX3: Expose for explain mode
-			InBothLists:  f.inBothLists,
-			Highlights:   e.calculateHighlights(chunk.Content, f.matchedTerms),
-			MatchedTerms: f.matchedTerms, // UX-1: Expose matched terms for context display
+			Chunk:          chunk,
+			Score:          f.rrfScore, // Use pre-calculated RRF score (already normalized 0-1)
+			BM25Score:      f.bm25Score,
+			VecScore:       f.vecScore,
+			BM25Rank:       f.bm25Rank, // FEAT-UNIX3: Expose for explain mode
+			VecRank:        f.vecRank,  // FEAT-UNIX3: Expose for explain mode
+			InBothLists:    f.inBothLists,
+			Highlights:     e.calculateHighlights(chunk.Content, f.matchedTerms),
+			MatchedTerms:   f.matchedTerms, // UX-1: Expose matched terms for context display
+			SourceMetadata: SourceMetadataFromChunkWithRules(chunk, e.config.MetadataRules),
 		}
 
 		results = append(results, result)
+	}
+
+	return results, nil
+}
+
+// addExactSymbolCandidates supplements exact identifier searches with chunks
+// from the symbol table. BM25 can rank dense references above a long definition
+// chunk after code-aware tokenization splits identifiers, so the symbol table is
+// the authoritative path for exact owner lookup.
+func (e *Engine) addExactSymbolCandidates(ctx context.Context, results []*SearchResult, query string, opts SearchOptions) ([]*SearchResult, error) {
+	needle, quoted := exactMatchNeedle(query)
+	if needle == "" || quoted || strings.ContainsAny(needle, `/\`) {
+		return results, nil
+	}
+
+	seen := make(map[string]struct{}, len(results))
+	maxScore := 0.0
+	for _, result := range results {
+		if result == nil || result.Chunk == nil {
+			continue
+		}
+		seen[result.Chunk.ID] = struct{}{}
+		if result.Score > maxScore {
+			maxScore = result.Score
+		}
+	}
+	if maxScore <= 0 {
+		maxScore = 1
+	}
+
+	limit := opts.Limit
+	if limit < 10 {
+		limit = 10
+	}
+
+	chunks, err := e.metadata.GetChunksBySymbol(ctx, needle, limit)
+	if err != nil {
+		return nil, fmt.Errorf("load exact symbol candidates: %w", err)
+	}
+
+	terms := store.TokenizeCode(needle)
+	for _, chunk := range chunks {
+		if chunk == nil {
+			continue
+		}
+		if _, ok := seen[chunk.ID]; ok {
+			continue
+		}
+		results = append(results, &SearchResult{
+			Chunk: chunk,
+			// Tie with the current top lexical result; ApplyExactMatchBoost
+			// then boosts all exact matches uniformly in the shared pipeline.
+			Score:          maxScore,
+			Highlights:     e.calculateHighlights(chunk.Content, terms),
+			MatchedTerms:   terms,
+			SourceMetadata: SourceMetadataFromChunkWithRules(chunk, e.config.MetadataRules),
+		})
+		seen[chunk.ID] = struct{}{}
 	}
 
 	return results, nil
@@ -842,16 +1007,34 @@ func (e *Engine) enrichResultsWithAdjacent(ctx context.Context, results []*Searc
 // FEAT-RR1: Closes the 25% validation gap by reranking generic queries.
 // Returns original results unchanged if reranker is nil or unavailable.
 // DEBT-024: Instrumented with detailed timing for latency investigation.
-func (e *Engine) rerankResults(ctx context.Context, query string, fused []*fusedResult) []*fusedResult {
+func (e *Engine) rerankResults(ctx context.Context, query string, fused []*fusedResult, opts SearchOptions) []*fusedResult {
 	overallStart := time.Now()
+	policy := e.config.RerankerPolicy.normalized()
+	status := RerankerStatus{
+		Policy:         policy,
+		CandidateCount: len(fused),
+	}
 
-	// Skip if no reranker configured
+	// Skip if no reranker configured.
 	if e.reranker == nil {
+		status.State = RerankerStateNotConfigured
+		recordRerankerStatus(opts, status)
+		return fused
+	}
+
+	decision := DecideRerankerPolicy(policy, query, opts.QueryClassification)
+	if !decision.Apply {
+		status.State = RerankerStateSkipped
+		status.SkipReason = decision.SkipReason
+		recordRerankerStatus(opts, status)
 		return fused
 	}
 
 	// Skip if too few results to rerank
 	if len(fused) < 2 {
+		status.State = RerankerStateSkipped
+		status.SkipReason = RerankerSkipTooFewResults
+		recordRerankerStatus(opts, status)
 		return fused
 	}
 
@@ -860,6 +1043,8 @@ func (e *Engine) rerankResults(ctx context.Context, query string, fused []*fused
 	if !e.reranker.Available(ctx) {
 		slog.Debug("reranker unavailable, skipping reranking",
 			slog.Duration("avail_check", time.Since(availStart)))
+		status.State = RerankerStateUnavailable
+		recordRerankerStatus(opts, status)
 		return fused
 	}
 	availDuration := time.Since(availStart)
@@ -879,6 +1064,9 @@ func (e *Engine) rerankResults(ctx context.Context, query string, fused []*fused
 		slog.Warn("failed to fetch chunks for reranking, skipping",
 			slog.String("error", err.Error()),
 			slog.Duration("fetch_attempt", fetchDuration))
+		status.State = RerankerStateSkipped
+		status.SkipReason = RerankerSkipFetchFailed
+		recordRerankerStatus(opts, status)
 		return fused
 	}
 
@@ -906,8 +1094,13 @@ func (e *Engine) rerankResults(ctx context.Context, query string, fused []*fused
 	buildDuration := time.Since(buildStart)
 
 	if len(documents) == 0 {
+		status.State = RerankerStateSkipped
+		status.SkipReason = RerankerSkipNoDocuments
+		status.CandidateCount = len(documents)
+		recordRerankerStatus(opts, status)
 		return fused
 	}
+	status.CandidateCount = len(documents)
 
 	// DEBT-024: Measure reranker call
 	rerankStart := time.Now()
@@ -917,6 +1110,9 @@ func (e *Engine) rerankResults(ctx context.Context, query string, fused []*fused
 		slog.Warn("reranking failed, using original order",
 			slog.String("error", err.Error()),
 			slog.Duration("rerank_attempt", rerankDuration))
+		status.State = RerankerStateFailed
+		status.LatencyMS = rerankDuration.Milliseconds()
+		recordRerankerStatus(opts, status)
 		return fused
 	}
 
@@ -964,6 +1160,10 @@ func (e *Engine) rerankResults(ctx context.Context, query string, fused []*fused
 		slog.Duration("reorder", reorderDuration),
 		slog.Duration("total", totalDuration))
 
+	status.State = RerankerStateApplied
+	status.RerankedCount = len(finalResults)
+	status.LatencyMS = rerankDuration.Milliseconds()
+	recordRerankerStatus(opts, status)
 	return finalResults
 }
 
@@ -1059,14 +1259,22 @@ func (e *Engine) multiQuerySearch(ctx context.Context, query string, opts Search
 	if err != nil {
 		return nil, err
 	}
+	enriched, err = e.addExactSymbolCandidates(ctx, enriched, query, opts)
+	if err != nil {
+		return nil, err
+	}
 
 	// FEAT-QI5: Enrich with adjacent context if requested
 	e.enrichResultsWithAdjacent(ctx, enriched, opts.AdjacentChunks, 5)
 
+	// TASK-SYN42: Exact lexical lookups should rank definitions above references.
+	enriched = ApplyExactMatchBoost(enriched, query)
 	// FEAT-QI4: Apply test file penalty to prioritize real implementations
 	enriched = ApplyTestFilePenalty(enriched)
 	// BUG-066: Apply path boost to prioritize internal/ over cmd/
 	enriched = ApplyPathBoost(enriched)
+	// F39: Apply authority/freshness boost after path boosts.
+	enriched = ApplyAuthorityBoost(enriched)
 
 	// Apply filters after enrichment (need chunk metadata)
 	filtered := ApplyFilters(enriched, opts)
@@ -1098,9 +1306,14 @@ func (e *Engine) singleSearch(ctx context.Context, query string, opts SearchOpti
 
 	// Dynamic weight classification if no explicit weights provided
 	if opts.Weights == nil && e.classifier != nil {
-		_, weights, err := e.classifier.Classify(ctx, query)
+		queryType, weights, confidence, confidenceState, err := e.classifyForSearch(ctx, query)
 		if err == nil {
 			opts.Weights = &weights
+			recordQueryClassification(opts, QueryClassification{
+				Type:            queryType,
+				Confidence:      confidence,
+				ConfidenceState: confidenceState,
+			})
 		}
 	}
 
@@ -1109,7 +1322,8 @@ func (e *Engine) singleSearch(ctx context.Context, query string, opts SearchOpti
 
 	// Handle BM25-only mode
 	if opts.BM25Only {
-		bm25Results, err := e.bm25.Search(ctx, query, opts.Limit*2)
+		candidateLimit := candidateLimitForOptions(query, opts)
+		bm25Results, err := e.bm25.Search(ctx, query, candidateLimit)
 		if err != nil {
 			return nil, fmt.Errorf("BM25 search failed: %w", err)
 		}
@@ -1120,7 +1334,8 @@ func (e *Engine) singleSearch(ctx context.Context, query string, opts SearchOpti
 	// Validate dimensions
 	if err := e.validateDimensions(ctx); err != nil {
 		// Fall back to BM25-only
-		bm25Results, bm25Err := e.bm25.Search(ctx, query, opts.Limit*2)
+		candidateLimit := candidateLimitForOptions(query, opts)
+		bm25Results, bm25Err := e.bm25.Search(ctx, query, candidateLimit)
 		if bm25Err != nil {
 			return nil, fmt.Errorf("BM25 search failed: %w", bm25Err)
 		}
@@ -1129,7 +1344,8 @@ func (e *Engine) singleSearch(ctx context.Context, query string, opts SearchOpti
 	}
 
 	// Run parallel search
-	bm25Results, vecResults, _ := e.parallelSearch(ctx, query, opts.Limit*2)
+	candidateLimit := candidateLimitForOptions(query, opts)
+	bm25Results, vecResults, _ := e.parallelSearch(ctx, query, candidateLimit)
 
 	// Fuse results
 	fused := e.fuseResults(bm25Results, vecResults, opts.Weights)

@@ -295,7 +295,7 @@ func (d *Daemon) cleanup() {
 }
 
 // HandleSearch implements RequestHandler interface.
-func (d *Daemon) HandleSearch(ctx context.Context, params SearchParams) ([]SearchResult, error) {
+func (d *Daemon) HandleSearch(ctx context.Context, params SearchParams) (SearchResponse, error) {
 	// FEAT-AI3: Interrupt any ongoing compaction for this project
 	if d.compaction != nil {
 		d.compaction.InterruptCompaction(params.RootPath)
@@ -304,7 +304,7 @@ func (d *Daemon) HandleSearch(ctx context.Context, params SearchParams) ([]Searc
 	// Get or create project state
 	state, err := d.getOrCreateProject(ctx, params.RootPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load project: %w", err)
+		return SearchResponse{}, fmt.Errorf("failed to load project: %w", err)
 	}
 
 	// Update last used time
@@ -317,14 +317,17 @@ func (d *Daemon) HandleSearch(ctx context.Context, params SearchParams) ([]Searc
 	if limit <= 0 {
 		limit = 10
 	}
+	var profileMismatches []search.ProfileMismatch
 
 	searchOpts := search.SearchOptions{
-		Limit:    limit,
-		Filter:   params.Filter,
-		Language: params.Language,
-		Scopes:   params.Scopes,
-		BM25Only: params.BM25Only,
-		Explain:  params.Explain, // FEAT-UNIX3
+		Limit:             limit,
+		Filter:            params.Filter,
+		Language:          params.Language,
+		Scopes:            params.Scopes,
+		Profile:           search.Profile(params.Profile),
+		ProfileMismatches: &profileMismatches,
+		BM25Only:          params.BM25Only,
+		Explain:           params.Explain, // FEAT-UNIX3
 	}
 
 	slog.Debug("Executing search",
@@ -336,7 +339,7 @@ func (d *Daemon) HandleSearch(ctx context.Context, params SearchParams) ([]Searc
 	// Execute search via engine
 	results, err := state.engine.Search(ctx, params.Query, searchOpts)
 	if err != nil {
-		return nil, fmt.Errorf("search failed: %w", err)
+		return SearchResponse{}, fmt.Errorf("search failed: %w", err)
 	}
 
 	// Convert to daemon SearchResult format
@@ -346,12 +349,18 @@ func (d *Daemon) HandleSearch(ctx context.Context, params SearchParams) ([]Searc
 			continue
 		}
 		result := SearchResult{
-			FilePath:  r.Chunk.FilePath,
-			StartLine: r.Chunk.StartLine,
-			EndLine:   r.Chunk.EndLine,
-			Score:     r.Score,
-			Content:   r.Chunk.Content,
-			Language:  r.Chunk.Language,
+			FilePath:    r.Chunk.FilePath,
+			StartLine:   r.Chunk.StartLine,
+			EndLine:     r.Chunk.EndLine,
+			Score:       r.Score,
+			Content:     r.Chunk.Content,
+			Language:    r.Chunk.Language,
+			SourceClass: string(r.SourceMetadata.SourceClass),
+			Authority:   string(r.SourceMetadata.Authority),
+			Profile:     string(r.SourceMetadata.Profile),
+			SourcePath:  r.SourceMetadata.SourcePath,
+			Generated:   r.SourceMetadata.Generated,
+			Stale:       r.SourceMetadata.Stale,
 		}
 
 		// FEAT-UNIX3: Include explain data when requested
@@ -388,7 +397,29 @@ func (d *Daemon) HandleSearch(ctx context.Context, params SearchParams) ([]Searc
 		d.compaction.OnSearchComplete(params.RootPath)
 	}
 
-	return daemonResults, nil
+	return SearchResponse{
+		Results:           daemonResults,
+		ProfileMismatches: toDaemonProfileMismatches(profileMismatches),
+	}, nil
+}
+
+func toDaemonProfileMismatches(mismatches []search.ProfileMismatch) []ProfileMismatchResult {
+	if len(mismatches) == 0 {
+		return nil
+	}
+	out := make([]ProfileMismatchResult, 0, len(mismatches))
+	for _, mismatch := range mismatches {
+		out = append(out, ProfileMismatchResult{
+			SourcePath:       mismatch.SourcePath,
+			RequestedProfile: string(mismatch.RequestedProfile),
+			RequiredProfile:  string(mismatch.RequiredProfile),
+			SourceClass:      string(mismatch.SourceClass),
+			Authority:        string(mismatch.Authority),
+			Reason:           mismatch.Reason,
+			Action:           mismatch.Action,
+		})
+	}
+	return out
 }
 
 // GetStatus implements RequestHandler interface.
@@ -521,8 +552,11 @@ func (d *Daemon) loadProject(ctx context.Context, rootPath string) (*projectStat
 			BM25:     cfg.Search.BM25Weight,
 			Semantic: cfg.Search.SemanticWeight,
 		},
-		RRFConstant:   cfg.Search.RRFConstant,
-		SearchTimeout: search.DefaultConfig().SearchTimeout,
+		RRFConstant:    cfg.Search.RRFConstant,
+		SearchTimeout:  search.DefaultConfig().SearchTimeout,
+		MetadataRules:  cfg.SearchMetadataRules(),
+		ProfileRules:   cfg.SearchProfileRules(),
+		RerankerPolicy: search.RerankerPolicy(cfg.Search.Reranker.Policy),
 	}
 
 	// Build engine options

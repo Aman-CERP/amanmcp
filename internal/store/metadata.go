@@ -79,7 +79,7 @@ func NewSQLiteStoreWithConfig(dbPath string, cfg StoreConfig) (*SQLiteStore, err
 	// Set additional pragmas
 	// CRITICAL: busy_timeout MUST be set via PRAGMA, not DSN (DSN syntax may be ignored)
 	pragmas := []string{
-		"PRAGMA busy_timeout = 5000", // 5 second timeout for lock contention
+		"PRAGMA busy_timeout = 5000",                      // 5 second timeout for lock contention
 		fmt.Sprintf("PRAGMA cache_size=-%d", cacheSizeKB), // Negative = KB
 	}
 	for _, pragma := range pragmas {
@@ -1017,6 +1017,54 @@ func (s *SQLiteStore) GetChunks(ctx context.Context, ids []string) ([]*Chunk, er
 	}
 
 	return result, nil
+}
+
+// GetChunksBySymbol returns chunks that own an exact symbol name.
+func (s *SQLiteStore) GetChunksBySymbol(ctx context.Context, name string, limit int) ([]*Chunk, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+
+	query := `
+		SELECT chunk_id
+		FROM symbols
+		WHERE name = ?
+		GROUP BY chunk_id
+		ORDER BY
+			MIN(CASE type
+				WHEN 'type' THEN 0
+				WHEN 'class' THEN 1
+				WHEN 'interface' THEN 2
+				WHEN 'function' THEN 3
+				WHEN 'method' THEN 4
+				ELSE 5
+			END),
+			MIN(start_line)
+		LIMIT ?
+	`
+	rows, err := s.db.QueryContext(ctx, query, name, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query chunks by symbol: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	ids := make([]string, 0, limit)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("failed to scan symbol chunk id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate symbol chunk ids: %w", err)
+	}
+
+	return s.GetChunks(ctx, ids)
 }
 
 // getSymbolsForChunks retrieves symbols for multiple chunks in a single query.

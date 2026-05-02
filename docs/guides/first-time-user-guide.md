@@ -237,7 +237,7 @@ source ~/.zshrc  # or restart your terminal
 
 **Option C: Build from Source (Developers)**
 
-Requires Go 1.25.5+ and C toolchain:
+Requires Go 1.25.9+ and C toolchain:
 
 ```bash
 git clone https://github.com/Aman-CERP/amanmcp
@@ -280,7 +280,7 @@ amanmcp version
 **Expected output:**
 
 ```
-amanmcp 0.10.2 (commit: abc1234, built: 2026-01-16T00:00:00Z, go: go1.25.5)
+amanmcp 0.10.2 (commit: abc1234, built: 2026-01-16T00:00:00Z, go: go1.25.9)
 ```
 
 If you see `zsh: killed`, see the [Troubleshooting](#troubleshooting) section below.

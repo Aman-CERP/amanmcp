@@ -2,9 +2,9 @@
 
 **Local RAG for your codebase. Zero config. Privacy-first.**
 
-[![Version](https://img.shields.io/badge/version-0.10.2-green)](https://github.com/Aman-CERP/amanmcp/releases)
+[![Version](https://img.shields.io/badge/version-0.12.0-green)](https://github.com/Aman-CERP/amanmcp/releases)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Go](https://img.shields.io/badge/Go-1.25.5+-00ADD8?logo=go)](https://golang.org/)
+[![Go](https://img.shields.io/badge/Go-1.25.9+-00ADD8?logo=go)](https://golang.org/)
 
 ---
 
@@ -18,7 +18,7 @@
 
 ```bash
 # Install
-brew tap Aman-CERP/tap && brew install amanmcp
+brew tap Aman-CERP/amanmcp && brew install --cask amanmcp
 
 # Initialize (auto-starts Ollama, pulls model, indexes)
 cd your-project && amanmcp init
@@ -89,7 +89,7 @@ When connected via MCP, Claude has these tools:
 | See all CLI commands | [Command Reference](docs/reference/commands.md) |
 | Configure settings | [Configuration](docs/reference/configuration.md) |
 | Use MLX (Apple Silicon) | [MLX Setup](docs/guides/mlx-setup.md) |
-| Understand how search works | [Hybrid Search Guide](docs/guides/hybrid-search.md) |
+| Understand how search works | [Hybrid Search Guide](docs/concepts/hybrid-search.md) |
 | Contribute code | [Contributing](CONTRIBUTING.md) |
 
 ### Explore the Documentation
@@ -218,8 +218,8 @@ Browse our comprehensive documentation organized by topic. Each category highlig
 
 | Method | Command |
 |--------|---------|
-| **Homebrew** | `brew tap Aman-CERP/tap && brew install amanmcp` |
-| **Script** | `curl -sSL https://raw.githubusercontent.com/Aman-CERP/amanmcp/main/scripts/install.sh \| sh` |
+| **Homebrew** | `brew tap Aman-CERP/amanmcp && brew install --cask amanmcp` |
+| **Script** | `curl -sSL https://raw.githubusercontent.com/Aman-CERP/amanmcp/main/scripts/install.sh \| sh` (macOS arm64 release artifact) |
 | **From source** | `git clone ... && make install-local` |
 | **Offline** | `amanmcp init --offline` (BM25-only, no model needed) |
 
@@ -229,7 +229,7 @@ Browse our comprehensive documentation organized by topic. Each category highlig
 
 | Component | Choice |
 |-----------|--------|
-| Language | Go 1.25.5+ |
+| Language | Go 1.25.9+ |
 | Protocol | [MCP 2025-11-25](https://modelcontextprotocol.io/) |
 | Keyword Search | SQLite FTS5 BM25 (pure Go) |
 | Vector Search | [coder/hnsw](https://github.com/coder/hnsw) |

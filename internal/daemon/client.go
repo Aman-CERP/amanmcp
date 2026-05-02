@@ -84,13 +84,22 @@ func (c *Client) Ping(ctx context.Context) error {
 
 // Search sends a search request to the daemon.
 func (c *Client) Search(ctx context.Context, params SearchParams) ([]SearchResult, error) {
+	response, err := c.SearchDetailed(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	return response.Results, nil
+}
+
+// SearchDetailed sends a search request and returns diagnostics.
+func (c *Client) SearchDetailed(ctx context.Context, params SearchParams) (SearchResponse, error) {
 	if err := params.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid params: %w", err)
+		return SearchResponse{}, fmt.Errorf("invalid params: %w", err)
 	}
 
 	conn, err := c.Connect()
 	if err != nil {
-		return nil, err
+		return SearchResponse{}, err
 	}
 	defer conn.Close()
 
@@ -100,7 +109,7 @@ func (c *Client) Search(ctx context.Context, params SearchParams) ([]SearchResul
 		deadline = d
 	}
 	if err := conn.SetDeadline(deadline); err != nil {
-		return nil, fmt.Errorf("failed to set deadline: %w", err)
+		return SearchResponse{}, fmt.Errorf("failed to set deadline: %w", err)
 	}
 
 	req := Request{
@@ -111,30 +120,35 @@ func (c *Client) Search(ctx context.Context, params SearchParams) ([]SearchResul
 	}
 
 	if err := c.send(conn, req); err != nil {
-		return nil, err
+		return SearchResponse{}, err
 	}
 
 	resp, err := c.receive(conn)
 	if err != nil {
-		return nil, err
+		return SearchResponse{}, err
 	}
 
 	if resp.Error != nil {
-		return nil, fmt.Errorf("search failed: %s (code: %d)", resp.Error.Message, resp.Error.Code)
+		return SearchResponse{}, fmt.Errorf("search failed: %s (code: %d)", resp.Error.Message, resp.Error.Code)
 	}
 
 	// Decode results
 	resultData, err := json.Marshal(resp.Result)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal result: %w", err)
+		return SearchResponse{}, fmt.Errorf("failed to marshal result: %w", err)
 	}
 
-	var results []SearchResult
-	if err := json.Unmarshal(resultData, &results); err != nil {
-		return nil, fmt.Errorf("failed to decode results: %w", err)
+	var response SearchResponse
+	if err := json.Unmarshal(resultData, &response); err == nil && response.Results != nil {
+		return response, nil
 	}
 
-	return results, nil
+	var legacyResults []SearchResult
+	if err := json.Unmarshal(resultData, &legacyResults); err != nil {
+		return SearchResponse{}, fmt.Errorf("failed to decode results: %w", err)
+	}
+
+	return SearchResponse{Results: legacyResults}, nil
 }
 
 // Status retrieves daemon status.

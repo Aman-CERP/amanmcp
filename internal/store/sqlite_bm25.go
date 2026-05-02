@@ -37,7 +37,7 @@ func validateSQLiteIntegrity(path string) error {
 	}
 
 	// Try to open read-only for validation
-	db, err := sql.Open("sqlite", path+"?mode=ro")
+	db, err := sql.Open("sqlite", path+"?mode=ro&_busy_timeout=5000")
 	if err != nil {
 		return fmt.Errorf("cannot open for validation: %w", err)
 	}
@@ -66,6 +66,17 @@ func validateSQLiteIntegrity(path string) error {
 	return nil
 }
 
+func isSQLiteLockError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "database table is locked") ||
+		strings.Contains(msg, "sqlite_busy") ||
+		strings.Contains(msg, "sqlite_locked")
+}
+
 // NewSQLiteBM25Index creates a new SQLite FTS5-based BM25 index.
 // If path is empty, creates an in-memory index for testing.
 // Uses WAL mode for concurrent multi-process access (solves BUG-064).
@@ -83,6 +94,10 @@ func NewSQLiteBM25Index(path string, config BM25Config) (*SQLiteBM25Index, error
 
 		// Validate integrity before opening (BUG-049 pattern)
 		if validErr := validateSQLiteIntegrity(path); validErr != nil {
+			if isSQLiteLockError(validErr) {
+				return nil, fmt.Errorf("BM25 index locked at %s: %w", path, validErr)
+			}
+
 			slog.Warn("sqlite_bm25_index_corrupted",
 				slog.String("path", path),
 				slog.String("error", validErr.Error()))
@@ -120,11 +135,11 @@ func NewSQLiteBM25Index(path string, config BM25Config) (*SQLiteBM25Index, error
 	// Set additional pragmas via statements (DSN params may be ignored by modernc.org/sqlite)
 	// CRITICAL: WAL mode must be set via PRAGMA for modernc.org/sqlite
 	pragmas := []string{
-		"PRAGMA journal_mode = WAL",       // WAL mode for concurrent access (BUG-064 fix)
-		"PRAGMA busy_timeout = 5000",      // 5 second timeout for lock contention
-		"PRAGMA synchronous = NORMAL",     // Balance durability and performance
-		"PRAGMA cache_size = -65536",      // 64MB cache (negative = KB)
-		"PRAGMA temp_store = MEMORY",      // Keep temp tables in memory
+		"PRAGMA journal_mode = WAL",   // WAL mode for concurrent access (BUG-064 fix)
+		"PRAGMA busy_timeout = 5000",  // 5 second timeout for lock contention
+		"PRAGMA synchronous = NORMAL", // Balance durability and performance
+		"PRAGMA cache_size = -65536",  // 64MB cache (negative = KB)
+		"PRAGMA temp_store = MEMORY",  // Keep temp tables in memory
 	}
 	for _, pragma := range pragmas {
 		if _, err := db.Exec(pragma); err != nil {

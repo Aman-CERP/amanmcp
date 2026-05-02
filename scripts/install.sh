@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# AmanMCP Universal Install Script
-# Usage: curl -sSL https://raw.githubusercontent.com/amanmcp/amanmcp/main/scripts/install.sh | sh
+# AmanMCP Install Script
+# Usage: curl -sSL https://raw.githubusercontent.com/Aman-CERP/amanmcp/main/scripts/install.sh | sh
 #
 # This script:
 # 1. Detects your OS and architecture
@@ -10,7 +10,7 @@
 set -euo pipefail
 
 # Configuration
-GITHUB_REPO="amanmcp/amanmcp"
+GITHUB_REPO="${AMANMCP_GITHUB_REPO:-Aman-CERP/amanmcp}"
 INSTALL_DIR="${HOME}/.local/bin"
 
 # Colors for output
@@ -66,12 +66,29 @@ check_dependencies() {
     done
 }
 
+# Check whether the detected platform has a published release artifact.
+validate_supported_platform() {
+    local os=$1
+    local arch=$2
+
+    if [[ "$os" == "darwin" && "$arch" == "arm64" ]]; then
+        return 0
+    fi
+
+    error "No prebuilt AmanMCP release artifact is published for ${os}/${arch}. Use 'make install-local' from source for this platform."
+}
+
 # Get latest version from GitHub API
 get_latest_version() {
     local version
+    if [[ -n "${AMANMCP_INSTALL_VERSION:-}" ]]; then
+        echo "$AMANMCP_INSTALL_VERSION"
+        return 0
+    fi
+
     version=$(curl -sS "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | cut -d '"' -f4)
     if [[ -z "$version" ]]; then
-        error "Failed to fetch latest version from GitHub. Check your internet connection."
+        error "Failed to fetch latest stable version from GitHub. Set AMANMCP_INSTALL_VERSION=vX.Y.Z for a specific release."
     fi
     echo "$version"
 }
@@ -94,8 +111,20 @@ download_release() {
     local url="https://github.com/${GITHUB_REPO}/releases/download/${version}/${tarball}"
 
     info "Downloading $tarball..."
-    if ! curl -sL "$url" -o "$tmp_dir/amanmcp.tar.gz"; then
+    if ! curl -fsSL "$url" -o "$tmp_dir/amanmcp.tar.gz"; then
         error "Failed to download release. URL: $url"
+    fi
+
+    local checksums_url="https://github.com/${GITHUB_REPO}/releases/download/${version}/checksums.txt"
+    if curl -fsSL "$checksums_url" -o "$tmp_dir/checksums.txt"; then
+        if command -v shasum &> /dev/null && grep -F "  ${tarball}" "$tmp_dir/checksums.txt" > "$tmp_dir/${tarball}.sha256"; then
+            info "Verifying checksum..."
+            (cd "$tmp_dir" && shasum -a 256 -c "${tarball}.sha256")
+        else
+            warn "Checksum file did not contain $tarball or shasum is unavailable; skipping checksum verification"
+        fi
+    else
+        warn "checksums.txt not found for $version; skipping checksum verification"
     fi
 
     info "Extracting..."
@@ -234,6 +263,7 @@ main() {
     os=$(detect_os)
     arch=$(detect_arch)
     success "Detected: $os/$arch"
+    validate_supported_platform "$os" "$arch"
 
     info "Fetching latest version..."
     local version

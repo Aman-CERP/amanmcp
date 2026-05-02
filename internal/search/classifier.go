@@ -136,9 +136,9 @@ var _ Classifier = (*HybridClassifier)(nil)
 
 // LLMClassifier uses Ollama LLM for query classification.
 type LLMClassifier struct {
-	client  *http.Client
-	config  ClassifierConfig
-	prompt  string
+	client *http.Client
+	config ClassifierConfig
+	prompt string
 }
 
 // generateRequest is the Ollama /api/generate request body.

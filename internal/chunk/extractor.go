@@ -253,9 +253,9 @@ func (e *SymbolExtractor) extractTypeScriptName(n *Node, source []byte) string {
 		}
 	}
 
-	// Look for identifier or type_identifier
+	// Look for identifier or type/property identifier
 	for _, child := range n.Children {
-		if child.Type == "identifier" || child.Type == "type_identifier" {
+		if child.Type == "identifier" || child.Type == "type_identifier" || child.Type == "property_identifier" {
 			return child.GetContent(source)
 		}
 	}
@@ -279,7 +279,7 @@ func (e *SymbolExtractor) extractJavaScriptName(n *Node, source []byte) string {
 
 	// Look for identifier
 	for _, child := range n.Children {
-		if child.Type == "identifier" {
+		if child.Type == "identifier" || child.Type == "property_identifier" {
 			return child.GetContent(source)
 		}
 	}

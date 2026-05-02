@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/Aman-CERP/amanmcp/internal/language"
 )
 
 // CodeChunkerOptions configures the code chunker behavior
@@ -30,14 +32,31 @@ func NewCodeChunker() *CodeChunker {
 
 // NewCodeChunkerWithOptions creates a new code chunker with custom options
 func NewCodeChunkerWithOptions(opts CodeChunkerOptions) *CodeChunker {
+	registry := NewLanguageRegistry()
+	return NewCodeChunkerWithRegistry(opts, registry)
+}
+
+// NewCodeChunkerWithLanguageDefinitions creates a chunker using validated
+// built-ins plus user language definitions.
+func NewCodeChunkerWithLanguageDefinitions(opts CodeChunkerOptions, defs []language.Definition) (*CodeChunker, error) {
+	registry, err := NewLanguageRegistryFromDefinitions(defs)
+	if err != nil {
+		return nil, err
+	}
+	return NewCodeChunkerWithRegistry(opts, registry), nil
+}
+
+// NewCodeChunkerWithRegistry creates a chunker with a test-isolated registry.
+func NewCodeChunkerWithRegistry(opts CodeChunkerOptions, registry *LanguageRegistry) *CodeChunker {
 	if opts.MaxChunkTokens == 0 {
 		opts.MaxChunkTokens = DefaultMaxChunkTokens
 	}
 	if opts.OverlapTokens == 0 {
 		opts.OverlapTokens = DefaultOverlapTokens
 	}
-
-	registry := DefaultRegistry()
+	if registry == nil {
+		registry = NewLanguageRegistry()
+	}
 	return &CodeChunker{
 		parser:    NewParserWithRegistry(registry),
 		extractor: NewSymbolExtractorWithRegistry(registry),
@@ -64,28 +83,30 @@ func (c *CodeChunker) Chunk(ctx context.Context, file *FileInput) ([]*Chunk, err
 		return nil, nil
 	}
 
-	// Check if language is supported
-	_, supported := c.registry.GetByName(file.Language)
+	config, supported := c.registry.ResolveForFile(file.Path, file.Language)
 	if !supported {
 		// Fall back to line-based chunking
-		return c.chunkByLines(file)
+		return c.chunkByLines(file, "legacy_fallback")
+	}
+	if config.LineFallback {
+		return c.chunkByLines(file, config.ConfigSource)
 	}
 
 	// Parse the file
-	tree, err := c.parser.Parse(ctx, file.Content, file.Language)
+	tree, err := c.parser.Parse(ctx, file.Content, config.Name)
 	if err != nil {
 		// Fall back to line-based chunking on parse error
-		return c.chunkByLines(file)
+		return c.chunkByLines(file, config.ConfigSource)
 	}
 
 	// Extract context (package declaration, imports)
-	fileContext := c.extractFileContext(tree, file.Content, file.Language)
+	fileContext := c.extractFileContext(tree, file.Content, config.Name)
 
 	// Enrich context with file path marker for better embedding quality
-	fileContext = c.enrichContextWithFilePath(file.Path, file.Language, fileContext)
+	fileContext = c.enrichContextWithFilePath(file.Path, config.Name, fileContext)
 
 	// Find symbol nodes (functions, classes, methods, types)
-	symbolNodes := c.findSymbolNodes(tree, file.Language)
+	symbolNodes := c.findSymbolNodes(tree, config.Name)
 
 	if len(symbolNodes) == 0 {
 		return nil, nil
@@ -96,7 +117,7 @@ func (c *CodeChunker) Chunk(ctx context.Context, file *FileInput) ([]*Chunk, err
 	now := time.Now()
 
 	for _, node := range symbolNodes {
-		nodeChunks := c.createChunksFromNode(node, tree, file, fileContext, now)
+		nodeChunks := c.createChunksFromNode(node, tree, file, fileContext, config, now)
 		chunks = append(chunks, nodeChunks...)
 	}
 
@@ -118,8 +139,14 @@ func (c *CodeChunker) findSymbolNodes(tree *Tree, language string) []*symbolNode
 	}
 
 	var symbolNodes []*symbolNodeInfo
+	symbolTypes := symbolTypesForConfig(config)
+	for _, child := range tree.Root.Children {
+		c.collectSymbolNodes(child, tree, language, symbolTypes, &symbolNodes)
+	}
+	return symbolNodes
+}
 
-	// Build set of symbol-defining node types
+func symbolTypesForConfig(config *LanguageConfig) map[string]SymbolType {
 	symbolTypes := make(map[string]SymbolType)
 	for _, t := range config.FunctionTypes {
 		symbolTypes[t] = SymbolTypeFunction
@@ -142,38 +169,30 @@ func (c *CodeChunker) findSymbolNodes(tree *Tree, language string) []*symbolNode
 	for _, t := range config.VariableTypes {
 		symbolTypes[t] = SymbolTypeVariable
 	}
+	return symbolTypes
+}
 
-	// Walk tree to find symbol nodes
-	tree.Root.Walk(func(n *Node) bool {
-		// For JS/TS lexical_declaration/variable_declaration, check for arrow functions first
-		// Arrow functions should be typed as Function, not Constant
-		if n.Type == "lexical_declaration" || n.Type == "variable_declaration" {
-			sym := c.extractor.extractSpecialSymbol(n, tree.Source, language)
-			if sym != nil {
-				// It's an arrow function or function expression
-				symbolNodes = append(symbolNodes, &symbolNodeInfo{
-					node:   n,
-					symbol: sym,
-				})
-				return true // Already handled, don't process as constant
-			}
-			// Not an arrow function - fall through to check as constant/variable
+func (c *CodeChunker) collectSymbolNodes(n *Node, tree *Tree, language string, symbolTypes map[string]SymbolType, symbolNodes *[]*symbolNodeInfo) {
+	// For JS/TS lexical_declaration/variable_declaration, check for arrow functions first.
+	if n.Type == "lexical_declaration" || n.Type == "variable_declaration" {
+		sym := c.extractor.extractSpecialSymbol(n, tree.Source, language)
+		if sym != nil {
+			*symbolNodes = append(*symbolNodes, &symbolNodeInfo{node: n, symbol: sym})
+			return
 		}
+	}
 
-		// Check if this is a symbol-defining node type
-		if symType, isSymbol := symbolTypes[n.Type]; isSymbol {
-			sym := c.extractSymbol(n, tree, symType, language)
-			if sym != nil {
-				symbolNodes = append(symbolNodes, &symbolNodeInfo{
-					node:   n,
-					symbol: sym,
-				})
-			}
+	if symType, isSymbol := symbolTypes[n.Type]; isSymbol {
+		sym := c.extractSymbol(n, tree, symType, language)
+		if sym != nil {
+			*symbolNodes = append(*symbolNodes, &symbolNodeInfo{node: n, symbol: sym})
+			return
 		}
-		return true
-	})
+	}
 
-	return symbolNodes
+	for _, child := range n.Children {
+		c.collectSymbolNodes(child, tree, language, symbolTypes, symbolNodes)
+	}
 }
 
 // extractSymbol extracts symbol info from a node
@@ -254,7 +273,7 @@ func (c *CodeChunker) extractDocComment(n *Node, source []byte, language string)
 }
 
 // createChunksFromNode creates one or more chunks from a symbol node
-func (c *CodeChunker) createChunksFromNode(info *symbolNodeInfo, tree *Tree, file *FileInput, fileContext string, now time.Time) []*Chunk {
+func (c *CodeChunker) createChunksFromNode(info *symbolNodeInfo, tree *Tree, file *FileInput, fileContext string, config *LanguageConfig, now time.Time) []*Chunk {
 	node := info.node
 	rawContent := string(tree.Source[node.StartByte:node.EndByte])
 
@@ -269,12 +288,12 @@ func (c *CodeChunker) createChunksFromNode(info *symbolNodeInfo, tree *Tree, fil
 
 	if tokens <= c.options.MaxChunkTokens {
 		// Small enough to be a single chunk
-		chunk := c.createChunk(file, rawContentWithDoc, fileContext, info.symbol, now)
+		chunk := c.createChunk(file, rawContentWithDoc, fileContext, info.symbol, config, now)
 		return []*Chunk{chunk}
 	}
 
 	// Need to split large symbol
-	return c.splitLargeSymbol(info, tree, file, fileContext, now)
+	return c.splitLargeSymbol(info, tree, file, fileContext, config, now)
 }
 
 // getRawContentWithDocComment gets raw content including doc comment
@@ -297,45 +316,115 @@ func (c *CodeChunker) getRawContentWithDocComment(n *Node, source []byte, docCom
 	return string(source[lineStart:n.EndByte])
 }
 
+const maxCASTSplitDepth = 8
+
 // splitLargeSymbol splits a large symbol into multiple chunks
-func (c *CodeChunker) splitLargeSymbol(info *symbolNodeInfo, tree *Tree, file *FileInput, fileContext string, now time.Time) []*Chunk {
+func (c *CodeChunker) splitLargeSymbol(info *symbolNodeInfo, tree *Tree, file *FileInput, fileContext string, config *LanguageConfig, now time.Time) []*Chunk {
+	return c.splitSymbolRecursive(info, nil, tree, file, fileContext, config, now, 0)
+}
+
+func (c *CodeChunker) splitSymbolRecursive(info *symbolNodeInfo, ancestors []*Symbol, tree *Tree, file *FileInput, fileContext string, config *LanguageConfig, now time.Time, depth int) []*Chunk {
 	node := info.node
 	content := string(tree.Source[node.StartByte:node.EndByte])
 
-	// Try to split at logical boundaries (child symbols for classes)
-	if info.symbol.Type == SymbolTypeClass {
-		// For classes, try to split by methods
-		methodChunks := c.splitClassByMethods(info, tree, file, fileContext, now)
-		if len(methodChunks) > 0 {
-			return methodChunks
-		}
+	childSymbols := c.findSemanticChildSymbols(info, tree, config)
+	if len(childSymbols) > 0 && depth < maxCASTSplitDepth {
+		return c.splitBySemanticChildren(info, ancestors, childSymbols, tree, file, fileContext, config, now, depth)
 	}
 
 	// Fall back to line-based splitting with overlap
-	return c.splitByLines(content, info.symbol, file, fileContext, now, int(node.StartPoint.Row)+1)
+	reason := "no_semantic_children"
+	if depth >= maxCASTSplitDepth {
+		reason = "max_ast_split_depth"
+	}
+	chunks := c.splitByLines(content, info.symbol, file, fileContext, config, now, int(node.StartPoint.Row)+1, reason)
+	if len(ancestors) > 0 {
+		c.placeParentSymbolsOnce(chunks, ancestors...)
+		for _, chunk := range chunks {
+			chunk.Metadata["parent_symbol"] = ancestors[len(ancestors)-1].Name
+		}
+	}
+	return chunks
 }
 
-// splitClassByMethods splits a class into method-based chunks
-func (c *CodeChunker) splitClassByMethods(info *symbolNodeInfo, tree *Tree, file *FileInput, fileContext string, now time.Time) []*Chunk {
-	// This is a placeholder - in practice we'd walk the class node
-	// to find method children and create individual chunks for each
-	return nil // Will fall through to line splitting
+func (c *CodeChunker) findSemanticChildSymbols(parent *symbolNodeInfo, tree *Tree, config *LanguageConfig) []*symbolNodeInfo {
+	var children []*symbolNodeInfo
+	symbolTypes := symbolTypesForConfig(config)
+	for _, child := range parent.node.Children {
+		c.collectSymbolNodes(child, tree, tree.Language, symbolTypes, &children)
+	}
+	return children
+}
+
+func (c *CodeChunker) splitBySemanticChildren(parent *symbolNodeInfo, ancestors []*Symbol, children []*symbolNodeInfo, tree *Tree, file *FileInput, fileContext string, config *LanguageConfig, now time.Time, depth int) []*Chunk {
+	chunks := make([]*Chunk, 0, len(children))
+	parentSymbols := appendSymbol(ancestors, parent.symbol)
+	parentPlaced := false
+	for _, child := range children {
+		rawContent := string(tree.Source[child.node.StartByte:child.node.EndByte])
+		if child.symbol.DocComment != "" {
+			rawContent = c.getRawContentWithDocComment(child.node, tree.Source, child.symbol.DocComment)
+		}
+		var produced []*Chunk
+		if estimateTokens(rawContent) > c.options.MaxChunkTokens {
+			produced = c.splitSymbolRecursive(child, parentSymbols, tree, file, fileContext, config, now, depth+1)
+		} else {
+			produced = []*Chunk{c.createSplitChunk(file, rawContent, fileContext, child.symbol, parent.symbol, config, now, false)}
+		}
+		if !parentPlaced && len(produced) > 0 {
+			c.placeParentSymbolsOnce(produced, parentSymbols...)
+			parentPlaced = true
+		}
+		for _, chunk := range produced {
+			chunk.Metadata["parent_symbol"] = parent.symbol.Name
+		}
+		chunks = append(chunks, produced...)
+	}
+	return chunks
+}
+
+func appendSymbol(symbols []*Symbol, symbol *Symbol) []*Symbol {
+	out := make([]*Symbol, 0, len(symbols)+1)
+	out = append(out, symbols...)
+	out = append(out, symbol)
+	return out
+}
+
+func (c *CodeChunker) placeParentSymbolsOnce(chunks []*Chunk, parents ...*Symbol) {
+	if len(chunks) == 0 {
+		return
+	}
+	for _, parent := range parents {
+		c.placeParentSymbol(chunks[0], parent)
+	}
+}
+
+func (c *CodeChunker) placeParentSymbol(chunk *Chunk, parent *Symbol) {
+	if chunk == nil || parent == nil {
+		return
+	}
+	for _, sym := range chunk.Symbols {
+		if sym.Name == parent.Name && sym.Type == parent.Type {
+			return
+		}
+	}
+	chunk.Symbols = append(chunk.Symbols, &Symbol{
+		Name:      parent.Name,
+		Type:      parent.Type,
+		StartLine: parent.StartLine,
+		EndLine:   parent.EndLine,
+	})
 }
 
 // splitByLines splits content into line-based chunks with overlap
-func (c *CodeChunker) splitByLines(content string, symbol *Symbol, file *FileInput, fileContext string, now time.Time, startLine int) []*Chunk {
+func (c *CodeChunker) splitByLines(content string, symbol *Symbol, file *FileInput, fileContext string, config *LanguageConfig, now time.Time, startLine int, reason string) []*Chunk {
 	lines := strings.Split(content, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
 	// Return empty slice, not nil, for consistent API behavior (DEBT-012)
 	if len(lines) == 0 {
 		return []*Chunk{}
-	}
-
-	// Calculate lines per chunk (roughly)
-	// TokensPerChar = 4, so ~128 chars = 32 tokens per line average
-	// For 300 tokens, that's about 9-10 lines, but we'll use more conservative estimate
-	maxLinesPerChunk := (c.options.MaxChunkTokens * TokensPerChar) / 80 // Assume 80 chars per line average
-	if maxLinesPerChunk < 20 {
-		maxLinesPerChunk = 20
 	}
 
 	overlapLines := (c.options.OverlapTokens * TokensPerChar) / 80
@@ -345,12 +434,31 @@ func (c *CodeChunker) splitByLines(content string, symbol *Symbol, file *FileInp
 
 	var chunks []*Chunk
 	for i := 0; i < len(lines); {
-		end := i + maxLinesPerChunk
-		if end > len(lines) {
-			end = len(lines)
+		if estimateTokens(lines[i]) > c.options.MaxChunkTokens {
+			lineChunks := c.splitLongLine(lines[i], symbol, file, fileContext, config, now, startLine+i, reason, len(chunks))
+			chunks = append(chunks, lineChunks...)
+			i++
+			continue
 		}
 
-		chunkContent := strings.Join(lines[i:end], "\n")
+		end := i
+		var chunkContent string
+		for end < len(lines) {
+			candidateLines := lines[i : end+1]
+			candidate := strings.Join(candidateLines, "\n")
+			if estimateTokens(candidate) > c.options.MaxChunkTokens && end > i {
+				break
+			}
+			chunkContent = candidate
+			end++
+			if estimateTokens(candidate) >= c.options.MaxChunkTokens {
+				break
+			}
+		}
+		if chunkContent == "" {
+			chunkContent = lines[i]
+			end = i + 1
+		}
 		chunkStartLine := startLine + i
 		chunkEndLine := startLine + end - 1
 
@@ -379,7 +487,7 @@ func (c *CodeChunker) splitByLines(content string, symbol *Symbol, file *FileInp
 		}
 
 		chunk := &Chunk{
-			ID:          generateChunkID(file.Path, chunkContent),
+			ID:          generateChunkIDWithDisambiguator(file.Path, chunkContent, subSymbol.Name),
 			FilePath:    file.Path,
 			Content:     combineContextAndContent(fileContext, chunkContent),
 			RawContent:  chunkContent,
@@ -389,24 +497,88 @@ func (c *CodeChunker) splitByLines(content string, symbol *Symbol, file *FileInp
 			StartLine:   chunkStartLine,
 			EndLine:     chunkEndLine,
 			Symbols:     symbols,
-			Metadata:    make(map[string]string),
-			CreatedAt:   now,
-			UpdatedAt:   now,
+			Metadata: map[string]string{
+				"chunk_provenance":       "ast",
+				"split_strategy":         "line_fallback",
+				"split_reason":           reason,
+				"parent_symbol":          symbol.Name,
+				"language_config_source": config.ConfigSource,
+			},
+			CreatedAt: now,
+			UpdatedAt: now,
 		}
 		chunks = append(chunks, chunk)
 
 		// Move forward, accounting for overlap
-		i = end - overlapLines
-		if i <= 0 || end >= len(lines) {
+		next := end - overlapLines
+		if next <= i {
+			next = end
+		}
+		if end >= len(lines) {
 			break
 		}
+		i = next
 	}
 
 	return chunks
 }
 
+func (c *CodeChunker) splitLongLine(line string, symbol *Symbol, file *FileInput, fileContext string, config *LanguageConfig, now time.Time, lineNumber int, reason string, existingChunks int) []*Chunk {
+	maxChars := c.options.MaxChunkTokens * TokensPerChar
+	if maxChars < 1 {
+		maxChars = TokensPerChar
+	}
+
+	chunks := make([]*Chunk, 0, (len(line)/maxChars)+1)
+	for start := 0; start < len(line); start += maxChars {
+		end := start + maxChars
+		if end > len(line) {
+			end = len(line)
+		}
+		chunkContent := line[start:end]
+		partNumber := existingChunks + len(chunks) + 1
+		subSymbol := &Symbol{
+			Name:      fmt.Sprintf("%s_part%d", symbol.Name, partNumber),
+			Type:      symbol.Type,
+			StartLine: lineNumber,
+			EndLine:   lineNumber,
+		}
+		symbols := []*Symbol{subSymbol}
+		if existingChunks == 0 && len(chunks) == 0 {
+			symbols = append(symbols, &Symbol{
+				Name:      symbol.Name,
+				Type:      symbol.Type,
+				StartLine: symbol.StartLine,
+				EndLine:   symbol.EndLine,
+			})
+		}
+		chunks = append(chunks, &Chunk{
+			ID:          generateChunkIDWithDisambiguator(file.Path, chunkContent, subSymbol.Name),
+			FilePath:    file.Path,
+			Content:     combineContextAndContent(fileContext, chunkContent),
+			RawContent:  chunkContent,
+			Context:     fileContext,
+			ContentType: ContentTypeCode,
+			Language:    file.Language,
+			StartLine:   lineNumber,
+			EndLine:     lineNumber,
+			Symbols:     symbols,
+			Metadata: map[string]string{
+				"chunk_provenance":       "ast",
+				"split_strategy":         "line_fallback",
+				"split_reason":           reason,
+				"parent_symbol":          symbol.Name,
+				"language_config_source": config.ConfigSource,
+			},
+			CreatedAt: now,
+			UpdatedAt: now,
+		})
+	}
+	return chunks
+}
+
 // createChunk creates a single chunk from content
-func (c *CodeChunker) createChunk(file *FileInput, rawContent, fileContext string, symbol *Symbol, now time.Time) *Chunk {
+func (c *CodeChunker) createChunk(file *FileInput, rawContent, fileContext string, symbol *Symbol, config *LanguageConfig, now time.Time) *Chunk {
 	return &Chunk{
 		ID:          generateChunkID(file.Path, rawContent),
 		FilePath:    file.Path,
@@ -418,9 +590,45 @@ func (c *CodeChunker) createChunk(file *FileInput, rawContent, fileContext strin
 		StartLine:   symbol.StartLine,
 		EndLine:     symbol.EndLine,
 		Symbols:     []*Symbol{symbol},
-		Metadata:    make(map[string]string),
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		Metadata: map[string]string{
+			"chunk_provenance":       "ast",
+			"language_config_source": config.ConfigSource,
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+}
+
+func (c *CodeChunker) createSplitChunk(file *FileInput, rawContent, fileContext string, symbol, parent *Symbol, config *LanguageConfig, now time.Time, includeParentSymbol bool) *Chunk {
+	symbols := []*Symbol{symbol}
+	if includeParentSymbol {
+		symbols = append(symbols, &Symbol{
+			Name:      parent.Name,
+			Type:      parent.Type,
+			StartLine: parent.StartLine,
+			EndLine:   parent.EndLine,
+		})
+	}
+	return &Chunk{
+		ID:          generateChunkID(file.Path, rawContent),
+		FilePath:    file.Path,
+		Content:     combineContextAndContent(fileContext, rawContent),
+		RawContent:  rawContent,
+		Context:     fileContext,
+		ContentType: ContentTypeCode,
+		Language:    file.Language,
+		StartLine:   symbol.StartLine,
+		EndLine:     symbol.EndLine,
+		Symbols:     symbols,
+		Metadata: map[string]string{
+			"chunk_provenance":       "ast",
+			"split_strategy":         "ast_recursive",
+			"split_reason":           "max_tokens_exceeded",
+			"parent_symbol":          parent.Name,
+			"language_config_source": config.ConfigSource,
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 }
 
@@ -494,54 +702,109 @@ func (c *CodeChunker) extractPythonContext(tree *Tree, source []byte) []string {
 }
 
 // chunkByLines is the fallback for unsupported languages
-func (c *CodeChunker) chunkByLines(file *FileInput) ([]*Chunk, error) {
+func (c *CodeChunker) chunkByLines(file *FileInput, configSource string) ([]*Chunk, error) {
 	content := string(file.Content)
 	if strings.TrimSpace(content) == "" {
 		return nil, nil
 	}
 
 	lines := strings.Split(content, "\n")
-	linesPerChunk := 128 // ~512 tokens at 4 chars per token, 80 chars per line
-	overlapLines := 16   // ~64 tokens overlap
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) == 0 {
+		return []*Chunk{}, nil
+	}
+
+	overlapLines := (c.options.OverlapTokens * TokensPerChar) / 80
+	if overlapLines < 2 {
+		overlapLines = 2
+	}
 
 	var chunks []*Chunk
 	now := time.Now()
 
 	for i := 0; i < len(lines); {
-		end := i + linesPerChunk
-		if end > len(lines) {
-			end = len(lines)
+		if estimateTokens(lines[i]) > c.options.MaxChunkTokens {
+			chunks = append(chunks, c.splitFallbackLongLine(file, lines[i], configSource, now, i+1, len(chunks))...)
+			i++
+			continue
 		}
 
-		chunkContent := strings.Join(lines[i:end], "\n")
+		end := i
+		var chunkContent string
+		for end < len(lines) {
+			candidate := strings.Join(lines[i:end+1], "\n")
+			if estimateTokens(candidate) > c.options.MaxChunkTokens && end > i {
+				break
+			}
+			chunkContent = candidate
+			end++
+			if estimateTokens(candidate) >= c.options.MaxChunkTokens {
+				break
+			}
+		}
+		if chunkContent == "" {
+			chunkContent = lines[i]
+			end = i + 1
+		}
+
 		startLine := i + 1 // 1-indexed
 		endLine := end     // Inclusive
 
-		chunk := &Chunk{
-			ID:          generateChunkID(file.Path, chunkContent),
-			FilePath:    file.Path,
-			Content:     chunkContent,
-			RawContent:  chunkContent,
-			Context:     "",
-			ContentType: ContentTypeText,
-			Language:    file.Language,
-			StartLine:   startLine,
-			EndLine:     endLine,
-			Symbols:     nil,
-			Metadata:    make(map[string]string),
-			CreatedAt:   now,
-			UpdatedAt:   now,
-		}
-		chunks = append(chunks, chunk)
+		chunks = append(chunks, createLineFallbackChunk(file, chunkContent, configSource, now, startLine, endLine, "token_window", fmt.Sprintf("line_fallback_part%d", len(chunks)+1)))
 
 		// Move forward with overlap
-		i = end - overlapLines
-		if i <= 0 || end >= len(lines) {
+		next := end - overlapLines
+		if next <= i {
+			next = end
+		}
+		if end >= len(lines) {
 			break
 		}
+		i = next
 	}
 
 	return chunks, nil
+}
+
+func (c *CodeChunker) splitFallbackLongLine(file *FileInput, line, configSource string, now time.Time, lineNumber, existingChunks int) []*Chunk {
+	maxChars := c.options.MaxChunkTokens * TokensPerChar
+	if maxChars < 1 {
+		maxChars = TokensPerChar
+	}
+	chunks := make([]*Chunk, 0, (len(line)/maxChars)+1)
+	for start := 0; start < len(line); start += maxChars {
+		end := start + maxChars
+		if end > len(line) {
+			end = len(line)
+		}
+		disambiguator := fmt.Sprintf("line_fallback_part%d", existingChunks+len(chunks)+1)
+		chunks = append(chunks, createLineFallbackChunk(file, line[start:end], configSource, now, lineNumber, lineNumber, "long_line", disambiguator))
+	}
+	return chunks
+}
+
+func createLineFallbackChunk(file *FileInput, chunkContent, configSource string, now time.Time, startLine, endLine int, reason, disambiguator string) *Chunk {
+	return &Chunk{
+		ID:          generateChunkIDWithDisambiguator(file.Path, chunkContent, disambiguator),
+		FilePath:    file.Path,
+		Content:     chunkContent,
+		RawContent:  chunkContent,
+		Context:     "",
+		ContentType: ContentTypeText,
+		Language:    file.Language,
+		StartLine:   startLine,
+		EndLine:     endLine,
+		Symbols:     nil,
+		Metadata: map[string]string{
+			"chunk_provenance":       "line_fallback",
+			"split_reason":           reason,
+			"language_config_source": configSource,
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
 }
 
 // generateChunkID generates a content-addressable chunk ID from file path and content.
@@ -554,12 +817,19 @@ func (c *CodeChunker) chunkByLines(file *FileInput) ([]*Chunk, error) {
 //   - Different content in same file = different ID (triggers re-embedding)
 //   - Same content in different files = different IDs (preserves file context)
 func generateChunkID(filePath string, content string) string {
+	return generateChunkIDWithDisambiguator(filePath, content, "")
+}
+
+func generateChunkIDWithDisambiguator(filePath string, content string, disambiguator string) string {
 	// Hash the content first
 	contentHash := sha256.Sum256([]byte(content))
 	contentHashStr := hex.EncodeToString(contentHash[:])[:16]
 
 	// Combine with file path for uniqueness per file
 	input := fmt.Sprintf("%s:%s", filePath, contentHashStr)
+	if disambiguator != "" {
+		input = fmt.Sprintf("%s:%s:%s", filePath, contentHashStr, disambiguator)
+	}
 	hash := sha256.Sum256([]byte(input))
 	return hex.EncodeToString(hash[:])[:16]
 }

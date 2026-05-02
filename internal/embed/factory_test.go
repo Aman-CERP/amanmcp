@@ -372,7 +372,7 @@ func TestIsOllamaModelName_WithTag(t *testing.T) {
 	}{
 		{
 			name:  "ollama model with tag",
-			model: "nomic-embed-text:latest",
+			model: "nomic-embed-text:v1.5",
 			want:  true,
 		},
 		{

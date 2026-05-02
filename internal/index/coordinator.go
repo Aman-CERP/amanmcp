@@ -14,8 +14,10 @@ import (
 
 	"github.com/Aman-CERP/amanmcp/internal/chunk"
 	"github.com/Aman-CERP/amanmcp/internal/gitignore"
+	"github.com/Aman-CERP/amanmcp/internal/language"
 	"github.com/Aman-CERP/amanmcp/internal/scanner"
 	"github.com/Aman-CERP/amanmcp/internal/search"
+	"github.com/Aman-CERP/amanmcp/internal/secrets"
 	"github.com/Aman-CERP/amanmcp/internal/store"
 	"github.com/Aman-CERP/amanmcp/internal/watcher"
 )
@@ -51,6 +53,14 @@ type CoordinatorConfig struct {
 	// When set, enables automatic index updates on .gitignore changes.
 	Scanner *scanner.Scanner
 
+	// LanguageRegistry resolves language detection and content type.
+	// Nil uses the built-in default registry.
+	LanguageRegistry *language.Registry
+
+	// SecretScanner gates content before chunking, embedding, BM25, and vector indexing.
+	// Nil uses the default pre-index policy.
+	SecretScanner *secrets.Scanner
+
 	// ExcludePatterns are patterns to exclude from scanning (from config).
 	// These are used during reconciliation to match initial indexing behavior.
 	ExcludePatterns []string
@@ -69,6 +79,12 @@ type Coordinator struct {
 
 // NewCoordinator creates a new index coordinator.
 func NewCoordinator(config CoordinatorConfig) *Coordinator {
+	if config.LanguageRegistry == nil {
+		config.LanguageRegistry = language.DefaultRegistry()
+	}
+	if config.SecretScanner == nil {
+		config.SecretScanner = secrets.NewScanner(secrets.DefaultPolicy())
+	}
 	return &Coordinator{
 		config: config,
 	}
@@ -177,13 +193,31 @@ func (c *Coordinator) indexFile(ctx context.Context, relPath string) error {
 	}
 
 	// Detect language and content type
-	language := scanner.DetectLanguage(relPath)
-	contentType := scanner.DetectContentType(language)
+	detectedLanguage := scanner.DetectLanguageWithRegistry(relPath, c.config.LanguageRegistry)
+	contentType := scanner.DetectContentTypeWithRegistry(detectedLanguage, c.config.LanguageRegistry)
 
 	// Skip text and config files (only index code and markdown)
 	if contentType != scanner.ContentTypeCode && contentType != scanner.ContentTypeMarkdown {
 		return nil
 	}
+
+	secretResult := c.config.SecretScanner.GuardContent(secrets.ContentInput{
+		Path:    relPath,
+		Content: content,
+		Source:  secrets.SourceIndex,
+	})
+	for _, warning := range secretResult.Warnings {
+		slog.Warn("pre_index_secret_detected",
+			slog.String("file", warning.FilePath),
+			slog.String("detector_id", warning.DetectorID),
+			slog.String("confidence", string(warning.Confidence)),
+			slog.String("action", string(warning.Action)),
+			slog.String("location", warning.Location.String()))
+	}
+	if secretResult.Blocked {
+		return nil
+	}
+	content = secretResult.Content
 
 	// Remove existing chunks for this file (for modifications)
 	// Ignore error - file might not exist in index yet
@@ -205,7 +239,7 @@ func (c *Coordinator) indexFile(ctx context.Context, relPath string) error {
 	fileInput := &chunk.FileInput{
 		Path:     relPath,
 		Content:  content,
-		Language: language,
+		Language: detectedLanguage,
 	}
 
 	chunks, err := chunker.Chunk(ctx, fileInput)
@@ -216,6 +250,7 @@ func (c *Coordinator) indexFile(ctx context.Context, relPath string) error {
 	if len(chunks) == 0 {
 		return nil
 	}
+	annotateSecretScan(chunks, secretResult)
 
 	fileID := generateFileID(c.config.ProjectID, relPath)
 
@@ -228,7 +263,7 @@ func (c *Coordinator) indexFile(ctx context.Context, relPath string) error {
 		Size:        info.Size(),
 		ModTime:     info.ModTime(),
 		ContentHash: hashContent(content),
-		Language:    language,
+		Language:    detectedLanguage,
 		ContentType: string(contentType),
 	}
 
@@ -239,6 +274,17 @@ func (c *Coordinator) indexFile(ctx context.Context, relPath string) error {
 	// Convert to store.Chunk format
 	storeChunks := make([]*store.Chunk, len(chunks))
 	for i, ch := range chunks {
+		symbols := make([]*store.Symbol, 0, len(ch.Symbols))
+		for _, sym := range ch.Symbols {
+			symbols = append(symbols, &store.Symbol{
+				Name:       sym.Name,
+				Type:       store.SymbolType(sym.Type),
+				StartLine:  sym.StartLine,
+				EndLine:    sym.EndLine,
+				Signature:  sym.Signature,
+				DocComment: sym.DocComment,
+			})
+		}
 		storeChunks[i] = &store.Chunk{
 			ID:          ch.ID,
 			FileID:      fileID,
@@ -250,6 +296,8 @@ func (c *Coordinator) indexFile(ctx context.Context, relPath string) error {
 			Language:    ch.Language,
 			StartLine:   ch.StartLine,
 			EndLine:     ch.EndLine,
+			Symbols:     symbols,
+			Metadata:    ch.Metadata,
 		}
 	}
 
@@ -504,6 +552,7 @@ func (c *Coordinator) reconcileGitignoreSubtree(ctx context.Context, subtreePath
 	resultChan, err := c.config.Scanner.ScanSubtree(ctx, &scanner.ScanOptions{
 		RootDir:          c.config.RootPath,
 		RespectGitignore: true,
+		LanguageRegistry: c.config.LanguageRegistry,
 	}, subtreePath)
 	if err != nil {
 		return fmt.Errorf("failed to scan subtree %s: %w", subtreePath, err)
@@ -521,7 +570,7 @@ func (c *Coordinator) reconcileGitignoreSubtree(ctx context.Context, subtreePath
 		if result.File == nil {
 			continue
 		}
-		contentType := scanner.DetectContentType(result.File.Language)
+		contentType := scanner.DetectContentTypeWithRegistry(result.File.Language, c.config.LanguageRegistry)
 		if contentType == scanner.ContentTypeCode || contentType == scanner.ContentTypeMarkdown {
 			shouldBeIndexed[result.File.Path] = true
 		}
@@ -749,6 +798,7 @@ func (c *Coordinator) reconcileGitignoreInternal(ctx context.Context) error {
 		RootDir:          c.config.RootPath,
 		RespectGitignore: true,
 		ExcludePatterns:  c.config.ExcludePatterns,
+		LanguageRegistry: c.config.LanguageRegistry,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to scan for gitignore reconciliation: %w", err)
@@ -766,7 +816,7 @@ func (c *Coordinator) reconcileGitignoreInternal(ctx context.Context) error {
 			continue
 		}
 		// Only consider code and markdown files (matching indexFile logic)
-		contentType := scanner.DetectContentType(result.File.Language)
+		contentType := scanner.DetectContentTypeWithRegistry(result.File.Language, c.config.LanguageRegistry)
 		if contentType == scanner.ContentTypeCode || contentType == scanner.ContentTypeMarkdown {
 			shouldBeIndexed[result.File.Path] = true
 		}
@@ -914,6 +964,7 @@ func (c *Coordinator) scanCurrentFiles(ctx context.Context) (map[string]*scanner
 		RootDir:          c.config.RootPath,
 		RespectGitignore: true,
 		ExcludePatterns:  c.config.ExcludePatterns,
+		LanguageRegistry: c.config.LanguageRegistry,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to start scan: %w", err)
@@ -930,7 +981,7 @@ func (c *Coordinator) scanCurrentFiles(ctx context.Context) (map[string]*scanner
 			continue
 		}
 		// Only consider indexable content types (matching indexFile logic)
-		contentType := scanner.DetectContentType(result.File.Language)
+		contentType := scanner.DetectContentTypeWithRegistry(result.File.Language, c.config.LanguageRegistry)
 		if contentType == scanner.ContentTypeCode || contentType == scanner.ContentTypeMarkdown {
 			current[result.File.Path] = result.File
 		}

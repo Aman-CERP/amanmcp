@@ -109,6 +109,9 @@ Just run 'amanmcp' in your project directory to get started.`,
 	// Debug command (FEAT-UNIX4)
 	cmd.AddCommand(newDebugCmd())
 
+	// Eval command (F37 search eval harness)
+	cmd.AddCommand(newEvalCmd())
+
 	return cmd
 }
 

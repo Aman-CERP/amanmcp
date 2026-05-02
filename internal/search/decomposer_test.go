@@ -141,38 +141,38 @@ func TestDecompose(t *testing.T) {
 	d := NewPatternDecomposer()
 
 	tests := []struct {
-		name            string
-		query           string
-		minSubQueries   int
-		mustContain     []string // At least these terms should appear in sub-queries
-		mustNotContain  []string // These should NOT appear (e.g., docs-only terms)
+		name           string
+		query          string
+		minSubQueries  int
+		mustContain    []string // At least these terms should appear in sub-queries
+		mustNotContain []string // These should NOT appear (e.g., docs-only terms)
 	}{
 		{
-			name:          "Search function decomposition",
-			query:         "Search function",
-			minSubQueries: 3,
-			mustContain:   []string{"func Search", "Search"}, // Go pattern + original noun
+			name:           "Search function decomposition",
+			query:          "Search function",
+			minSubQueries:  3,
+			mustContain:    []string{"func Search", "Search"}, // Go pattern + original noun
 			mustNotContain: []string{},
 		},
 		{
-			name:          "Index function decomposition",
-			query:         "Index function",
-			minSubQueries: 3,
-			mustContain:   []string{"func Index", "Index"}, // Go pattern + original noun
+			name:           "Index function decomposition",
+			query:          "Index function",
+			minSubQueries:  3,
+			mustContain:    []string{"func Index", "Index"}, // Go pattern + original noun
 			mustNotContain: []string{},
 		},
 		{
-			name:          "How does RRF fusion work",
-			query:         "How does RRF fusion work",
-			minSubQueries: 2,
-			mustContain:   []string{"RRF", "fusion"}, // Key terms extracted
+			name:           "How does RRF fusion work",
+			query:          "How does RRF fusion work",
+			minSubQueries:  2,
+			mustContain:    []string{"RRF", "fusion"}, // Key terms extracted
 			mustNotContain: []string{},
 		},
 		{
-			name:          "non-decomposable returns original",
-			query:         "OllamaEmbedder",
-			minSubQueries: 1,
-			mustContain:   []string{"OllamaEmbedder"}, // Original query preserved
+			name:           "non-decomposable returns original",
+			query:          "OllamaEmbedder",
+			minSubQueries:  1,
+			mustContain:    []string{"OllamaEmbedder"}, // Original query preserved
 			mustNotContain: []string{},
 		},
 	}
@@ -257,7 +257,7 @@ func TestDecomposeIdempotent(t *testing.T) {
 func containsSubstring(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr ||
 		len(s) > len(substr) && (s[:len(substr)] == substr || s[len(s)-len(substr):] == substr ||
-		findSubstring(s, substr)))
+			findSubstring(s, substr)))
 }
 
 func findSubstring(s, substr string) bool {
@@ -276,8 +276,8 @@ func TestGoMethodReceiverPatterns(t *testing.T) {
 	d := NewPatternDecomposer()
 
 	tests := []struct {
-		name           string
-		query          string
+		name             string
+		query            string
 		expectedPatterns []string // Patterns that should be generated
 	}{
 		{

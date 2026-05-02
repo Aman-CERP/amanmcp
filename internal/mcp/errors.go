@@ -26,11 +26,17 @@ const (
 	// ErrCodeFileTooLarge indicates a file is too large to process.
 	ErrCodeFileTooLarge = -32005
 
+	// ErrCodePMMutationConflict indicates a stale PM mutation lock token.
+	ErrCodePMMutationConflict = -32008
+
+	// ErrCodePMMutationConfirmationRequired indicates a human release gate was not confirmed.
+	ErrCodePMMutationConfirmationRequired = -32009
+
 	// Standard JSON-RPC error codes.
-	ErrCodeInvalidRequest  = -32600
-	ErrCodeMethodNotFound  = -32601
-	ErrCodeInvalidParams   = -32602
-	ErrCodeInternalError   = -32603
+	ErrCodeInvalidRequest = -32600
+	ErrCodeMethodNotFound = -32601
+	ErrCodeInvalidParams  = -32602
+	ErrCodeInternalError  = -32603
 )
 
 // Sentinel errors for internal use.

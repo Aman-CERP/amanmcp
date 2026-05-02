@@ -96,6 +96,8 @@ paths:
 #   chunk_size: 1500        # Characters per chunk
 #   chunk_overlap: 200      # Overlap between chunks
 #   max_results: 20         # Maximum search results
+#   reranker:
+#     policy: auto          # Options: auto, always, never
 
 # Embedding configuration (can override user config)
 # embeddings:

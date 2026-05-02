@@ -102,6 +102,105 @@ func TestSearchCodeTool_WithLanguage_FiltersResults(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "code", capturedOpts.Filter)
 	assert.Equal(t, "go", capturedOpts.Language)
+	assert.Equal(t, search.ProfileCode, capturedOpts.Profile)
+}
+
+func TestSearchCodeTool_ExplicitProfileOverridesDefault(t *testing.T) {
+	var capturedOpts search.SearchOptions
+	engine := &MockSearchEngine{
+		SearchFn: func(ctx context.Context, query string, opts search.SearchOptions) ([]*search.SearchResult, error) {
+			capturedOpts = opts
+			return []*search.SearchResult{}, nil
+		},
+	}
+	srv := newTestServerWithEngine(t, engine)
+
+	_, err := srv.CallTool(context.Background(), "search_code", map[string]any{
+		"query":   "handler",
+		"profile": "review-corpus",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, search.ProfileReviewCorpus, capturedOpts.Profile)
+}
+
+func TestSearchDocsTool_DefaultsToProjectMemoryProfile(t *testing.T) {
+	var capturedOpts search.SearchOptions
+	engine := &MockSearchEngine{
+		SearchFn: func(ctx context.Context, query string, opts search.SearchOptions) ([]*search.SearchResult, error) {
+			capturedOpts = opts
+			return []*search.SearchResult{}, nil
+		},
+	}
+	srv := newTestServerWithEngine(t, engine)
+
+	_, err := srv.CallTool(context.Background(), "search_docs", map[string]any{
+		"query": "decision lookup",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "docs", capturedOpts.Filter)
+	assert.Equal(t, search.ProfileProjectMemory, capturedOpts.Profile)
+}
+
+func TestSearchDocsTool_DecisionsModeSetsModeAndDecisionScopes(t *testing.T) {
+	var capturedOpts search.SearchOptions
+	engine := &MockSearchEngine{
+		SearchFn: func(ctx context.Context, query string, opts search.SearchOptions) ([]*search.SearchResult, error) {
+			capturedOpts = opts
+			return []*search.SearchResult{}, nil
+		},
+	}
+	srv := newTestServerWithEngine(t, engine)
+
+	_, err := srv.CallTool(context.Background(), "search_docs", map[string]any{
+		"query": "current ADR decisions",
+		"mode":  "decisions",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, search.SearchModeDecisions, capturedOpts.Mode)
+	assert.Equal(t, search.ProfileProjectMemory, capturedOpts.Profile)
+	assert.Contains(t, capturedOpts.Scopes, ".aman-pm/decisions")
+	assert.Contains(t, capturedOpts.Scopes, "docs/reference/decisions")
+}
+
+func TestSearchDocsTool_ExplicitScopeOverridesDecisionDefaultScopes(t *testing.T) {
+	var capturedOpts search.SearchOptions
+	engine := &MockSearchEngine{
+		SearchFn: func(ctx context.Context, query string, opts search.SearchOptions) ([]*search.SearchResult, error) {
+			capturedOpts = opts
+			return []*search.SearchResult{}, nil
+		},
+	}
+	srv := newTestServerWithEngine(t, engine)
+
+	_, err := srv.CallTool(context.Background(), "search_docs", map[string]any{
+		"query": "current ADR decisions",
+		"mode":  "decisions",
+		"scope": []interface{}{"docs/reference/decisions"},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"docs/reference/decisions"}, capturedOpts.Scopes)
+}
+
+func TestSearchDocsTool_RejectsUnknownMode(t *testing.T) {
+	engine := &MockSearchEngine{
+		SearchFn: func(ctx context.Context, query string, opts search.SearchOptions) ([]*search.SearchResult, error) {
+			t.Fatal("search must not execute for an invalid mode")
+			return nil, nil
+		},
+	}
+	srv := newTestServerWithEngine(t, engine)
+
+	_, err := srv.CallTool(context.Background(), "search_docs", map[string]any{
+		"query": "current ADR decisions",
+		"mode":  "latest",
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown search mode")
 }
 
 // ============================================================================
@@ -483,13 +582,12 @@ func TestSearchTool_LargeResults_FormatsAll(t *testing.T) {
 // ListTools Tests
 // ============================================================================
 
-func TestListTools_ReturnsAllFourTools(t *testing.T) {
+func TestListTools_ReturnsAllCoreAndSprint14Tools(t *testing.T) {
 	srv := newTestServer(t)
 
 	tools := srv.ListTools()
 
-	// Should have 4 tools
-	assert.Len(t, tools, 4)
+	assert.Len(t, tools, 6)
 
 	// Find tool names
 	names := make(map[string]bool)
@@ -501,6 +599,53 @@ func TestListTools_ReturnsAllFourTools(t *testing.T) {
 	assert.True(t, names["search_code"], "missing search_code tool")
 	assert.True(t, names["search_docs"], "missing search_docs tool")
 	assert.True(t, names["index_status"], "missing index_status tool")
+	assert.True(t, names["graph.query"], "missing graph.query tool")
+	assert.True(t, names["pm.mutate"], "missing pm.mutate tool")
+}
+
+// TestListTools_PMMutateAdvertisesDeprecationInDescription pins the contract
+// that downstream MCP consumers can detect the pm.mutate deprecation by
+// reading the tool description text alone. The DEPRECATED prefix MUST stay
+// in the description until DEBT-031 ports the operations and DEBT-032 removes
+// the registration entirely. AmanPM and AmanMCP are separate products; this
+// test guards the architectural contract.
+func TestListTools_PMMutateAdvertisesDeprecationInDescription(t *testing.T) {
+	srv := newTestServer(t)
+
+	tools := srv.ListTools()
+
+	for _, tool := range tools {
+		if tool.Name != "pm.mutate" {
+			continue
+		}
+		assert.Truef(t,
+			strings.HasPrefix(tool.Description, "DEPRECATED"),
+			"pm.mutate description must start with DEPRECATED (per DEBT-031); got %q", tool.Description)
+		assert.Contains(t, tool.Description, "DEBT-031",
+			"pm.mutate description must reference DEBT-031 so consumers can find the tracking item")
+		return
+	}
+	t.Fatal("pm.mutate tool not found")
+}
+
+// TestAmanPMDeprecationMeta_ContractFields pins the structured _meta payload
+// that AmanPM-substrate MCP tools/resources advertise. Programmatic MCP
+// consumers (other agents, registry tools) read these fields to detect the
+// deprecation without parsing free-text descriptions.
+func TestAmanPMDeprecationMeta_ContractFields(t *testing.T) {
+	meta := amanpmDeprecationMeta()
+
+	assert.Equal(t, true, meta["deprecated"], "deprecated flag must be true")
+	assert.NotEmpty(t, meta["deprecation_notice"], "human-readable notice required")
+	assert.NotEmpty(t, meta["deprecation_date"], "RFC-style date required")
+	assert.NotEmpty(t, meta["removal_target"], "removal target required")
+	assert.NotEmpty(t, meta["replacement"], "replacement pointer required")
+	assert.NotEmpty(t, meta["feedback_doc"], "feedback doc pointer required")
+
+	tracking, ok := meta["tracking"].([]string)
+	require.True(t, ok, "tracking must be []string for machine consumption")
+	assert.Contains(t, tracking, "DEBT-031", "must reference port DEBT")
+	assert.Contains(t, tracking, "DEBT-032", "must reference sunset DEBT")
 }
 
 // ============================================================================

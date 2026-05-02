@@ -1,6 +1,10 @@
 package daemon
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/Aman-CERP/amanmcp/internal/search"
+)
 
 // JSON-RPC 2.0 method names.
 const (
@@ -88,6 +92,9 @@ type SearchParams struct {
 	// Scopes filters by path prefixes (optional).
 	Scopes []string `json:"scopes,omitempty"`
 
+	// Profile selects the retrieval profile before results are returned.
+	Profile string `json:"profile,omitempty"`
+
 	// BM25Only forces keyword-only search, skipping semantic search.
 	// FEAT-DIM1: Useful when embedder is unavailable or for exact keyword matching.
 	BM25Only bool `json:"bm25_only,omitempty"`
@@ -105,6 +112,9 @@ func (p *SearchParams) Validate() error {
 	if p.RootPath == "" {
 		return fmt.Errorf("root_path is required")
 	}
+	if _, err := search.ParseProfile(p.Profile); err != nil {
+		return err
+	}
 	// Correct negative limit to default
 	if p.Limit < 0 {
 		p.Limit = 10
@@ -114,12 +124,18 @@ func (p *SearchParams) Validate() error {
 
 // SearchResult represents a single search result.
 type SearchResult struct {
-	FilePath  string  `json:"file_path"`
-	StartLine int     `json:"start_line"`
-	EndLine   int     `json:"end_line"`
-	Score     float64 `json:"score"`
-	Content   string  `json:"content"`
-	Language  string  `json:"language,omitempty"`
+	FilePath    string  `json:"file_path"`
+	StartLine   int     `json:"start_line"`
+	EndLine     int     `json:"end_line"`
+	Score       float64 `json:"score"`
+	Content     string  `json:"content"`
+	Language    string  `json:"language,omitempty"`
+	SourceClass string  `json:"source_class,omitempty"`
+	Authority   string  `json:"authority,omitempty"`
+	Profile     string  `json:"profile,omitempty"`
+	SourcePath  string  `json:"source_path,omitempty"`
+	Generated   bool    `json:"generated"`
+	Stale       bool    `json:"stale"`
 
 	// FEAT-UNIX3: Explain mode fields (only populated when Explain=true)
 	BM25Score float64      `json:"bm25_score,omitempty"`
@@ -127,6 +143,23 @@ type SearchResult struct {
 	BM25Rank  int          `json:"bm25_rank,omitempty"`
 	VecRank   int          `json:"vec_rank,omitempty"`
 	Explain   *ExplainData `json:"explain,omitempty"` // Only on first result
+}
+
+// SearchResponse is the daemon search response envelope.
+type SearchResponse struct {
+	Results           []SearchResult          `json:"results"`
+	ProfileMismatches []ProfileMismatchResult `json:"profile_mismatches,omitempty"`
+}
+
+// ProfileMismatchResult explains a result excluded by a selected profile.
+type ProfileMismatchResult struct {
+	SourcePath       string `json:"source_path"`
+	RequestedProfile string `json:"requested_profile,omitempty"`
+	RequiredProfile  string `json:"required_profile"`
+	SourceClass      string `json:"source_class"`
+	Authority        string `json:"authority"`
+	Reason           string `json:"reason"`
+	Action           string `json:"action"`
 }
 
 // ExplainData contains detailed search decision information.

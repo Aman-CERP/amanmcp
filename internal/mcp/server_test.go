@@ -120,6 +120,9 @@ func (m *MockMetadataStore) GetChunks(_ context.Context, ids []string) ([]*store
 func (m *MockMetadataStore) GetChunksByFile(_ context.Context, _ string) ([]*store.Chunk, error) {
 	return m.Chunks, nil
 }
+func (m *MockMetadataStore) GetChunksBySymbol(_ context.Context, _ string, _ int) ([]*store.Chunk, error) {
+	return nil, nil
+}
 func (m *MockMetadataStore) DeleteChunks(_ context.Context, _ []string) error     { return nil }
 func (m *MockMetadataStore) DeleteChunksByFile(_ context.Context, _ string) error { return nil }
 func (m *MockMetadataStore) SearchSymbols(_ context.Context, _ string, _ int) ([]*store.Symbol, error) {
@@ -207,9 +210,9 @@ func (m *MockEmbedder) Available(ctx context.Context) bool {
 	return true
 }
 
-func (m *MockEmbedder) Close() error          { return nil }
-func (m *MockEmbedder) SetBatchIndex(_ int)   {}
-func (m *MockEmbedder) SetFinalBatch(_ bool)  {}
+func (m *MockEmbedder) Close() error         { return nil }
+func (m *MockEmbedder) SetBatchIndex(_ int)  {}
+func (m *MockEmbedder) SetFinalBatch(_ bool) {}
 
 // Ensure MockEmbedder implements embed.Embedder
 var _ embed.Embedder = (*MockEmbedder)(nil)

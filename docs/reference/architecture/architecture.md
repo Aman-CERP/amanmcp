@@ -1,6 +1,6 @@
 # AmanMCP Architecture Design
 
-**Version:** 1.0.0-draft | **Go:** 1.25.5+ | **MCP Spec:** 2025-11-25
+**Version:** 1.0.0-draft | **Go:** 1.25.9+ | **MCP Spec:** 2025-11-25
 
 ---
 

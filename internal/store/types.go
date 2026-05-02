@@ -111,10 +111,10 @@ type File struct {
 
 // Project represents an indexed project/codebase.
 type Project struct {
-	ID          string    // SHA256(absolute_path)
-	Name        string    // Directory name
-	RootPath    string    // Absolute path
-	ProjectType string    // go, node, python, etc.
+	ID          string // SHA256(absolute_path)
+	Name        string // Directory name
+	RootPath    string // Absolute path
+	ProjectType string // go, node, python, etc.
 	ChunkCount  int
 	FileCount   int
 	IndexedAt   time.Time
@@ -134,10 +134,10 @@ type MetadataStore interface {
 	GetFileByPath(ctx context.Context, projectID, path string) (*File, error)
 	GetChangedFiles(ctx context.Context, projectID string, since time.Time) ([]*File, error)
 	ListFiles(ctx context.Context, projectID string, cursor string, limit int) ([]*File, string, error)
-	GetFilePathsByProject(ctx context.Context, projectID string) ([]string, error)                 // For gitignore sync
-	GetFilesForReconciliation(ctx context.Context, projectID string) (map[string]*File, error)    // For startup file sync (BUG-036)
-	ListFilePathsUnder(ctx context.Context, projectID, dirPrefix string) ([]string, error)        // For subtree gitignore (BUG-028)
-	DeleteFile(ctx context.Context, fileID string) error                                          // For gitignore sync (cascades to chunks)
+	GetFilePathsByProject(ctx context.Context, projectID string) ([]string, error)             // For gitignore sync
+	GetFilesForReconciliation(ctx context.Context, projectID string) (map[string]*File, error) // For startup file sync (BUG-036)
+	ListFilePathsUnder(ctx context.Context, projectID, dirPrefix string) ([]string, error)     // For subtree gitignore (BUG-028)
+	DeleteFile(ctx context.Context, fileID string) error                                       // For gitignore sync (cascades to chunks)
 	DeleteFilesByProject(ctx context.Context, projectID string) error
 
 	// Chunk operations
@@ -145,7 +145,8 @@ type MetadataStore interface {
 	GetChunk(ctx context.Context, id string) (*Chunk, error)
 	GetChunks(ctx context.Context, ids []string) ([]*Chunk, error) // Batch retrieval for performance
 	GetChunksByFile(ctx context.Context, fileID string) ([]*Chunk, error)
-	DeleteChunks(ctx context.Context, ids []string) error          // Delete chunks by ID
+	GetChunksBySymbol(ctx context.Context, name string, limit int) ([]*Chunk, error)
+	DeleteChunks(ctx context.Context, ids []string) error // Delete chunks by ID
 	DeleteChunksByFile(ctx context.Context, fileID string) error
 
 	// Symbol operations
@@ -190,10 +191,10 @@ type IndexInfo struct {
 	IndexDimensions int    // Embedding dimensions
 
 	// Statistics
-	ChunkCount    int   // Number of chunks in index
-	DocumentCount int   // Number of documents (files) indexed
-	IndexSizeBytes int64 // Total index size (BM25 + vector)
-	BM25SizeBytes  int64 // BM25 index file size
+	ChunkCount      int   // Number of chunks in index
+	DocumentCount   int   // Number of documents (files) indexed
+	IndexSizeBytes  int64 // Total index size (BM25 + vector)
+	BM25SizeBytes   int64 // BM25 index file size
 	VectorSizeBytes int64 // Vector store file size
 
 	// Timestamps

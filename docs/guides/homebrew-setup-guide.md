@@ -12,15 +12,15 @@ AmanMCP is distributed via Homebrew using a custom tap. This guide covers:
 2. Configuring GitHub secrets
 3. How automated releases work
 4. Manual release process
-5. Testing formulas locally
+5. Testing casks locally
 6. Troubleshooting
 
 ### Installation Workflow
 
 ```mermaid
 flowchart TD
-    Start([User Wants to Install]) --> Tap[brew tap amanmcp/amanmcp]
-    Tap --> Install[brew install amanmcp]
+    Start([User Wants to Install]) --> Tap[brew tap Aman-CERP/amanmcp]
+    Tap --> Install[brew install --cask amanmcp]
     Install --> Verify[amanmcp version]
     Verify --> Success{Version<br/>Displays?}
     Success -->|Yes| Init[amanmcp init in project]
@@ -30,7 +30,7 @@ flowchart TD
     Ollama -->|No| Done([Ready to Use])
     OllamaInstall --> Done
     Troubleshoot --> CheckArch[Check Architecture]
-    CheckArch --> Reinstall[brew reinstall amanmcp]
+    CheckArch --> Reinstall[brew reinstall --cask amanmcp]
     Reinstall --> Verify
 
     style Start fill:#e1f5ff,stroke:#01579b,stroke-width:2px
@@ -61,55 +61,39 @@ cd homebrew-amanmcp
 ### Step 2: Create Directory Structure
 
 ```bash
-mkdir -p Formula
+mkdir -p Casks
 ```
 
-### Step 3: Create Initial Formula
+### Step 3: Create Initial Cask
 
-Create `Formula/amanmcp.rb` with a placeholder:
+Create `Casks/amanmcp.rb` with a placeholder:
 
 ```ruby
-# Formula/amanmcp.rb
+# Casks/amanmcp.rb
 # This file is auto-updated by GoReleaser on each release.
 # Manual edits will be overwritten.
 
-class Amanmcp < Formula
+cask "amanmcp" do
+  version "0.0.0"
+  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+
+  url "https://github.com/Aman-CERP/amanmcp/releases/download/v#{version}/amanmcp_#{version}_darwin_arm64.tar.gz"
+  name "AmanMCP"
   desc "Local-first RAG MCP server for AI coding assistants"
   homepage "https://github.com/Aman-CERP/amanmcp"
-  version "0.0.0"
   license "Apache-2.0"
 
-  # Placeholder - GoReleaser will update this
-  on_macos do
-    on_arm do
-      url "https://example.com/placeholder.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
-    end
-    on_intel do
-      url "https://example.com/placeholder.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
-    end
-  end
+  binary "amanmcp"
 
-  def install
-    bin.install "amanmcp"
-  end
+  caveats <<~EOS
+    To get started:
+      cd your-project
+      amanmcp init
 
-  def caveats
-    <<~EOS
-      To get started:
-        cd your-project
-        amanmcp init
-
-      For best search quality, install Ollama:
-        brew install ollama && ollama serve
-        ollama pull qwen3-embedding:0.6b
-    EOS
-  end
-
-  test do
-    system "#{bin}/amanmcp", "version"
-  end
+    For best search quality, install Ollama:
+      brew install ollama && ollama serve
+      ollama pull qwen3-embedding:0.6b
+  EOS
 end
 ```
 
@@ -125,7 +109,7 @@ git push origin main
 
 ## Part 2: Configure GitHub Secrets
 
-For automated formula updates, you need a Personal Access Token (PAT).
+For automated cask updates, you need a Personal Access Token (PAT).
 
 ### Step 1: Generate PAT
 
@@ -168,18 +152,18 @@ When you push a version tag, everything happens automatically:
 │                         │                                     │
 │         ┌───────────────┼───────────────┐                    │
 │         ▼               ▼               ▼                    │
-│   Build binaries   Create release   Update formula           │
-│   (arm64, amd64)   (GitHub)         (homebrew-amanmcp)       │
+│   Build binary     Create release   Update cask              │
+│   (darwin arm64)   (GitHub)         (homebrew-amanmcp)       │
 │                                                               │
 └──────────────────────────────────────────────────────────────┘
 ```
 
 ### What GoReleaser Does
 
-1. Builds `darwin/arm64` and `darwin/amd64` binaries
+1. Builds the currently supported `darwin/arm64` binary
 2. Generates SHA256 checksums
 3. Creates GitHub release with assets
-4. Auto-updates formula in `homebrew-amanmcp` tap
+4. Auto-updates the cask in `homebrew-amanmcp` tap
 
 ### What Users See
 
@@ -187,11 +171,11 @@ After release, users can:
 
 ```bash
 # First install
-brew tap amanmcp/amanmcp
-brew install amanmcp
+brew tap Aman-CERP/amanmcp
+brew install --cask amanmcp
 
 # Upgrade existing
-brew upgrade amanmcp
+brew upgrade --cask amanmcp
 ```
 
 ---
@@ -251,32 +235,25 @@ go build -ldflags "-X github.com/Aman-CERP/amanmcp/pkg/version.Version=1.0.0-tes
 ./bin/amanmcp version
 ```
 
-### Test Formula Locally
+### Test Cask Locally
 
 ```bash
-# Create a local formula file for testing
+# Create a local cask file for testing
 cat > /tmp/amanmcp.rb << 'EOF'
-class Amanmcp < Formula
-  desc "Local-first RAG MCP server"
-  homepage "https://github.com/Aman-CERP/amanmcp"
+cask "amanmcp" do
   version "test"
-
-  # Point to local binary
-  url "file:///path/to/your/amanmcp_test.tar.gz"
   sha256 "YOUR_SHA256"
 
-  def install
-    bin.install "amanmcp"
-  end
-
-  test do
-    system "#{bin}/amanmcp", "version"
-  end
+  url "file:///path/to/your/amanmcp_test.tar.gz"
+  name "AmanMCP"
+  desc "Local-first RAG MCP server"
+  homepage "https://github.com/Aman-CERP/amanmcp"
+  binary "amanmcp"
 end
 EOF
 
-# Install from local formula
-brew install --build-from-source /tmp/amanmcp.rb
+# Install from local cask
+brew install --cask /tmp/amanmcp.rb
 
 # Test it works
 amanmcp version
@@ -286,13 +263,13 @@ amanmcp version
 
 ```bash
 # Tap the repository
-brew tap amanmcp/amanmcp
+brew tap Aman-CERP/amanmcp
 
-# Check formula
-brew info amanmcp
+# Check cask
+brew info --cask amanmcp
 
 # Install
-brew install amanmcp
+brew install --cask amanmcp
 
 # Verify
 amanmcp version
@@ -310,21 +287,21 @@ flowchart TD
     Issue([Homebrew Issue]) --> Type{What's<br/>Wrong?}
 
     Type -->|Installation Fails| Install
-    Type -->|Formula Not Updated| Formula
+    Type -->|Cask Not Updated| Cask
     Type -->|Binary Won't Run| Binary
     Type -->|Wrong Architecture| Arch
 
     Install[Installation Error] --> Cache{Checksum<br/>Mismatch?}
     Cache -->|Yes| ClearCache[brew cleanup amanmcp]
-    Cache -->|No| Reinstall[brew reinstall amanmcp]
-    ClearCache --> RetryInstall[brew install amanmcp]
-    Reinstall --> CheckLogs[brew install --verbose --debug]
+    Cache -->|No| Reinstall[brew reinstall --cask amanmcp]
+    ClearCache --> RetryInstall[brew install --cask amanmcp]
+    Reinstall --> CheckLogs[brew install --cask --verbose --debug amanmcp]
     RetryInstall --> Fixed1{Fixed?}
     CheckLogs --> Fixed1
     Fixed1 -->|Yes| Success([Problem Solved])
     Fixed1 -->|No| FileIssue([File GitHub Issue])
 
-    Formula[Formula Not Updated] --> CheckToken{Token Set?}
+    Cask[Cask Not Updated] --> CheckToken{Token Set?}
     CheckToken -->|No| AddToken[Add HOMEBREW_TAP_GITHUB_TOKEN]
     CheckToken -->|Yes| CheckPerms{Correct<br/>Permissions?}
     AddToken --> CheckPerms
@@ -339,7 +316,7 @@ flowchart TD
     Gatekeeper -->|No| CheckExec{Executable<br/>Permissions?}
     RemoveQuarantine --> TestRun[amanmcp version]
     CheckExec -->|No| FixPerms[chmod +x /usr/local/bin/amanmcp]
-    CheckExec -->|Yes| ReinstallBinary[brew reinstall amanmcp]
+    CheckExec -->|Yes| ReinstallBinary[brew reinstall --cask amanmcp]
     FixPerms --> TestRun
     ReinstallBinary --> TestRun
     TestRun --> Success
@@ -347,7 +324,7 @@ flowchart TD
     Arch[Wrong Architecture] --> CheckSys[uname -m<br/>Check System Arch]
     CheckSys --> CheckBin[file /usr/local/bin/amanmcp<br/>Check Binary Arch]
     CheckBin --> Mismatch{Architectures<br/>Match?}
-    Mismatch -->|No| ForceReinstall[brew uninstall amanmcp<br/>brew install amanmcp]
+    Mismatch -->|No| ForceReinstall[brew uninstall --cask amanmcp<br/>brew install --cask amanmcp]
     Mismatch -->|Yes| OtherIssue[Check Other Issues]
     ForceReinstall --> Success
     OtherIssue --> FileIssue
@@ -365,9 +342,9 @@ flowchart TD
     style Fixed1 fill:#fff9c4,stroke:#f57f17,stroke-width:2px
 ```
 
-### Formula Update Failed
+### Cask Update Failed
 
-**Symptom:** Release workflow succeeds but formula not updated.
+**Symptom:** Release workflow succeeds but cask not updated.
 
 **Check:**
 1. Is `HOMEBREW_TAP_GITHUB_TOKEN` set?
@@ -381,13 +358,13 @@ flowchart TD
 
 **Symptom:** `Error: SHA256 mismatch`
 
-**Cause:** Formula points to old binary but checksum was updated, or download corrupted.
+**Cause:** Cask points to old binary but checksum was updated, or download corrupted.
 
 **Solution:**
 ```bash
 # Clear cache and retry
 brew cleanup amanmcp
-brew install amanmcp
+brew install --cask amanmcp
 ```
 
 ### Binary Not Signed
@@ -425,10 +402,10 @@ file /usr/local/bin/amanmcp
 |------|---------|
 | Release new version | `./scripts/release.sh v1.0.0` |
 | Check release status | Visit GitHub Actions tab |
-| Test formula locally | `brew install --build-from-source ./Formula/amanmcp.rb` |
-| Update tap | `brew tap --force-auto-update amanmcp/amanmcp` |
-| Reinstall | `brew reinstall amanmcp` |
-| Check logs | `brew install amanmcp --verbose --debug` |
+| Test cask locally | `brew install --cask ./Casks/amanmcp.rb` |
+| Update tap | `brew tap --force-auto-update Aman-CERP/amanmcp` |
+| Reinstall | `brew reinstall --cask amanmcp` |
+| Check logs | `brew install --cask amanmcp --verbose --debug` |
 
 ---
 

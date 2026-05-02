@@ -13,7 +13,7 @@ import (
 
 // RequestHandler handles incoming RPC requests.
 type RequestHandler interface {
-	HandleSearch(ctx context.Context, params SearchParams) ([]SearchResult, error)
+	HandleSearch(ctx context.Context, params SearchParams) (SearchResponse, error)
 	GetStatus() StatusResult
 }
 

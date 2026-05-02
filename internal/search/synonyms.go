@@ -84,22 +84,22 @@ var CodeSynonyms = map[string][]string{
 	// Context/Configuration Terms
 	// Source: Go context package, config patterns
 	// ==========================================================================
-	"context": {"ctx", "Ctx", "Context"},
-	"ctx":     {"context", "Context"},
-	"config":  {"cfg", "Cfg", "Config", "configuration", "settings", "options"},
-	"cfg":     {"config", "Config", "configuration"},
-	"options": {"opts", "Opts", "Options", "config", "settings"},
-	"opts":    {"options", "Options", "config"},
+	"context":  {"ctx", "Ctx", "Context"},
+	"ctx":      {"context", "Context"},
+	"config":   {"cfg", "Cfg", "Config", "configuration", "settings", "options"},
+	"cfg":      {"config", "Config", "configuration"},
+	"options":  {"opts", "Opts", "Options", "config", "settings"},
+	"opts":     {"options", "Options", "config"},
 	"settings": {"config", "options", "preferences", "Settings"},
 
 	// ==========================================================================
 	// Database/Storage Terms
 	// Source: Repository pattern, ORM terminology
 	// ==========================================================================
-	"database": {"db", "DB", "Database", "store", "storage"},
-	"db":       {"database", "Database", "store"},
-	"store":    {"Store", "storage", "database", "repository", "db"},
-	"storage":  {"store", "Store", "database", "persist"},
+	"database":   {"db", "DB", "Database", "store", "storage"},
+	"db":         {"database", "Database", "store"},
+	"store":      {"Store", "storage", "database", "repository", "db"},
+	"storage":    {"store", "Store", "database", "persist"},
 	"repository": {"repo", "Repo", "Repository", "store"},
 	"repo":       {"repository", "Repository", "store"},
 	"query":      {"Query", "search", "find", "select"},

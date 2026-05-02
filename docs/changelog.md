@@ -4,6 +4,12 @@ Public-facing highlights of major changes. See `.aman-pm/changelog/` for detaile
 
 ---
 
+## [v0.12.0] - 2026-05-02
+
+- **Pre-index secret scanning**: Add a compact detector package and runner gate for high-confidence secrets
+- **MCP Go SDK**: Upgrade `github.com/modelcontextprotocol/go-sdk` from `v1.2.0` to `v1.4.1`
+
+
 ## [v0.10.1] - 2026-01-15
 
 - **PM System**: Sprint 8 closure and state synchronization (6/7 items completed)
@@ -53,9 +59,6 @@ Public-facing highlights of major changes. See `.aman-pm/changelog/` for detaile
 - **Feature**: Multi-Query Fusion with pattern-based query decomposition
 - **Fix**: BM25 index corruption after binary rebuild with auto-recovery
 
-## [v0.3.3] - 2026-01-13
-
-- **Feature**: MLX is now default embedding backend on Apple Silicon (~1.7x faster)
 
 ---
 

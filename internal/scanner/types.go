@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Aman-CERP/amanmcp/internal/config"
+	"github.com/Aman-CERP/amanmcp/internal/language"
 )
 
 // ContentType represents the type of content in a file.
@@ -63,6 +64,10 @@ type ScanOptions struct {
 	// Submodules configures git submodule discovery.
 	// If nil or Enabled is false, submodules are not scanned.
 	Submodules *config.SubmoduleConfig
+
+	// LanguageRegistry resolves language detection and content type.
+	// Nil uses the built-in default registry.
+	LanguageRegistry *language.Registry
 }
 
 // ScanResult is returned from the scanner channel.
@@ -74,220 +79,37 @@ type ScanResult struct {
 // DefaultMaxFileSize is the default maximum file size (10MB).
 const DefaultMaxFileSize = 10 * 1024 * 1024
 
-// languageMap maps file extensions to programming languages.
-var languageMap = map[string]string{
-	// Go
-	".go": "go",
-
-	// JavaScript/TypeScript
-	".js":  "javascript",
-	".jsx": "javascript",
-	".mjs": "javascript",
-	".ts":  "typescript",
-	".tsx": "typescript",
-
-	// Python
-	".py":  "python",
-	".pyw": "python",
-	".pyi": "python",
-
-	// Web
-	".html": "html",
-	".htm":  "html",
-	".css":  "css",
-	".scss": "scss",
-	".sass": "sass",
-	".less": "less",
-
-	// Data/Config
-	".json":  "json",
-	".yaml":  "yaml",
-	".yml":   "yaml",
-	".toml":  "toml",
-	".xml":   "xml",
-	".ini":   "ini",
-	".conf":  "config",
-	".properties": "properties",
-
-	// Documentation
-	".md":       "markdown",
-	".mdx":      "markdown",
-	".markdown": "markdown",
-	".rst":      "rst",
-	".txt":      "text",
-
-	// Shell
-	".sh":   "shell",
-	".bash": "shell",
-	".zsh":  "shell",
-	".fish": "fish",
-
-	// Ruby
-	".rb":   "ruby",
-	".rake": "ruby",
-	".erb":  "erb",
-
-	// Rust
-	".rs": "rust",
-
-	// Java/Kotlin
-	".java": "java",
-	".kt":   "kotlin",
-	".kts":  "kotlin",
-
-	// C/C++
-	".c":   "c",
-	".h":   "c",
-	".cpp": "cpp",
-	".hpp": "cpp",
-	".cc":  "cpp",
-	".cxx": "cpp",
-
-	// C#
-	".cs": "csharp",
-
-	// Swift
-	".swift": "swift",
-
-	// PHP
-	".php": "php",
-
-	// Scala
-	".scala": "scala",
-
-	// Elixir/Erlang
-	".ex":  "elixir",
-	".exs": "elixir",
-	".erl": "erlang",
-
-	// Haskell
-	".hs": "haskell",
-
-	// Lua
-	".lua": "lua",
-
-	// R
-	".r": "r",
-	".R": "r",
-
-	// SQL
-	".sql": "sql",
-
-	// Docker
-	"Dockerfile": "dockerfile",
-
-	// Makefile
-	"Makefile":     "makefile",
-	"makefile":     "makefile",
-	"GNUmakefile":  "makefile",
-
-	// Other
-	".vue":   "vue",
-	".svelte": "svelte",
-	".graphql": "graphql",
-	".gql":   "graphql",
-	".proto": "protobuf",
-}
-
-// contentTypeMap maps languages to content types.
-var contentTypeMap = map[string]ContentType{
-	// Code
-	"go":         ContentTypeCode,
-	"javascript": ContentTypeCode,
-	"typescript": ContentTypeCode,
-	"python":     ContentTypeCode,
-	"ruby":       ContentTypeCode,
-	"rust":       ContentTypeCode,
-	"java":       ContentTypeCode,
-	"kotlin":     ContentTypeCode,
-	"c":          ContentTypeCode,
-	"cpp":        ContentTypeCode,
-	"csharp":     ContentTypeCode,
-	"swift":      ContentTypeCode,
-	"php":        ContentTypeCode,
-	"scala":      ContentTypeCode,
-	"elixir":     ContentTypeCode,
-	"erlang":     ContentTypeCode,
-	"haskell":    ContentTypeCode,
-	"lua":        ContentTypeCode,
-	"r":          ContentTypeCode,
-	"sql":        ContentTypeCode,
-	"shell":      ContentTypeCode,
-	"fish":       ContentTypeCode,
-	"erb":        ContentTypeCode,
-	"vue":        ContentTypeCode,
-	"svelte":     ContentTypeCode,
-	"graphql":    ContentTypeCode,
-	"protobuf":   ContentTypeCode,
-	"html":       ContentTypeCode,
-	"css":        ContentTypeCode,
-	"scss":       ContentTypeCode,
-	"sass":       ContentTypeCode,
-	"less":       ContentTypeCode,
-
-	// Markdown
-	"markdown": ContentTypeMarkdown,
-	"rst":      ContentTypeMarkdown,
-
-	// Text
-	"text": ContentTypeText,
-
-	// Config
-	"json":       ContentTypeConfig,
-	"yaml":       ContentTypeConfig,
-	"toml":       ContentTypeConfig,
-	"xml":        ContentTypeConfig,
-	"ini":        ContentTypeConfig,
-	"config":     ContentTypeConfig,
-	"properties": ContentTypeConfig,
-	"dockerfile": ContentTypeConfig,
-	"makefile":   ContentTypeConfig,
-}
-
 // DetectLanguage detects the programming language from a file path.
 func DetectLanguage(path string) string {
-	// Check exact filename matches first (Dockerfile, Makefile, etc.)
-	base := baseName(path)
-	if lang, ok := languageMap[base]; ok {
-		return lang
-	}
+	return DetectLanguageWithRegistry(path, nil)
+}
 
-	// Check extension
-	ext := extension(path)
-	if lang, ok := languageMap[ext]; ok {
-		return lang
+// DetectLanguageWithRegistry detects the language from a path using registry.
+func DetectLanguageWithRegistry(path string, registry *language.Registry) string {
+	if registry == nil {
+		registry = language.DefaultRegistry()
 	}
-
-	return ""
+	return registry.Detect(path)
 }
 
 // DetectContentType detects the content type from a language.
-func DetectContentType(language string) ContentType {
-	if ct, ok := contentTypeMap[language]; ok {
-		return ct
-	}
-	return ContentTypeText
+func DetectContentType(languageName string) ContentType {
+	return DetectContentTypeWithRegistry(languageName, nil)
 }
 
-// baseName returns the file name from a path.
-func baseName(path string) string {
-	for i := len(path) - 1; i >= 0; i-- {
-		if path[i] == '/' || path[i] == '\\' {
-			return path[i+1:]
-		}
+// DetectContentTypeWithRegistry detects content type using registry.
+func DetectContentTypeWithRegistry(languageName string, registry *language.Registry) ContentType {
+	if registry == nil {
+		registry = language.DefaultRegistry()
 	}
-	return path
-}
-
-// extension returns the file extension from a path (including the dot).
-func extension(path string) string {
-	for i := len(path) - 1; i >= 0; i-- {
-		if path[i] == '.' {
-			return path[i:]
-		}
-		if path[i] == '/' || path[i] == '\\' {
-			break
-		}
+	switch registry.ContentType(languageName) {
+	case language.ContentTypeCode:
+		return ContentTypeCode
+	case language.ContentTypeMarkdown:
+		return ContentTypeMarkdown
+	case language.ContentTypeConfig:
+		return ContentTypeConfig
+	default:
+		return ContentTypeText
 	}
-	return ""
 }

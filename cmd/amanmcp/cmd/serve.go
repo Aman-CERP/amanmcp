@@ -20,11 +20,14 @@ import (
 	"github.com/Aman-CERP/amanmcp/internal/config"
 	"github.com/Aman-CERP/amanmcp/internal/daemon"
 	"github.com/Aman-CERP/amanmcp/internal/embed"
+	"github.com/Aman-CERP/amanmcp/internal/graph"
 	"github.com/Aman-CERP/amanmcp/internal/index"
+	"github.com/Aman-CERP/amanmcp/internal/language"
 	"github.com/Aman-CERP/amanmcp/internal/logging"
 	"github.com/Aman-CERP/amanmcp/internal/mcp"
 	"github.com/Aman-CERP/amanmcp/internal/scanner"
 	"github.com/Aman-CERP/amanmcp/internal/search"
+	"github.com/Aman-CERP/amanmcp/internal/secrets"
 	"github.com/Aman-CERP/amanmcp/internal/session"
 	"github.com/Aman-CERP/amanmcp/internal/store"
 	"github.com/Aman-CERP/amanmcp/internal/watcher"
@@ -360,6 +363,9 @@ func runServe(ctx context.Context, transport string, port int) (err error) {
 		DefaultWeights: search.Weights{BM25: cfg.Search.BM25Weight, Semantic: cfg.Search.SemanticWeight},
 		RRFConstant:    cfg.Search.RRFConstant,
 		SearchTimeout:  search.DefaultConfig().SearchTimeout,
+		MetadataRules:  cfg.SearchMetadataRules(),
+		ProfileRules:   cfg.SearchProfileRules(),
+		RerankerPolicy: search.RerankerPolicy(cfg.Search.Reranker.Policy),
 	}
 	// QI-1 Lite: Enable code-aware query expansion to bridge vocabulary gap
 	// Research: https://arxiv.org/html/2408.11058v1 (LLM Agents for Code Search)
@@ -389,6 +395,8 @@ func runServe(ctx context.Context, transport string, port int) (err error) {
 		return fmt.Errorf("failed to create MCP server: %w", err)
 	}
 	defer func() { _ = srv.Close() }()
+	closeGraphRepo := attachGraphRepository(srv, dataDir)
+	defer closeGraphRepo()
 
 	// Handle graceful shutdown (DEBT-015: added SIGHUP for terminal close)
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
@@ -403,7 +411,7 @@ func runServe(ctx context.Context, transport string, port int) (err error) {
 	excludePatterns := append(cfg.Paths.Exclude, "**/.amanmcp/**")
 	go func() {
 		slog.Debug("Starting file watcher in background", slog.String("root", root))
-		if err := startFileWatcher(ctx, root, dataDir, engine, metadata, skipReconciliation, excludePatterns); err != nil {
+		if err := startFileWatcher(ctx, root, dataDir, engine, metadata, skipReconciliation, excludePatterns, cfg.Search.Languages); err != nil {
 			// Log but don't crash - server can still serve search without live updates
 			slog.Error("File watcher failed to start (non-fatal, search still works)",
 				slog.String("error", err.Error()),
@@ -426,7 +434,7 @@ func runServe(ctx context.Context, transport string, port int) (err error) {
 // Returns error if watcher fails to start within startup timeout (BUG-017 fix).
 // BUG-054: skipReconciliation prevents adding embeddings from mismatched embedder model.
 // BUG-027: excludePatterns passed to coordinator for consistent reconciliation behavior.
-func startFileWatcher(ctx context.Context, root, dataDir string, engine *search.Engine, metadata store.MetadataStore, skipReconciliation bool, excludePatterns []string) error {
+func startFileWatcher(ctx context.Context, root, dataDir string, engine *search.Engine, metadata store.MetadataStore, skipReconciliation bool, excludePatterns []string, languageDefs []language.Definition) error {
 	// Create watcher with default options
 	opts := watcher.Options{
 		DebounceWindow:  200 * time.Millisecond,
@@ -440,7 +448,10 @@ func startFileWatcher(ctx context.Context, root, dataDir string, engine *search.
 	}
 
 	// Create chunkers
-	codeChunker := chunk.NewCodeChunker()
+	codeChunker, err := chunk.NewCodeChunkerWithLanguageDefinitions(chunk.CodeChunkerOptions{}, languageDefs)
+	if err != nil {
+		return fmt.Errorf("failed to create code chunker: %w", err)
+	}
 	mdChunker := chunk.NewMarkdownChunker()
 
 	// Create scanner for gitignore reconciliation
@@ -448,20 +459,26 @@ func startFileWatcher(ctx context.Context, root, dataDir string, engine *search.
 	if err != nil {
 		return fmt.Errorf("failed to create scanner: %w", err)
 	}
+	languageRegistry, err := language.NewRegistry(languageDefs)
+	if err != nil {
+		return fmt.Errorf("failed to create language registry: %w", err)
+	}
 
 	// Create coordinator (use same hash as index command)
 	h := sha256.Sum256([]byte(root))
 	projectID := hex.EncodeToString(h[:])[:16]
 	coordinator := index.NewCoordinator(index.CoordinatorConfig{
-		ProjectID:       projectID,
-		RootPath:        root,
-		DataDir:         dataDir,
-		Engine:          engine,
-		Metadata:        metadata,
-		CodeChunker:     codeChunker,
-		MDChunker:       mdChunker,
-		Scanner:         fileScanner,
-		ExcludePatterns: excludePatterns, // BUG-027: passed from caller
+		ProjectID:        projectID,
+		RootPath:         root,
+		DataDir:          dataDir,
+		Engine:           engine,
+		Metadata:         metadata,
+		CodeChunker:      codeChunker,
+		MDChunker:        mdChunker,
+		Scanner:          fileScanner,
+		LanguageRegistry: languageRegistry,
+		SecretScanner:    secrets.NewScanner(secrets.DefaultPolicy()),
+		ExcludePatterns:  excludePatterns, // BUG-027: passed from caller
 	})
 
 	// BUG-054: Skip reconciliation if embedder model mismatch detected earlier
@@ -575,6 +592,23 @@ func startFileWatcher(ctx context.Context, root, dataDir string, engine *search.
 	}()
 
 	return nil
+}
+
+func attachGraphRepository(srv *mcp.Server, dataDir string) func() {
+	if srv == nil || dataDir == "" {
+		return func() {}
+	}
+	repo, err := graph.OpenSQLiteRepository(filepath.Join(dataDir, "graph.db"))
+	if err != nil {
+		slog.Warn("graph_repository_unavailable", slog.String("error", err.Error()))
+		return func() {}
+	}
+	srv.SetGraphRepository(repo)
+	return func() {
+		if err := repo.Close(); err != nil {
+			slog.Warn("graph_repository_close_failed", slog.String("error", err.Error()))
+		}
+	}
 }
 
 // getWatcherStartupTimeout returns the watcher startup timeout from environment
@@ -821,6 +855,9 @@ func runServeWithSession(ctx context.Context, sessionName, projectPath, transpor
 		DefaultWeights: search.Weights{BM25: projCfg.Search.BM25Weight, Semantic: projCfg.Search.SemanticWeight},
 		RRFConstant:    projCfg.Search.RRFConstant,
 		SearchTimeout:  search.DefaultConfig().SearchTimeout,
+		MetadataRules:  projCfg.SearchMetadataRules(),
+		ProfileRules:   projCfg.SearchProfileRules(),
+		RerankerPolicy: search.RerankerPolicy(projCfg.Search.Reranker.Policy),
 	}
 	// QI-1 Lite: Enable code-aware query expansion to bridge vocabulary gap
 	queryExpander := search.NewQueryExpander()
@@ -848,6 +885,8 @@ func runServeWithSession(ctx context.Context, sessionName, projectPath, transpor
 		return fmt.Errorf("failed to create MCP server: %w", err)
 	}
 	defer func() { _ = srv.Close() }()
+	closeGraphRepo := attachGraphRepository(srv, dataDir)
+	defer closeGraphRepo()
 
 	// Handle graceful shutdown with session save (DEBT-015: added SIGHUP for terminal close)
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
@@ -873,7 +912,7 @@ func runServeWithSession(ctx context.Context, sessionName, projectPath, transpor
 		slog.Debug("Starting file watcher in background (session mode)",
 			slog.String("root", projectPath),
 			slog.String("session", sessionName))
-		if err := startFileWatcher(ctx, projectPath, dataDir, engine, metadata, skipReconciliationSession, sessionExcludePatterns); err != nil {
+		if err := startFileWatcher(ctx, projectPath, dataDir, engine, metadata, skipReconciliationSession, sessionExcludePatterns, projCfg.Search.Languages); err != nil {
 			slog.Error("File watcher failed to start (non-fatal, search still works)",
 				slog.String("error", err.Error()),
 				slog.String("root", projectPath))

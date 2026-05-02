@@ -1,6 +1,7 @@
 package search
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
@@ -20,6 +21,20 @@ const (
 	// CmdPathPenalty reduces scores for CLI wrapper code in cmd/.
 	// BUG-066: Wrappers match many patterns but users want implementations.
 	CmdPathPenalty = 0.6
+
+	// AuthorityRankScale caps metadata priority influence so authority breaks
+	// close relevance ties without mutating the public relevance score.
+	AuthorityRankScale = 0.12
+
+	// ExactSymbolBoost lifts chunks that define the exact queried symbol above
+	// incidental references when the user issues a lexical-exact lookup.
+	ExactSymbolBoost = 4.0
+
+	// ExactPathBoost lifts exact file-path matches for path lookup queries.
+	ExactPathBoost = 4.0
+
+	// ExactQuotedContentBoost lifts chunks containing the exact quoted phrase.
+	ExactQuotedContentBoost = 1.2
 )
 
 // FilterFunc checks if a search result matches filter criteria.
@@ -28,13 +43,17 @@ type FilterFunc func(result *SearchResult) bool
 // ApplyFilters filters results based on search options.
 // Filters use AND logic - results must match all specified criteria.
 func ApplyFilters(results []*SearchResult, opts SearchOptions) []*SearchResult {
-	if opts.Filter == "all" && opts.Language == "" && opts.SymbolType == "" && len(opts.Scopes) == 0 {
-		return results
+	if opts.Filter == "all" && opts.Language == "" && opts.SymbolType == "" && len(opts.Scopes) == 0 && opts.Profile == "" && opts.Mode == "" {
+		filtered, mismatches := ApplyProfileEligibility(results, opts)
+		recordProfileMismatches(opts, mismatches)
+		return filtered
 	}
 
 	filters := buildFilters(opts)
 	if len(filters) == 0 {
-		return results
+		filtered, mismatches := ApplyProfileEligibility(results, opts)
+		recordProfileMismatches(opts, mismatches)
+		return filtered
 	}
 
 	filtered := make([]*SearchResult, 0, len(results))
@@ -44,7 +63,14 @@ func ApplyFilters(results []*SearchResult, opts SearchOptions) []*SearchResult {
 		}
 	}
 
-	return filtered
+	if opts.Mode == SearchModeDecisionHistory {
+		ApplyAuthorityBoost(filtered)
+		return filtered
+	}
+
+	profiled, mismatches := ApplyProfileEligibility(filtered, opts)
+	recordProfileMismatches(opts, mismatches)
+	return profiled
 }
 
 // buildFilters creates filter functions based on options.
@@ -69,6 +95,10 @@ func buildFilters(opts SearchOptions) []FilterFunc {
 	// Scope filter
 	if len(opts.Scopes) > 0 {
 		filters = append(filters, scopeFilter(opts.Scopes))
+	}
+
+	if opts.Mode != "" {
+		filters = append(filters, modeFilter(opts.Mode))
 	}
 
 	return filters
@@ -132,6 +162,13 @@ func symbolTypeFilter(symbolType string) FilterFunc {
 
 // ValidateOptions checks if search options are valid.
 func ValidateOptions(opts SearchOptions) error {
+	if _, err := ParseProfile(string(opts.Profile)); err != nil {
+		return err
+	}
+	if _, err := ParseMode(string(opts.Mode)); err != nil {
+		return err
+	}
+
 	// Validate filter value
 	switch opts.Filter {
 	case "", "all", "code", "docs":
@@ -141,6 +178,45 @@ func ValidateOptions(opts SearchOptions) error {
 	}
 
 	return nil
+}
+
+func ParseMode(value string) (SearchMode, error) {
+	mode := SearchMode(strings.TrimSpace(value))
+	switch mode {
+	case "", SearchModeDecisions, SearchModeDecisionHistory:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("unknown search mode %q; use one of: decisions, decision-history", value)
+	}
+}
+
+func recordProfileMismatches(opts SearchOptions, mismatches []ProfileMismatch) {
+	if opts.ProfileMismatches == nil || len(mismatches) == 0 {
+		return
+	}
+
+	seen := make(map[string]struct{}, len(*opts.ProfileMismatches)+len(mismatches))
+	for _, mismatch := range *opts.ProfileMismatches {
+		seen[profileMismatchKey(mismatch)] = struct{}{}
+	}
+	for _, mismatch := range mismatches {
+		key := profileMismatchKey(mismatch)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		*opts.ProfileMismatches = append(*opts.ProfileMismatches, mismatch)
+		seen[key] = struct{}{}
+	}
+}
+
+func profileMismatchKey(mismatch ProfileMismatch) string {
+	return strings.Join([]string{
+		mismatch.SourcePath,
+		string(mismatch.RequestedProfile),
+		string(mismatch.RequiredProfile),
+		string(mismatch.SourceClass),
+		string(mismatch.Authority),
+	}, "\x00")
 }
 
 // NormalizeScope ensures consistent path format for matching.
@@ -182,6 +258,27 @@ func scopeFilter(scopes []string) FilterFunc {
 	}
 }
 
+func modeFilter(mode SearchMode) FilterFunc {
+	return func(r *SearchResult) bool {
+		if r == nil {
+			return false
+		}
+		ensureResultMetadata(r)
+		switch mode {
+		case SearchModeDecisions:
+			return r.SourceMetadata.SourceClass == SourceClassADR &&
+				!r.SourceMetadata.Generated &&
+				!r.SourceMetadata.Stale &&
+				r.SourceMetadata.DecisionStatus != DecisionStatusSuperseded &&
+				r.SourceMetadata.DecisionStatus != DecisionStatusDeprecated
+		case SearchModeDecisionHistory:
+			return r.SourceMetadata.SourceClass == SourceClassADR
+		default:
+			return true
+		}
+	}
+}
+
 // ApplyTestFilePenalty adjusts scores to deprioritize test files.
 // FEAT-QI4: Test files contain mock implementations that often outrank real code
 // because they have multiple copies of the same method signatures.
@@ -212,6 +309,64 @@ func ApplyTestFilePenalty(results []*SearchResult) []*SearchResult {
 	})
 
 	return results
+}
+
+// ApplyExactMatchBoost prioritizes exact lexical hits before broader ranking
+// adjustments. It is intentionally narrow: identifier queries boost exact
+// symbol definitions, path queries boost exact file paths, and quoted queries
+// boost exact phrase containment.
+func ApplyExactMatchBoost(results []*SearchResult, query string) []*SearchResult {
+	if len(results) == 0 {
+		return results
+	}
+
+	needle, quoted := exactMatchNeedle(query)
+	if needle == "" {
+		return results
+	}
+
+	for _, r := range results {
+		if r == nil || r.Chunk == nil {
+			continue
+		}
+
+		switch {
+		case r.Chunk.FilePath == needle:
+			r.Score *= ExactPathBoost
+		case hasExactSymbol(r.Chunk, needle):
+			r.Score *= ExactSymbolBoost
+		case quoted && strings.Contains(r.Chunk.Content, needle):
+			r.Score *= ExactQuotedContentBoost
+		}
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
+	})
+
+	return results
+}
+
+func exactMatchNeedle(query string) (string, bool) {
+	query = strings.TrimSpace(query)
+	if !shouldPreserveExactLexicalQuery(query) {
+		return "", false
+	}
+
+	if quotedPattern.MatchString(query) && len(query) >= 2 {
+		return query[1 : len(query)-1], true
+	}
+
+	return query, false
+}
+
+func hasExactSymbol(chunk *store.Chunk, name string) bool {
+	for _, symbol := range chunk.Symbols {
+		if symbol != nil && symbol.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // IsTestFile checks if a file path is a test file.
@@ -291,6 +446,35 @@ func ApplyPathBoost(results []*SearchResult) []*SearchResult {
 	})
 
 	return results
+}
+
+// ApplyAuthorityBoost sorts results using source authority and freshness
+// metadata as a secondary ranking signal. It leaves public scores unchanged so
+// RRF/reranker score semantics remain stable for callers.
+func ApplyAuthorityBoost(results []*SearchResult) []*SearchResult {
+	if len(results) == 0 {
+		return results
+	}
+
+	for _, r := range results {
+		if r == nil {
+			continue
+		}
+		ensureResultMetadata(r)
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return authorityRankScore(results[i]) > authorityRankScore(results[j])
+	})
+
+	return results
+}
+
+func authorityRankScore(result *SearchResult) float64 {
+	if result == nil {
+		return 0
+	}
+	return result.Score + (float64(MetadataPriority(result.SourceMetadata))/100.0)*AuthorityRankScale
 }
 
 // IsImplementationPath checks if a path is implementation code (internal/).

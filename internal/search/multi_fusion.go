@@ -43,15 +43,15 @@ type MultiFusedResult struct {
 //   - hits = number of sub-queries where document appears
 //   - boost = consensus boost factor (default: 0.1)
 type MultiRRFFusion struct {
-	K             int     // RRF smoothing constant (default: 60)
+	K              int     // RRF smoothing constant (default: 60)
 	ConsensusBoost float64 // Boost per additional sub-query hit (default: 0.1)
 }
 
 // NewMultiRRFFusion creates a new multi-query RRF fusion with default parameters.
 func NewMultiRRFFusion() *MultiRRFFusion {
 	return &MultiRRFFusion{
-		K:             DefaultRRFConstant, // 60
-		ConsensusBoost: 0.1,              // 10% boost per additional hit
+		K:              DefaultRRFConstant, // 60
+		ConsensusBoost: 0.1,                // 10% boost per additional hit
 	}
 }
 
@@ -64,7 +64,7 @@ func NewMultiRRFFusionWithParams(k int, consensusBoost float64) *MultiRRFFusion 
 		consensusBoost = 0.1
 	}
 	return &MultiRRFFusion{
-		K:             k,
+		K:              k,
 		ConsensusBoost: consensusBoost,
 	}
 }

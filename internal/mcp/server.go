@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -16,6 +17,8 @@ import (
 	"github.com/Aman-CERP/amanmcp/internal/async"
 	"github.com/Aman-CERP/amanmcp/internal/config"
 	"github.com/Aman-CERP/amanmcp/internal/embed"
+	"github.com/Aman-CERP/amanmcp/internal/graph"
+	"github.com/Aman-CERP/amanmcp/internal/pmmutation"
 	"github.com/Aman-CERP/amanmcp/internal/search"
 	"github.com/Aman-CERP/amanmcp/internal/store"
 	"github.com/Aman-CERP/amanmcp/internal/telemetry"
@@ -41,6 +44,15 @@ type Server struct {
 
 	// Query telemetry (optional, set via SetMetrics)
 	metrics *telemetry.QueryMetrics
+
+	// Graph status provider (optional, set via SetGraphStatusProvider)
+	graphStatus graph.StatusProvider
+
+	// Graph query service (optional, set via SetGraphRepository/SetGraphQueryService)
+	graphQuery *graph.QueryService
+
+	// PM mutator (optional; enabled automatically when rootPath is set)
+	pmMutator *pmmutation.Mutator
 
 	mu sync.RWMutex
 }
@@ -72,26 +84,48 @@ type SearchInput struct {
 	Filter   string   `json:"filter,omitempty" jsonschema:"filter by content type: all, code, docs"`
 	Language string   `json:"language,omitempty" jsonschema:"filter by programming language, e.g. go, typescript"`
 	Scope    []string `json:"scope,omitempty" jsonschema:"filter by path prefixes (OR logic)"`
+	Profile  string   `json:"profile,omitempty" jsonschema:"retrieval profile: code, project-memory, review-corpus, archive"`
+	Explain  bool     `json:"explain,omitempty" jsonschema:"include verbose search explainability metadata"`
 }
 
 // SearchOutput defines the output schema for the search tool.
 type SearchOutput struct {
-	Results []SearchResultOutput `json:"results" jsonschema:"list of search results"`
+	Results           []SearchResultOutput    `json:"results" jsonschema:"list of search results"`
+	SearchQuality     SearchQualityOutput     `json:"search_quality" jsonschema:"compact search quality metadata"`
+	SearchExplain     *SearchExplainOutput    `json:"search_explain,omitempty" jsonschema:"verbose search explanation metadata; present only when explain is true"`
+	ProfileMismatches []ProfileMismatchOutput `json:"profile_mismatches,omitempty" jsonschema:"results excluded by the selected retrieval profile"`
 }
 
 // SearchResultOutput defines a single search result with context-rich metadata.
 // UX-1: Enhanced response format explaining WHY results matched.
 type SearchResultOutput struct {
-	FilePath     string   `json:"file_path" jsonschema:"file path relative to project root"`
-	Content      string   `json:"content" jsonschema:"matched content snippet"`
-	Score        float64  `json:"score" jsonschema:"relevance score between 0 and 1"`
-	Language     string   `json:"language,omitempty" jsonschema:"programming language of the file"`
-	MatchReason  string   `json:"match_reason,omitempty" jsonschema:"human-readable explanation of why this result matched"`
-	Symbol       string   `json:"symbol,omitempty" jsonschema:"primary symbol name (function, class, type)"`
-	SymbolType   string   `json:"symbol_type,omitempty" jsonschema:"type of symbol: function, class, interface, type, method"`
-	Signature    string   `json:"signature,omitempty" jsonschema:"full function/method signature"`
-	MatchedTerms []string `json:"matched_terms,omitempty" jsonschema:"query terms that matched this result"`
-	InBothLists  bool     `json:"in_both_lists,omitempty" jsonschema:"true if result appeared in both keyword and semantic search"`
+	ResultID     string                     `json:"result_id" jsonschema:"stable deterministic result identifier"`
+	FilePath     string                     `json:"file_path" jsonschema:"file path relative to project root"`
+	Content      string                     `json:"content" jsonschema:"matched content snippet"`
+	Score        float64                    `json:"score" jsonschema:"relevance score between 0 and 1"`
+	Language     string                     `json:"language,omitempty" jsonschema:"programming language of the file"`
+	MatchReason  string                     `json:"match_reason,omitempty" jsonschema:"human-readable explanation of why this result matched"`
+	Symbol       string                     `json:"symbol,omitempty" jsonschema:"primary symbol name (function, class, type)"`
+	SymbolType   string                     `json:"symbol_type,omitempty" jsonschema:"type of symbol: function, class, interface, type, method"`
+	Signature    string                     `json:"signature,omitempty" jsonschema:"full function/method signature"`
+	MatchedTerms []string                   `json:"matched_terms,omitempty" jsonschema:"query terms that matched this result"`
+	InBothLists  bool                       `json:"in_both_lists,omitempty" jsonschema:"true if result appeared in both keyword and semantic search"`
+	Explain      *SearchResultExplainOutput `json:"explain,omitempty" jsonschema:"per-result stage diagnostics; present only when explain is true"`
+
+	SourceClass     string   `json:"source_class" jsonschema:"source artifact class, e.g. source_code, docs, adr, review_corpus"`
+	Authority       string   `json:"authority" jsonschema:"source authority level, e.g. authoritative, active, advisory"`
+	Profile         string   `json:"profile" jsonschema:"retrieval profile that made the result eligible"`
+	SourcePath      string   `json:"source_path" jsonschema:"project-relative source path"`
+	LastModified    string   `json:"last_modified,omitempty" jsonschema:"source modification time when known"`
+	GitStatus       string   `json:"git_status,omitempty" jsonschema:"git status when available"`
+	SourceHash      string   `json:"source_hash,omitempty" jsonschema:"stable source or content hash when available"`
+	Generated       bool     `json:"generated" jsonschema:"true when result came from generated material"`
+	Stale           bool     `json:"stale" jsonschema:"true when source is known stale or superseded"`
+	FreshnessReason string   `json:"freshness_reason,omitempty" jsonschema:"short reason for stale or unknown freshness"`
+	DecisionStatus  string   `json:"decision_status,omitempty" jsonschema:"ADR or decision status when applicable"`
+	Supersedes      []string `json:"supersedes,omitempty" jsonschema:"decision records superseded by this result"`
+	SupersededBy    []string `json:"superseded_by,omitempty" jsonschema:"decision records that supersede this result"`
+	CurrentAsOf     string   `json:"current_as_of,omitempty" jsonschema:"decision freshness timestamp when known"`
 }
 
 // NewServer creates a new MCP server.
@@ -110,12 +144,16 @@ func NewServer(engine search.SearchEngine, metadata store.MetadataStore, embedde
 	}
 
 	s := &Server{
-		engine:   engine,
-		metadata: metadata,
-		embedder: embedder, // May be nil - will report as unavailable
-		config:   cfg,
-		rootPath: rootPath,
-		logger:   slog.Default(),
+		engine:    engine,
+		metadata:  metadata,
+		embedder:  embedder, // May be nil - will report as unavailable
+		config:    cfg,
+		projectID: projectIDForRoot(rootPath),
+		rootPath:  rootPath,
+		logger:    slog.Default(),
+	}
+	if rootPath != "" {
+		s.pmMutator = pmmutation.New(rootPath)
 	}
 
 	// Create MCP server with implementation info
@@ -129,6 +167,14 @@ func NewServer(engine search.SearchEngine, metadata store.MetadataStore, embedde
 
 	// Register tools
 	s.registerTools()
+	s.registerGraphStatusResource()
+	if rootPath != "" {
+		if err := s.RegisterPMResources(); err != nil {
+			return nil, fmt.Errorf("failed to register PM resources: %w", err)
+		}
+	} else {
+		s.logger.Info("pm_resources_skipped", slog.String("reason", "rootPath empty"))
+	}
 
 	return s, nil
 }
@@ -153,6 +199,28 @@ func (s *Server) SetMetrics(m *telemetry.QueryMetrics) {
 	if m != nil {
 		s.registerQueryMetricsResource()
 	}
+}
+
+// SetGraphRepository wires graph status and graph.query to one repository.
+func (s *Server) SetGraphRepository(repo graph.Repository) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.graphStatus = repo
+	s.graphQuery = graph.NewQueryService(repo, graph.QueryServiceOptions{})
+}
+
+// SetGraphQueryService wires graph.query to a testable graph service.
+func (s *Server) SetGraphQueryService(service *graph.QueryService) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.graphQuery = service
+}
+
+// SetPMMutator wires pm.mutate to a PM mutation core.
+func (s *Server) SetPMMutator(mutator *pmmutation.Mutator) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pmMutator = mutator
 }
 
 // MCPServer returns the underlying MCP server instance.
@@ -192,14 +260,19 @@ func (s *Server) ListTools() []ToolInfo {
 			Name:        "index_status",
 			Description: "Check if the codebase index is ready and which embedder is active. Use before searching to verify the index is complete.",
 		},
+		{
+			Name:        "graph.query",
+			Description: "Graph-native relationship query. Use typed modes find_references, explain_symbol, and impact_analysis for bounded role-labeled evidence when AmanGraph data is available.",
+		},
+		{
+			Name:        "pm.mutate",
+			Description: "DEPRECATED — moving to scripts/amanpm/ per DEBT-031 (AmanPM tooling does not belong in the AmanMCP product binary). Existing behavior preserved until the script port lands. Human-auditable AmanPM mutation gateway. Supports lock-token preview, append-only learning/changelog writes, item filing, status moves, ADR skeletons, and release preflight without bypassing validation.",
+		},
 	}
 }
 
 // CallTool invokes a tool by name with the given arguments.
 func (s *Server) CallTool(ctx context.Context, name string, args map[string]any) (any, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	switch name {
 	case "search":
 		return s.handleSearchTool(ctx, args)
@@ -209,6 +282,10 @@ func (s *Server) CallTool(ctx context.Context, name string, args map[string]any)
 		return s.handleSearchDocsTool(ctx, args)
 	case "index_status":
 		return s.handleIndexStatusTool(ctx, args)
+	case "graph.query":
+		return s.handleGraphQueryArgs(ctx, args)
+	case "pm.mutate":
+		return s.handlePMMutateArgs(ctx, args)
 	default:
 		return nil, NewMethodNotFoundError(name)
 	}
@@ -256,10 +333,23 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]any) (str
 		slog.String("query", query),
 		slog.Int("limit", limit))
 
+	var profileMismatches []search.ProfileMismatch
+	var queryClassification search.QueryClassification
+	var rerankerStatus search.RerankerStatus
 	opts := search.SearchOptions{
-		Limit: limit,
+		Limit:               limit,
+		ProfileMismatches:   &profileMismatches,
+		QueryClassification: &queryClassification,
+		RerankerStatus:      &rerankerStatus,
 	}
 
+	if profileValue, ok := args["profile"].(string); ok {
+		profile, err := search.ParseProfile(profileValue)
+		if err != nil {
+			return "", MapError(err)
+		}
+		opts.Profile = profile
+	}
 	if filter, ok := args["filter"].(string); ok {
 		opts.Filter = filter
 	}
@@ -292,7 +382,7 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]any) (str
 		slog.Int("result_count", len(results)))
 
 	// Format as markdown
-	return FormatSearchResults(query, results), nil
+	return FormatSearchResultsWithProfileMismatches(query, results, profileMismatches), nil
 }
 
 // handleSearchCodeTool handles the search_code tool invocation.
@@ -319,8 +409,17 @@ func (s *Server) handleSearchCodeTool(ctx context.Context, args map[string]any) 
 		slog.Int("limit", limit))
 
 	opts := search.SearchOptions{
-		Limit:  limit,
-		Filter: "code", // Always filter to code
+		Limit:   limit,
+		Filter:  "code", // Always filter to code
+		Profile: search.ProfileCode,
+	}
+
+	if profileValue, ok := args["profile"].(string); ok && profileValue != "" {
+		profile, err := search.ParseProfile(profileValue)
+		if err != nil {
+			return "", MapError(err)
+		}
+		opts.Profile = profile
 	}
 
 	// Language filter
@@ -391,8 +490,25 @@ func (s *Server) handleSearchDocsTool(ctx context.Context, args map[string]any) 
 		slog.Int("limit", limit))
 
 	opts := search.SearchOptions{
-		Limit:  limit,
-		Filter: "docs", // Always filter to docs
+		Limit:   limit,
+		Filter:  "docs", // Always filter to docs
+		Profile: search.ProfileProjectMemory,
+	}
+
+	if profileValue, ok := args["profile"].(string); ok && profileValue != "" {
+		profile, err := search.ParseProfile(profileValue)
+		if err != nil {
+			return "", MapError(err)
+		}
+		opts.Profile = profile
+	}
+
+	if modeValue, ok := args["mode"].(string); ok && modeValue != "" {
+		mode, err := search.ParseMode(modeValue)
+		if err != nil {
+			return "", NewInvalidParamsError(err.Error())
+		}
+		opts.Mode = mode
 	}
 
 	// Scope filter
@@ -403,6 +519,7 @@ func (s *Server) handleSearchDocsTool(ctx context.Context, args map[string]any) 
 			}
 		}
 	}
+	opts.Scopes = defaultDecisionScopes(opts, s.config)
 
 	// Execute search
 	results, err := s.engine.Search(ctx, query, opts)
@@ -423,6 +540,21 @@ func (s *Server) handleSearchDocsTool(ctx context.Context, args map[string]any) 
 
 	// Format as markdown
 	return FormatDocsResults(query, results), nil
+}
+
+func defaultDecisionScopes(opts search.SearchOptions, cfg *config.Config) []string {
+	if len(opts.Scopes) > 0 {
+		return opts.Scopes
+	}
+	if opts.Mode != search.SearchModeDecisions && opts.Mode != search.SearchModeDecisionHistory {
+		return opts.Scopes
+	}
+
+	rules := search.DefaultMetadataRules()
+	if cfg != nil {
+		rules = cfg.SearchMetadataRules()
+	}
+	return search.DecisionScopePrefixes(rules)
 }
 
 // handleIndexStatusTool handles the index_status tool invocation.
@@ -572,7 +704,44 @@ func (s *Server) registerTools() {
 	}, s.mcpIndexStatusHandler)
 	s.logger.Debug("Registered tool", slog.String("name", "index_status"))
 
-	s.logger.Info("MCP tools registered", slog.Int("count", 4))
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "graph.query",
+		Description: "Graph-native relationship query with find_references, explain_symbol, and impact_analysis modes. Returns bounded role-labeled evidence, graph path hints, source paths, confidence labels, status, and warnings.",
+	}, s.mcpGraphQueryHandler)
+	s.logger.Debug("Registered tool", slog.String("name", "graph.query"))
+
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "pm.mutate",
+		Description: "DEPRECATED — moving to scripts/amanpm/ per DEBT-031 (AmanPM tooling does not belong in the AmanMCP product binary). Existing behavior preserved until the script port lands. AmanPM mutation gateway with file-scoped lock tokens, receipts, diagnostics, changed files, suggested commit messages, and hard-gated release preflight.",
+		Meta:        amanpmDeprecationMeta(),
+	}, s.mcpPMMutateHandler)
+	s.logger.Debug("Registered tool", slog.String("name", "pm.mutate"))
+
+	s.logger.Info("MCP tools registered", slog.Int("count", 6))
+}
+
+// amanpmDeprecationMeta returns the structured deprecation metadata attached
+// to every MCP tool/resource that exposes AmanPM substrate operations from
+// the AmanMCP binary. The MCP spec reserves the `_meta` field for
+// implementation-specific metadata; downstream MCP consumers can read these
+// fields programmatically to detect the deprecation, surface user-facing
+// warnings, or block calls.
+//
+// AmanPM and AmanMCP are separate products. AmanMCP indexes .aman-pm/* files
+// like any other repo content, but it should not embed AmanPM mutation or
+// inspection logic in its binary. The full architectural argument is in
+// vend_feedback/2026-05-02-amanmcp-pmmutation-architectural-feedback.md and
+// in DEBT-031 (port to scripts) plus DEBT-032 (sunset MCP tool family).
+func amanpmDeprecationMeta() mcp.Meta {
+	return mcp.Meta{
+		"deprecated":         true,
+		"deprecation_notice": "AmanPM mutation/resource primitives are moving from the AmanMCP product binary to language-neutral scripts in scripts/amanpm/, modeled on AmanERP's scripts/analytics/ pattern. AmanMCP and AmanPM are separate products; PM tooling does not belong in the product binary.",
+		"deprecation_date":   "2026-05-02",
+		"removal_target":     "Sprint 16+, after scripts/amanpm/ port lands",
+		"tracking":           []string{"DEBT-031", "DEBT-032"},
+		"replacement":        "scripts/amanpm/* (port pending) + Makefile amanpm-* targets",
+		"feedback_doc":       "vend_feedback/2026-05-02-amanmcp-pmmutation-architectural-feedback.md",
+	}
 }
 
 // mcpSearchHandler is the MCP SDK handler for the search tool.
@@ -586,12 +755,25 @@ func (s *Server) mcpSearchHandler(ctx context.Context, req *mcp.CallToolRequest,
 		return nil, SearchOutput{}, NewInvalidParamsError("query parameter is required")
 	}
 
+	profile, err := search.ParseProfile(input.Profile)
+	if err != nil {
+		return nil, SearchOutput{}, MapError(err)
+	}
+	var profileMismatches []search.ProfileMismatch
+	var queryClassification search.QueryClassification
+	var rerankerStatus search.RerankerStatus
+
 	// Build search options
 	opts := search.SearchOptions{
-		Limit:    10,
-		Filter:   input.Filter,
-		Language: input.Language,
-		Scopes:   input.Scope,
+		Limit:               10,
+		Filter:              input.Filter,
+		Language:            input.Language,
+		Scopes:              input.Scope,
+		Profile:             profile,
+		ProfileMismatches:   &profileMismatches,
+		QueryClassification: &queryClassification,
+		RerankerStatus:      &rerankerStatus,
+		Explain:             input.Explain,
 	}
 	if input.Limit > 0 {
 		opts.Limit = input.Limit
@@ -603,18 +785,7 @@ func (s *Server) mcpSearchHandler(ctx context.Context, req *mcp.CallToolRequest,
 		return nil, SearchOutput{}, MapError(err)
 	}
 
-	// Convert to output format with enhanced context (UX-1)
-	output := SearchOutput{
-		Results: make([]SearchResultOutput, 0, len(results)),
-	}
-
-	for _, r := range results {
-		if r.Chunk != nil {
-			output.Results = append(output.Results, ToSearchResultOutput(r))
-		}
-	}
-
-	return nil, output, nil
+	return nil, s.BuildSearchOutput("search", input.Query, opts, results, profileMismatches), nil
 }
 
 // mcpSearchCodeHandler is the MCP SDK handler for the search_code tool.
@@ -628,12 +799,28 @@ func (s *Server) mcpSearchCodeHandler(ctx context.Context, _ *mcp.CallToolReques
 		return nil, SearchOutput{}, NewInvalidParamsError("query parameter is required")
 	}
 
+	profile, err := search.ParseProfile(input.Profile)
+	if err != nil {
+		return nil, SearchOutput{}, MapError(err)
+	}
+	if profile == "" {
+		profile = search.ProfileCode
+	}
+	var profileMismatches []search.ProfileMismatch
+	var queryClassification search.QueryClassification
+	var rerankerStatus search.RerankerStatus
+
 	// Build search options
 	opts := search.SearchOptions{
-		Limit:    10,
-		Filter:   "code", // Always filter to code
-		Language: input.Language,
-		Scopes:   input.Scope,
+		Limit:               10,
+		Filter:              "code", // Always filter to code
+		Language:            input.Language,
+		Scopes:              input.Scope,
+		Profile:             profile,
+		ProfileMismatches:   &profileMismatches,
+		QueryClassification: &queryClassification,
+		RerankerStatus:      &rerankerStatus,
+		Explain:             input.Explain,
 	}
 	if input.Limit > 0 {
 		opts.Limit = input.Limit
@@ -648,18 +835,7 @@ func (s *Server) mcpSearchCodeHandler(ctx context.Context, _ *mcp.CallToolReques
 		return nil, SearchOutput{}, MapError(err)
 	}
 
-	// Convert to output format with enhanced context (UX-1)
-	output := SearchOutput{
-		Results: make([]SearchResultOutput, 0, len(results)),
-	}
-
-	for _, r := range results {
-		if r.Chunk != nil {
-			output.Results = append(output.Results, ToSearchResultOutput(r))
-		}
-	}
-
-	return nil, output, nil
+	return nil, s.BuildSearchOutput("search_code", input.Query, opts, results, profileMismatches), nil
 }
 
 // mcpSearchDocsHandler is the MCP SDK handler for the search_docs tool.
@@ -673,15 +849,37 @@ func (s *Server) mcpSearchDocsHandler(ctx context.Context, _ *mcp.CallToolReques
 		return nil, SearchOutput{}, NewInvalidParamsError("query parameter is required")
 	}
 
+	profile, err := search.ParseProfile(input.Profile)
+	if err != nil {
+		return nil, SearchOutput{}, MapError(err)
+	}
+	if profile == "" {
+		profile = search.ProfileProjectMemory
+	}
+	mode, err := search.ParseMode(input.Mode)
+	if err != nil {
+		return nil, SearchOutput{}, NewInvalidParamsError(err.Error())
+	}
+	var profileMismatches []search.ProfileMismatch
+	var queryClassification search.QueryClassification
+	var rerankerStatus search.RerankerStatus
+
 	// Build search options
 	opts := search.SearchOptions{
-		Limit:  10,
-		Filter: "docs", // Always filter to docs
-		Scopes: input.Scope,
+		Limit:               10,
+		Filter:              "docs", // Always filter to docs
+		Scopes:              input.Scope,
+		Profile:             profile,
+		Mode:                mode,
+		ProfileMismatches:   &profileMismatches,
+		QueryClassification: &queryClassification,
+		RerankerStatus:      &rerankerStatus,
+		Explain:             input.Explain,
 	}
 	if input.Limit > 0 {
 		opts.Limit = input.Limit
 	}
+	opts.Scopes = defaultDecisionScopes(opts, s.config)
 
 	// Execute search
 	results, err := s.engine.Search(ctx, input.Query, opts)
@@ -689,18 +887,7 @@ func (s *Server) mcpSearchDocsHandler(ctx context.Context, _ *mcp.CallToolReques
 		return nil, SearchOutput{}, MapError(err)
 	}
 
-	// Convert to output format with enhanced context (UX-1)
-	output := SearchOutput{
-		Results: make([]SearchResultOutput, 0, len(results)),
-	}
-
-	for _, r := range results {
-		if r.Chunk != nil {
-			output.Results = append(output.Results, ToSearchResultOutput(r))
-		}
-	}
-
-	return nil, output, nil
+	return nil, s.BuildSearchOutput("search_docs", input.Query, opts, results, profileMismatches), nil
 }
 
 // mcpIndexStatusHandler is the MCP SDK handler for the index_status tool.
@@ -837,4 +1024,12 @@ func generateRequestID() string {
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+func projectIDForRoot(rootPath string) string {
+	if strings.TrimSpace(rootPath) == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(rootPath))
+	return hex.EncodeToString(sum[:])[:16]
 }

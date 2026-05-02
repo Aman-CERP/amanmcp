@@ -104,8 +104,12 @@ type Point struct {
 
 // LanguageConfig holds configuration for a supported language
 type LanguageConfig struct {
-	Name       string
-	Extensions []string
+	Name            string
+	ScannerLanguage string
+	Extensions      []string
+	Parser          string
+	LineFallback    bool
+	ConfigSource    string
 
 	// Node types that indicate function declarations
 	FunctionTypes []string
