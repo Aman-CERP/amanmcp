@@ -3,7 +3,10 @@ package pmmutation
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -298,20 +301,71 @@ func evaluateDogfoodResult(t *testing.T, root, id, expect string, before map[str
 
 func loadDogfoodCorpusIDs(t *testing.T) []string {
 	t.Helper()
-	content, err := os.ReadFile(filepath.Join("..", "..", ".aman-pm", "validation", "mutation-dogfood-corpus.yaml"))
+	return loadDogfoodCorpusIDsFromPath(t, filepath.Join("..", "..", ".aman-pm", "validation", "mutation-dogfood-corpus.yaml"))
+}
+
+func loadDogfoodCorpusIDsFromPath(t *testing.T, path string) []string {
+	t.Helper()
+	ids, err := readDogfoodCorpusIDs(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Skipf("dogfood corpus not present at %s (private-PM-only test)", path)
+	}
 	require.NoError(t, err)
+	require.Len(t, ids, 30)
+	return ids
+}
+
+func readDogfoodCorpusIDs(path string) ([]string, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read dogfood corpus %s: %w", path, err)
+	}
 	var corpus struct {
 		Cases []struct {
 			ID string `yaml:"id"`
 		} `yaml:"cases"`
 	}
-	require.NoError(t, yaml.Unmarshal(content, &corpus))
+	if err := yaml.Unmarshal(content, &corpus); err != nil {
+		return nil, fmt.Errorf("parse dogfood corpus %s: %w", path, err)
+	}
 	ids := make([]string, 0, len(corpus.Cases))
 	for _, item := range corpus.Cases {
 		ids = append(ids, item.ID)
 	}
-	require.Len(t, ids, 30)
-	return ids
+	return ids, nil
+}
+
+func TestLoadDogfoodCorpusIDs_SkipsWhenCorpusMissing(t *testing.T) {
+	if os.Getenv("AMANMCP_DOGFOOD_MISSING_CORPUS_HELPER") == "1" {
+		loadDogfoodCorpusIDsFromPath(t, filepath.Join(t.TempDir(), "missing.yaml"))
+		t.Fatal("expected missing dogfood corpus to skip")
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestLoadDogfoodCorpusIDs_SkipsWhenCorpusMissing$", "-test.v")
+	cmd.Env = append(os.Environ(), "AMANMCP_DOGFOOD_MISSING_CORPUS_HELPER=1")
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(output))
+	assert.Contains(t, string(output), "private-PM-only test")
+	assert.Contains(t, string(output), "--- SKIP: TestLoadDogfoodCorpusIDs_SkipsWhenCorpusMissing")
+}
+
+func TestReadDogfoodCorpusIDs_PreservesNonMissingReadErrors(t *testing.T) {
+	ids, err := readDogfoodCorpusIDs(t.TempDir())
+
+	require.Error(t, err)
+	assert.Nil(t, ids)
+	assert.False(t, errors.Is(err, fs.ErrNotExist), "directory read errors must remain hard failures")
+}
+
+func TestReadDogfoodCorpusIDs_PreservesMalformedYAMLErrors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mutation-dogfood-corpus.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("cases: ["), 0o644))
+
+	ids, err := readDogfoodCorpusIDs(path)
+
+	require.Error(t, err)
+	assert.Nil(t, ids)
+	assert.False(t, errors.Is(err, fs.ErrNotExist), "parse errors must remain hard failures")
 }
 
 func mustTokens(t *testing.T, mutator *Mutator, paths ...string) []FileToken {

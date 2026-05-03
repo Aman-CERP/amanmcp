@@ -15,6 +15,7 @@
 #   3 - Coverage below threshold
 #   4 - Build failed
 #   5 - Security issues found
+#   7 - Installed binary parity check failed to execute
 
 set -euo pipefail
 
@@ -224,6 +225,18 @@ run_amanpm_advisory() {
     log_success "AmanPM advisory check completed"
 }
 
+# Run installed-binary parity as advisory during Sprint 16 normalization.
+run_install_local_verify_advisory() {
+    log_step "Running installed binary parity advisory..."
+
+    if ! ./scripts/install-local-and-verify.sh --mode advisory; then
+        log_error "Installed binary parity advisory failed to execute"
+        exit 7
+    fi
+
+    log_success "Installed binary parity advisory completed"
+}
+
 # Run parallel checks (tests, lint, security)
 run_parallel_checks() {
     log_parallel "Running tests, lint, and security scan IN PARALLEL..."
@@ -376,6 +389,7 @@ main() {
             run_parallel_checks
             check_coverage
             run_build
+            run_install_local_verify_advisory
             run_amanpm_advisory
 
             echo ""

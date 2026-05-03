@@ -4,6 +4,11 @@ Public-facing highlights of major changes. See `.aman-pm/changelog/` for detaile
 
 ---
 
+## [v0.12.1] - 2026-05-03
+
+- **Update**: Minor improvements and fixes
+
+
 ## [v0.12.0] - 2026-05-02
 
 - **Pre-index secret scanning**: Add a compact detector package and runner gate for high-confidence secrets
@@ -53,11 +58,6 @@ Public-facing highlights of major changes. See `.aman-pm/changelog/` for detaile
 ## [v0.5.0] - 2026-01-14
 
 - **Feature**: Tiered validation for 90% faster commit validation
-
-## [v0.4.0] - 2026-01-13
-
-- **Feature**: Multi-Query Fusion with pattern-based query decomposition
-- **Fix**: BM25 index corruption after binary rebuild with auto-recovery
 
 
 ---

@@ -34,7 +34,8 @@ LDFLAGS := -X github.com/Aman-CERP/amanmcp/pkg/version.Version=$(VERSION) \
 # CGO is required for tree-sitter code parsing only
 # USearch removed in v0.1.38 - now using coder/hnsw (pure Go)
 
-.PHONY: help build build-logs test test-race test-cover test-cover-html lint lint-fix lint-fast ci-check ci-check-quick amanpm-check-constants amanpm-validate amanpm-db-sync amanpm-db-rebuild amanpm-index-generate amanpm-comply amanpm-comply-guard amanpm-verify-release-claims clean verify-checkpoint verify-docs verify-ssot verify-all install install-user install-local install-local-logs install-local-all uninstall uninstall-local install-mlx start-mlx install-ollama start-ollama stop-ollama switch-backend-mlx switch-backend-ollama verify-install validate validate-tier1 validate-tier2 validate-all eval-search-quick eval-search-graph eval-search-baseline
+.PHONY: help build build-logs test test-race test-cover test-cover-html lint lint-fix lint-fast ci-check ci-check-strict ci-check-quick release-rehearse amanpm-check-constants amanpm-validate amanpm-db-sync amanpm-db-rebuild amanpm-index-generate amanpm-comply amanpm-comply-guard amanpm-verify-release-claims clean verify-checkpoint verify-docs verify-ssot verify-all install install-user install-local install-local-and-verify install-local-logs install-local-all uninstall uninstall-local install-mlx start-mlx install-ollama start-ollama stop-ollama switch-backend-mlx switch-backend-ollama verify-install validate validate-tier1 validate-tier2 validate-all eval-search-quick eval-search-graph eval-search-baseline
+.PHONY: amanpm-capture-learning amanpm-add-changelog amanpm-create-item amanpm-move-item amanpm-create-adr amanpm-preflight-release
 
 # ============================================================================
 # Help
@@ -48,6 +49,7 @@ help:
 	@echo "  make build-logs         - Build the log viewer binary to bin/"
 	@echo "  make build-all          - Build all binaries"
 	@echo "  make install-local      - Install amanmcp to ~/.local/bin (RECOMMENDED)"
+	@echo "  make install-local-and-verify - Rebuild, install, and verify VERSION parity"
 	@echo "  make install-local-all  - Install all binaries to ~/.local/bin"
 	@echo "  make clean              - Remove build artifacts"
 	@echo ""
@@ -83,7 +85,9 @@ help:
 	@echo "Quality Commands:"
 	@echo "  make lint               - Run golangci-lint"
 	@echo "  make ci-check           - Run FULL CI validation locally"
+	@echo "  make ci-check-strict    - Run CI plus blocking installed-binary parity"
 	@echo "  make ci-check-quick     - Run quick CI validation"
+	@echo "  make release-rehearse   - Exercise release path against rehearsal remotes"
 	@echo "  make amanpm-check-constants - Check PM scripts for stale local constants"
 	@echo "  make amanpm-validate    - Validate AmanPM file SSOT"
 	@echo "  make amanpm-db-sync     - Rebuild disposable AmanPM SQLite read model"
@@ -91,6 +95,12 @@ help:
 	@echo "  make amanpm-index-generate - Regenerate AmanPM backlog indexes"
 	@echo "  make amanpm-comply      - Run advisory AmanPM compliance"
 	@echo "  make amanpm-comply-guard - Run blocking AmanPM compliance"
+	@echo "  make amanpm-capture-learning ARGS='...' - Append a learning entry"
+	@echo "  make amanpm-add-changelog ARGS='...' - Append an unreleased changelog fragment"
+	@echo "  make amanpm-create-item ARGS='...' - Create an AmanPM backlog item"
+	@echo "  make amanpm-move-item ARGS='...' - Move an AmanPM backlog item"
+	@echo "  make amanpm-create-adr ARGS='...' - Create an ADR skeleton"
+	@echo "  make amanpm-preflight-release ARGS='...' - Check release readiness without release actions"
 	@echo ""
 	@echo "Quick Start (Apple Silicon):"
 	@echo "  1. make install-local   - Install amanmcp"
@@ -222,11 +232,21 @@ ci-check:
 	@echo ""
 	@./scripts/ci-parity-check.sh --full
 
+ci-check-strict:
+	@echo "Running STRICT CI parity check..."
+	@echo "This runs full CI and blocks on installed-binary VERSION parity."
+	@echo ""
+	@./scripts/ci-parity-check.sh --full
+	@./scripts/install-local-and-verify.sh --mode strict
+
 ci-check-quick:
 	@echo "Running QUICK CI parity check..."
 	@echo "This runs critical checks only (tests + lint)."
 	@echo ""
 	@./scripts/ci-parity-check.sh --quick
+
+release-rehearse:
+	@./scripts/release-rehearse.sh
 
 amanpm-check-constants:
 	@python3 .aman-pm/scripts/check_pm_constants.py
@@ -249,6 +269,24 @@ amanpm-comply:
 
 amanpm-comply-guard:
 	@python3 .aman-pm/scripts/comply.py --pm-dir .aman-pm --mode guard --db .amanmcp/amanpm-read-model.sqlite
+
+amanpm-capture-learning:
+	@python3 .aman-pm/scripts/amanpm/pm-capture-learning.py $(ARGS)
+
+amanpm-add-changelog:
+	@python3 .aman-pm/scripts/amanpm/pm-add-changelog.py $(ARGS)
+
+amanpm-create-item:
+	@python3 .aman-pm/scripts/amanpm/pm-create-item.py $(ARGS)
+
+amanpm-move-item:
+	@python3 .aman-pm/scripts/amanpm/pm-move-item.py $(ARGS)
+
+amanpm-create-adr:
+	@python3 .aman-pm/scripts/amanpm/pm-create-adr.py $(ARGS)
+
+amanpm-preflight-release:
+	@python3 .aman-pm/scripts/amanpm/pm-preflight-release.py $(ARGS)
 
 # Fast commit check (no tests, lint-fast only) - used by pre-commit hook
 ci-check-commit:
@@ -364,6 +402,9 @@ install-local: build
 		echo "Add to your shell config:"; \
 		echo "  export PATH=\"\$$HOME/.local/bin:\$$PATH\""; \
 	fi
+
+install-local-and-verify:
+	@./scripts/install-local-and-verify.sh --mode strict
 
 # Install log viewer to ~/.local/bin
 install-local-logs: build-logs

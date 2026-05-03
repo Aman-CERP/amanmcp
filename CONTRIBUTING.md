@@ -72,6 +72,7 @@ make lint
 | `make build` | Compile binary to bin/ |
 | `make build-all` | Build all binaries |
 | `make install-local` | Install to ~/.local/bin (recommended) |
+| `make install-local-and-verify` | Rebuild, install, and verify VERSION parity |
 | `make install` | Install to /usr/local/bin |
 | `make install-mlx` | Set up MLX server (Apple Silicon) |
 | `make start-mlx` | Start MLX embedding server |
@@ -100,6 +101,7 @@ make lint
 | Command | Description |
 |---------|-------------|
 | `make ci-check` | Full CI validation (run before commits) |
+| `make ci-check-strict` | Full CI plus blocking installed-binary parity |
 | `make ci-check-quick` | Fast validation during development |
 
 #### Verification
@@ -109,6 +111,7 @@ make lint
 | `make verify-all` | Run all verification checks |
 | `make check-versions` | Check version consistency |
 | `make verify-docs` | Check documentation drift |
+| `make release-rehearse` | Rehearse release against explicit non-canonical remotes |
 
 #### Benchmarks
 

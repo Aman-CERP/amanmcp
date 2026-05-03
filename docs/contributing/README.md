@@ -14,6 +14,7 @@ Welcome! We're excited that you want to contribute. This section contains detail
 | [Code Conventions](code-conventions.md) | Go patterns, naming, structure | You're writing Go code for AmanMCP |
 | [TDD Rationale](tdd-rationale.md) | Why test-first, the TDD cycle | You want to understand our testing philosophy |
 | [Testing Guide](testing-guide.md) | How to run tests, validation framework | You're adding features or fixing bugs |
+| [Release Process](release-process.md) | Release rehearsal and install gates | You're preparing release or shipped CLI changes |
 
 ---
 
@@ -173,6 +174,12 @@ make ci-check
 
 # Install locally
 make install-local
+
+# Install and verify shipped binary parity
+make install-local-and-verify
+
+# Rehearse release against explicit test remotes
+make release-rehearse
 ```
 
 ---
