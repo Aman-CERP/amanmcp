@@ -111,7 +111,7 @@ download_release() {
     local url="https://github.com/${GITHUB_REPO}/releases/download/${version}/${tarball}"
 
     info "Downloading $tarball..."
-    if ! curl -fsSL "$url" -o "$tmp_dir/amanmcp.tar.gz"; then
+    if ! curl -fsSL "$url" -o "$tmp_dir/$tarball"; then
         error "Failed to download release. URL: $url"
     fi
 
@@ -128,7 +128,7 @@ download_release() {
     fi
 
     info "Extracting..."
-    if ! tar -xzf "$tmp_dir/amanmcp.tar.gz" -C "$tmp_dir"; then
+    if ! tar -xzf "$tmp_dir/$tarball" -C "$tmp_dir"; then
         error "Failed to extract archive"
     fi
 
