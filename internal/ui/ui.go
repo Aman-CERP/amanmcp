@@ -18,6 +18,8 @@ const (
 	StageScanning Stage = iota
 	// StageChunking is the code chunking stage.
 	StageChunking
+	// StageGraph is the AmanGraph overlay build stage.
+	StageGraph
 	// StageContextual is the CR-1 contextual enrichment stage.
 	StageContextual
 	// StageEmbedding is the embedding generation stage.
@@ -35,6 +37,8 @@ func (s Stage) String() string {
 		return "Scanning"
 	case StageChunking:
 		return "Chunking"
+	case StageGraph:
+		return "Graph"
 	case StageContextual:
 		return "Contextual"
 	case StageEmbedding:
@@ -55,6 +59,8 @@ func (s Stage) Icon() string {
 		return "SCAN"
 	case StageChunking:
 		return "CHUNK"
+	case StageGraph:
+		return "GRAPH"
 	case StageContextual:
 		return "CTX"
 	case StageEmbedding:
@@ -88,6 +94,7 @@ type ErrorEvent struct {
 type StageTimings struct {
 	Scan    time.Duration // File scanning
 	Chunk   time.Duration // Code chunking
+	Graph   time.Duration // AmanGraph overlay build
 	Context time.Duration // CR-1 contextual enrichment
 	Embed   time.Duration // Embedding generation
 	Index   time.Duration // BM25 + vector index building

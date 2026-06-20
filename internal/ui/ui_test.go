@@ -16,6 +16,7 @@ func TestStage_String(t *testing.T) {
 	}{
 		{StageScanning, "Scanning"},
 		{StageChunking, "Chunking"},
+		{StageGraph, "Graph"},
 		{StageEmbedding, "Embedding"},
 		{StageIndexing, "Indexing"},
 		{StageComplete, "Complete"},
@@ -35,6 +36,7 @@ func TestStage_Icon(t *testing.T) {
 	}{
 		{StageScanning, "SCAN"},
 		{StageChunking, "CHUNK"},
+		{StageGraph, "GRAPH"},
 		{StageEmbedding, "EMBED"},
 		{StageIndexing, "INDEX"},
 		{StageComplete, "DONE"},
@@ -218,4 +220,3 @@ func TestDetectCI_WithoutEnv(t *testing.T) {
 	// Then: returns false
 	assert.False(t, result)
 }
-

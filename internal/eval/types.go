@@ -17,21 +17,22 @@ type Corpus struct {
 }
 
 type Query struct {
-	ID              string           `json:"id" yaml:"id"`
-	Name            string           `json:"name" yaml:"name"`
-	Query           string           `json:"query" yaml:"query"`
-	Tool            string           `json:"tool" yaml:"tool"`
-	Profile         string           `json:"profile,omitempty" yaml:"profile,omitempty"`
-	Scope           []string         `json:"scope,omitempty" yaml:"scope,omitempty"`
-	Mode            string           `json:"mode,omitempty" yaml:"mode,omitempty"`
-	Tier            string           `json:"tier,omitempty" yaml:"tier,omitempty"`
-	Class           string           `json:"class" yaml:"class"`
-	Job             string           `json:"job" yaml:"job"`
-	Expected        []string         `json:"expected,omitempty" yaml:"expected,omitempty"`
-	ExpectedResults []ExpectedResult `json:"expected_results" yaml:"expected_results"`
-	Holdout         bool             `json:"holdout" yaml:"holdout"`
-	Source          string           `json:"source" yaml:"source"`
-	Notes           string           `json:"notes,omitempty" yaml:"notes,omitempty"`
+	ID              string            `json:"id" yaml:"id"`
+	Name            string            `json:"name" yaml:"name"`
+	Query           string            `json:"query" yaml:"query"`
+	Tool            string            `json:"tool" yaml:"tool"`
+	Profile         string            `json:"profile,omitempty" yaml:"profile,omitempty"`
+	Scope           []string          `json:"scope,omitempty" yaml:"scope,omitempty"`
+	Mode            string            `json:"mode,omitempty" yaml:"mode,omitempty"`
+	Tier            string            `json:"tier,omitempty" yaml:"tier,omitempty"`
+	Class           string            `json:"class" yaml:"class"`
+	Job             string            `json:"job" yaml:"job"`
+	Expected        []string          `json:"expected,omitempty" yaml:"expected,omitempty"`
+	ExpectedResults []ExpectedResult  `json:"expected_results" yaml:"expected_results"`
+	Metadata        map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	Holdout         bool              `json:"holdout" yaml:"holdout"`
+	Source          string            `json:"source" yaml:"source"`
+	Notes           string            `json:"notes,omitempty" yaml:"notes,omitempty"`
 }
 
 type ExpectedResult struct {
@@ -39,15 +40,22 @@ type ExpectedResult struct {
 	Symbol    string `json:"symbol,omitempty" yaml:"symbol,omitempty"`
 	StartLine int    `json:"start_line,omitempty" yaml:"start_line,omitempty"`
 	EndLine   int    `json:"end_line,omitempty" yaml:"end_line,omitempty"`
+	Page      int    `json:"page,omitempty" yaml:"page,omitempty"`
+	PageStart int    `json:"page_start,omitempty" yaml:"page_start,omitempty"`
+	PageEnd   int    `json:"page_end,omitempty" yaml:"page_end,omitempty"`
 	Grade     int    `json:"grade" yaml:"grade"`
 	Rationale string `json:"rationale,omitempty" yaml:"rationale,omitempty"`
 }
 
 type SearchResult struct {
-	Path     string `json:"path"`
-	Symbol   string `json:"symbol,omitempty"`
-	Text     string `json:"text,omitempty"`
-	ResultID string `json:"result_id,omitempty"`
+	Path        string `json:"path"`
+	Symbol      string `json:"symbol,omitempty"`
+	Text        string `json:"text,omitempty"`
+	ResultID    string `json:"result_id,omitempty"`
+	ContentType string `json:"content_type,omitempty"`
+	PageNumber  string `json:"page_number,omitempty"`
+	PageStart   string `json:"page_start,omitempty"`
+	PageEnd     string `json:"page_end,omitempty"`
 }
 
 type SearchResponse struct {
@@ -56,22 +64,26 @@ type SearchResponse struct {
 }
 
 type QueryResult struct {
-	ID              string           `json:"id"`
-	Name            string           `json:"name"`
-	Query           string           `json:"query"`
-	Tool            string           `json:"tool"`
-	Class           string           `json:"class"`
-	Job             string           `json:"job"`
-	Holdout         bool             `json:"holdout"`
-	ExpectedResults []ExpectedResult `json:"expected_results"`
-	TopResults      []SearchResult   `json:"top_results"`
-	MatchedGrade    int              `json:"matched_grade"`
-	FirstUsefulRank int              `json:"first_useful_rank"`
-	LatencyMs       int64            `json:"latency_ms"`
-	TokenEstimate   TokenEstimate    `json:"token_estimate"`
-	Passed          bool             `json:"passed"`
-	FailureReason   string           `json:"failure_reason,omitempty"`
-	Error           string           `json:"error,omitempty"`
+	ID              string            `json:"id"`
+	Name            string            `json:"name"`
+	Query           string            `json:"query"`
+	Tool            string            `json:"tool"`
+	Class           string            `json:"class"`
+	Job             string            `json:"job"`
+	Profile         string            `json:"profile"`
+	SourceClass     string            `json:"source_class"`
+	Language        string            `json:"language"`
+	Metadata        map[string]string `json:"metadata,omitempty"`
+	Holdout         bool              `json:"holdout"`
+	ExpectedResults []ExpectedResult  `json:"expected_results"`
+	TopResults      []SearchResult    `json:"top_results"`
+	MatchedGrade    int               `json:"matched_grade"`
+	FirstUsefulRank int               `json:"first_useful_rank"`
+	LatencyMs       int64             `json:"latency_ms"`
+	TokenEstimate   TokenEstimate     `json:"token_estimate"`
+	Passed          bool              `json:"passed"`
+	FailureReason   string            `json:"failure_reason,omitempty"`
+	Error           string            `json:"error,omitempty"`
 }
 
 type TokenEstimate struct {
@@ -118,14 +130,20 @@ type RunMetadata struct {
 }
 
 type Tolerances struct {
-	MinPassRateDelta              float64 `json:"min_pass_rate_delta"`
-	MinRecallAt10Delta            float64 `json:"min_recall_at_10_delta"`
-	MaxP95LatencyMsDelta          int64   `json:"max_p95_latency_ms_delta"`
-	MaxTokenMeanIncreaseRatio     float64 `json:"max_token_mean_increase_ratio"`
-	MaxTokenP95IncreaseRatio      float64 `json:"max_token_p95_increase_ratio"`
-	MaxTokenClassIncreaseRatio    float64 `json:"max_token_class_increase_ratio"`
-	MaxTokenClassP95IncreaseRatio float64 `json:"max_token_class_p95_increase_ratio"`
-	MaxTokenQueryIncreaseRatio    float64 `json:"max_token_query_increase_ratio"`
+	MinPassRateDelta              float64                       `json:"min_pass_rate_delta"`
+	MinRecallAt10Delta            float64                       `json:"min_recall_at_10_delta"`
+	MaxP95LatencyMsDelta          int64                         `json:"max_p95_latency_ms_delta"`
+	MaxTokenMeanIncreaseRatio     float64                       `json:"max_token_mean_increase_ratio"`
+	MaxTokenP95IncreaseRatio      float64                       `json:"max_token_p95_increase_ratio"`
+	MaxTokenClassIncreaseRatio    float64                       `json:"max_token_class_increase_ratio"`
+	MaxTokenClassP95IncreaseRatio float64                       `json:"max_token_class_p95_increase_ratio"`
+	MaxTokenQueryIncreaseRatio    float64                       `json:"max_token_query_increase_ratio"`
+	DimensionRegression           map[string]DimensionTolerance `json:"dimension_regression,omitempty"`
+}
+
+type DimensionTolerance struct {
+	MinPassRateDelta   float64 `json:"min_pass_rate_delta"`
+	MinRecallAt10Delta float64 `json:"min_recall_at_10_delta"`
 }
 
 type Summary struct {
@@ -143,6 +161,7 @@ type Summary struct {
 }
 
 type Metrics struct {
+	PassRate                    float64 `json:"pass_rate"`
 	RecallAt5                   float64 `json:"recall_at_5"`
 	RecallAt10                  float64 `json:"recall_at_10"`
 	MRRAt10                     float64 `json:"mrr_at_10"`
@@ -151,6 +170,8 @@ type Metrics struct {
 	TestPollutionRate           float64 `json:"test_pollution_rate"`
 	ExactLookupPassRate         float64 `json:"exact_lookup_pass_rate"`
 	NegativeAdversarialPassRate float64 `json:"negative_adversarial_pass_rate"`
+	PDFPassRate                 float64 `json:"pdf_pass_rate"`
+	PDFRecallAt10               float64 `json:"pdf_recall_at_10"`
 }
 
 type BaselineComparison struct {
@@ -167,6 +188,17 @@ type BaselineComparison struct {
 	TokensPerResultMeanDelta float64  `json:"tokens_per_result_mean_delta"`
 	TokensPerResultP95Delta  float64  `json:"tokens_per_result_p95_delta"`
 	RegressionReasons        []string `json:"regression_reasons,omitempty"`
+}
+
+type DimensionRegression struct {
+	Dimension     string  `json:"dimension"`
+	Group         string  `json:"group"`
+	Metric        string  `json:"metric"`
+	BaselineValue float64 `json:"baseline_value"`
+	CurrentValue  float64 `json:"current_value"`
+	Delta         float64 `json:"delta"`
+	Tolerance     float64 `json:"tolerance"`
+	Regressed     bool    `json:"regressed"`
 }
 
 type ClassGroups struct {
@@ -257,15 +289,19 @@ type OutputPaths struct {
 }
 
 type Report struct {
-	Run                RunMetadata        `json:"run"`
-	Summary            Summary            `json:"summary"`
-	Metrics            Metrics            `json:"metrics"`
-	ClassGroups        ClassGroups        `json:"class_groups"`
-	ByClass            map[string]Metrics `json:"by_class"`
-	ByJob              map[string]Metrics `json:"by_job"`
-	Queries            []QueryResult      `json:"queries"`
-	GraphEvalGate      GraphEvalGate      `json:"graph_eval_gate"`
-	ExactLookupGate    ExactLookupGate    `json:"exact_lookup_gate"`
-	BaselineComparison BaselineComparison `json:"baseline_comparison"`
-	OutputPaths        OutputPaths        `json:"output_paths,omitempty"`
+	Run                  RunMetadata           `json:"run"`
+	Summary              Summary               `json:"summary"`
+	Metrics              Metrics               `json:"metrics"`
+	ClassGroups          ClassGroups           `json:"class_groups"`
+	ByClass              map[string]Metrics    `json:"by_class"`
+	ByJob                map[string]Metrics    `json:"by_job"`
+	ByProfile            map[string]Metrics    `json:"by_profile"`
+	BySourceClass        map[string]Metrics    `json:"by_source_class"`
+	ByLanguage           map[string]Metrics    `json:"by_language"`
+	DimensionRegressions []DimensionRegression `json:"dimension_regressions,omitempty"`
+	Queries              []QueryResult         `json:"queries"`
+	GraphEvalGate        GraphEvalGate         `json:"graph_eval_gate"`
+	ExactLookupGate      ExactLookupGate       `json:"exact_lookup_gate"`
+	BaselineComparison   BaselineComparison    `json:"baseline_comparison"`
+	OutputPaths          OutputPaths           `json:"output_paths,omitempty"`
 }

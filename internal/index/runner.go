@@ -16,6 +16,7 @@ import (
 	"github.com/Aman-CERP/amanmcp/internal/chunk"
 	"github.com/Aman-CERP/amanmcp/internal/config"
 	"github.com/Aman-CERP/amanmcp/internal/embed"
+	"github.com/Aman-CERP/amanmcp/internal/graph"
 	"github.com/Aman-CERP/amanmcp/internal/language"
 	"github.com/Aman-CERP/amanmcp/internal/scanner"
 	"github.com/Aman-CERP/amanmcp/internal/secrets"
@@ -65,6 +66,8 @@ type RunnerResult struct {
 	Resumed bool
 }
 
+const pdfUnindexableWarning = "PDF content unindexable: OCR, scanned, encrypted, or malformed PDFs are not supported"
+
 // RunnerDependencies contains the injected dependencies for Runner.
 type RunnerDependencies struct {
 	// Renderer for progress display (required).
@@ -91,8 +94,14 @@ type RunnerDependencies struct {
 	// MarkdownChunker for chunking markdown files.
 	MarkdownChunker chunk.Chunker
 
+	// PDFChunker for chunking PDF document files.
+	PDFChunker chunk.Chunker
+
 	// SecretScanner gates content before chunking, embedding, BM25, and vector indexing.
 	SecretScanner *secrets.Scanner
+
+	// GraphRepository stores the optional AmanGraph overlay built during indexing.
+	GraphRepository graph.Repository
 }
 
 // Runner executes indexing operations with progress reporting.
@@ -106,8 +115,10 @@ type Runner struct {
 	embedder         embed.Embedder
 	codeChunker      chunk.Chunker
 	markdownChunker  chunk.Chunker
+	pdfChunker       chunk.Chunker
 	languageRegistry *language.Registry
 	secretScanner    *secrets.Scanner
+	graphRepository  graph.Repository
 }
 
 // NewRunner creates a Runner with injected dependencies.
@@ -146,6 +157,11 @@ func NewRunner(deps RunnerDependencies) (*Runner, error) {
 		markdownChunker = chunk.NewMarkdownChunker()
 	}
 
+	pdfChunker := deps.PDFChunker
+	if pdfChunker == nil {
+		pdfChunker = chunk.NewPDFChunker()
+	}
+
 	secretScanner := deps.SecretScanner
 	if secretScanner == nil {
 		secretScanner = secrets.NewScanner(secrets.DefaultPolicy())
@@ -164,8 +180,10 @@ func NewRunner(deps RunnerDependencies) (*Runner, error) {
 		embedder:         deps.Embedder,
 		codeChunker:      codeChunker,
 		markdownChunker:  markdownChunker,
+		pdfChunker:       pdfChunker,
 		languageRegistry: languageRegistry,
 		secretScanner:    secretScanner,
+		graphRepository:  deps.GraphRepository,
 	}, nil
 }
 
@@ -183,6 +201,9 @@ func (r *Runner) Close() error {
 	if c, ok := r.markdownChunker.(Closer); ok {
 		c.Close()
 	}
+	if c, ok := r.pdfChunker.(Closer); ok {
+		c.Close()
+	}
 	return nil
 }
 
@@ -190,6 +211,7 @@ func (r *Runner) Close() error {
 type stageTiming struct {
 	scan    time.Duration
 	chunk   time.Duration
+	graph   time.Duration
 	context time.Duration
 	embed   time.Duration
 	index   time.Duration
@@ -246,7 +268,7 @@ func (r *Runner) Run(ctx context.Context, cfg RunnerConfig) (*RunnerResult, erro
 
 	// Stage 2: Chunk files
 	chunkStart := time.Now()
-	allChunks, storeFiles, chunkWarns := r.chunkFiles(ctx, files, projectID, now)
+	allChunks, storeFiles, graphSources, chunkWarns := r.chunkFiles(ctx, files, projectID, now)
 	timing.chunk = time.Since(chunkStart)
 	warnCount += chunkWarns
 
@@ -308,6 +330,13 @@ func (r *Runner) Run(ctx context.Context, cfg RunnerConfig) (*RunnerResult, erro
 		return nil, fmt.Errorf("failed to update project stats: %w", err)
 	}
 
+	// Stage 6: Build graph after search metadata and search artifacts are committed.
+	if r.graphRepository != nil {
+		graphStart := time.Now()
+		warnCount += r.buildGraph(ctx, projectID, graphSources)
+		timing.graph = time.Since(graphStart)
+	}
+
 	// Clear checkpoint on successful completion
 	if err := r.metadata.ClearIndexCheckpoint(ctx); err != nil {
 		slog.Warn("failed to clear checkpoint", slog.String("error", err.Error()))
@@ -348,6 +377,7 @@ func (r *Runner) Run(ctx context.Context, cfg RunnerConfig) (*RunnerResult, erro
 		Stages: ui.StageTimings{
 			Scan:    timing.scan,
 			Chunk:   timing.chunk,
+			Graph:   timing.graph,
 			Context: timing.context,
 			Embed:   timing.embed,
 			Index:   timing.index,
@@ -372,6 +402,7 @@ func (r *Runner) Run(ctx context.Context, cfg RunnerConfig) (*RunnerResult, erro
 		slog.Int64("duration_total_ms", duration.Milliseconds()),
 		slog.Int64("duration_scan_ms", timing.scan.Milliseconds()),
 		slog.Int64("duration_chunk_ms", timing.chunk.Milliseconds()),
+		slog.Int64("duration_graph_ms", timing.graph.Milliseconds()),
 		slog.Int64("duration_context_ms", timing.context.Milliseconds()),
 		slog.Int64("duration_embed_ms", timing.embed.Milliseconds()),
 		slog.Int64("duration_index_ms", timing.index.Milliseconds()),
@@ -441,9 +472,10 @@ func (r *Runner) getWarningCount(files []*scanner.FileInfo) int {
 }
 
 // chunkFiles processes files and creates chunks.
-func (r *Runner) chunkFiles(ctx context.Context, files []*scanner.FileInfo, projectID string, now time.Time) ([]*chunk.Chunk, []*store.File, int) {
+func (r *Runner) chunkFiles(ctx context.Context, files []*scanner.FileInfo, projectID string, now time.Time) ([]*chunk.Chunk, []*store.File, []graph.SourceFile, int) {
 	var allChunks []*chunk.Chunk
 	var storeFiles []*store.File
+	var graphSources []graph.SourceFile
 	var warnCount int
 	totalFiles := len(files)
 
@@ -472,16 +504,19 @@ func (r *Runner) chunkFiles(ctx context.Context, files []*scanner.FileInfo, proj
 			continue
 		}
 
-		secretResult := r.secretScanner.GuardContent(secrets.ContentInput{
-			Path:    file.Path,
-			Content: content,
-			Source:  secrets.SourceIndex,
-		})
-		warnCount += r.reportSecretWarnings(secretResult.Warnings)
-		if secretResult.Blocked {
-			continue
+		var secretResult secrets.Result
+		if file.ContentType != scanner.ContentTypePDF {
+			secretResult = r.secretScanner.GuardContent(secrets.ContentInput{
+				Path:    file.Path,
+				Content: content,
+				Source:  secrets.SourceIndex,
+			})
+			warnCount += r.reportSecretWarnings(secretResult.Warnings)
+			if secretResult.Blocked {
+				continue
+			}
+			content = secretResult.Content
 		}
-		content = secretResult.Content
 
 		// Create store file record
 		storeFile := &store.File{
@@ -510,6 +545,13 @@ func (r *Runner) chunkFiles(ctx context.Context, files []*scanner.FileInfo, proj
 			chunks, err = r.codeChunker.Chunk(ctx, input)
 		case scanner.ContentTypeMarkdown:
 			chunks, err = r.markdownChunker.Chunk(ctx, input)
+		case scanner.ContentTypePDF:
+			chunks, err = r.pdfChunker.Chunk(ctx, input)
+		case scanner.ContentTypeConfig:
+			if source, ok := graphSourceFromChunkedFile(file, content, nil); ok {
+				graphSources = append(graphSources, source)
+			}
+			continue
 		default:
 			continue
 		}
@@ -524,12 +566,37 @@ func (r *Runner) chunkFiles(ctx context.Context, files []*scanner.FileInfo, proj
 			continue
 		}
 
-		annotateSecretScan(chunks, secretResult)
+		if len(chunks) == 0 && file.ContentType == scanner.ContentTypePDF {
+			r.renderer.AddError(ui.ErrorEvent{
+				File:   file.Path,
+				Err:    fmt.Errorf("%s", pdfUnindexableWarning),
+				IsWarn: true,
+			})
+			slog.Warn("pdf_content_unindexable",
+				slog.String("file", file.Path),
+				slog.String("reason", "ocr_scanned_encrypted_or_malformed_not_supported"))
+			warnCount++
+			continue
+		}
+
+		if file.ContentType == scanner.ContentTypePDF {
+			var secretWarnings []secrets.Warning
+			chunks, secretWarnings = guardExtractedPDFChunks(chunks, r.secretScanner, file.Path)
+			warnCount += r.reportSecretWarnings(secretWarnings)
+			if len(chunks) == 0 {
+				continue
+			}
+		} else {
+			annotateSecretScan(chunks, secretResult)
+		}
 		allChunks = append(allChunks, chunks...)
+		if source, ok := graphSourceFromChunkedFile(file, content, chunks); ok {
+			graphSources = append(graphSources, source)
+		}
 	}
 
 	slog.Info("index_chunking_complete", slog.Int("chunks", len(allChunks)), slog.Int("files", len(storeFiles)))
-	return allChunks, storeFiles, warnCount
+	return allChunks, storeFiles, graphSources, warnCount
 }
 
 func (r *Runner) reportSecretWarnings(warnings []secrets.Warning) int {
@@ -539,6 +606,67 @@ func (r *Runner) reportSecretWarnings(warnings []secrets.Warning) int {
 			Err:    warning,
 			IsWarn: true,
 		})
+	}
+	logSecretWarnings(warnings)
+	return len(warnings)
+}
+
+func (r *Runner) buildGraph(ctx context.Context, projectID string, sources []graph.SourceFile) int {
+	if r.graphRepository == nil {
+		return 0
+	}
+
+	started := time.Now().UTC()
+	r.renderer.UpdateProgress(ui.ProgressEvent{
+		Stage:   ui.StageGraph,
+		Total:   len(sources),
+		Message: "Building AmanGraph overlay...",
+	})
+	slog.Info("graph_build_started",
+		slog.String("project_id", projectID),
+		slog.Int("files", len(sources)))
+
+	if err := r.graphRepository.Reset(ctx); err != nil {
+		return r.recordGraphBuildWarning(ctx, projectID, started, fmt.Errorf("reset graph overlay: %w", err))
+	}
+	if err := graph.IndexCheapEdges(ctx, r.graphRepository, projectID, sources, graph.CheapExtractorOptions{}); err != nil {
+		return r.recordGraphBuildWarning(ctx, projectID, started, err)
+	}
+
+	r.renderer.UpdateProgress(ui.ProgressEvent{
+		Stage:   ui.StageGraph,
+		Current: len(sources),
+		Total:   len(sources),
+		Message: "AmanGraph overlay built",
+	})
+	slog.Info("graph_build_complete",
+		slog.String("project_id", projectID),
+		slog.Int("files", len(sources)))
+	return 0
+}
+
+func (r *Runner) recordGraphBuildWarning(ctx context.Context, projectID string, started time.Time, err error) int {
+	message := fmt.Sprintf("graph build failed: %v", err)
+	if recordErr := r.graphRepository.RecordBuild(ctx, graph.BuildMetadata{
+		ProjectID:   projectID,
+		Kind:        graph.BuildKindFull,
+		Status:      graph.GraphStatusPartial,
+		StartedAt:   started,
+		CompletedAt: time.Now().UTC(),
+		Message:     message,
+	}); recordErr != nil {
+		message = fmt.Sprintf("%s; failed to record partial graph state: %v", message, recordErr)
+	}
+	warn := fmt.Errorf("%s", message)
+	r.renderer.AddError(ui.ErrorEvent{Err: warn, IsWarn: true})
+	slog.Warn("graph_build_failed",
+		slog.String("project_id", projectID),
+		slog.String("error", err.Error()))
+	return 1
+}
+
+func logSecretWarnings(warnings []secrets.Warning) {
+	for _, warning := range warnings {
 		slog.Warn("pre_index_secret_detected",
 			slog.String("file", warning.FilePath),
 			slog.String("detector_id", warning.DetectorID),
@@ -546,7 +674,6 @@ func (r *Runner) reportSecretWarnings(warnings []secrets.Warning) int {
 			slog.String("action", string(warning.Action)),
 			slog.String("location", warning.Location.String()))
 	}
-	return len(warnings)
 }
 
 func annotateSecretScan(chunks []*chunk.Chunk, result secrets.Result) {
@@ -566,6 +693,69 @@ func annotateSecretScan(chunks []*chunk.Chunk, result secrets.Result) {
 		c.Metadata["secret_scan_detectors"] = strings.Join(detectors, ",")
 		c.Metadata["secret_scan_warning_count"] = fmt.Sprintf("%d", len(result.Warnings))
 	}
+}
+
+func guardExtractedPDFChunks(chunks []*chunk.Chunk, secretScanner *secrets.Scanner, path string) ([]*chunk.Chunk, []secrets.Warning) {
+	if len(chunks) == 0 || secretScanner == nil {
+		return chunks, nil
+	}
+
+	guarded := make([]*chunk.Chunk, 0, len(chunks))
+	var warnings []secrets.Warning
+	for _, c := range chunks {
+		if c == nil {
+			continue
+		}
+		result := secretScanner.GuardContent(secrets.ContentInput{
+			Path:    path,
+			Content: []byte(c.Content),
+			Source:  secrets.SourceIndex,
+		})
+		warnings = append(warnings, result.Warnings...)
+		if result.Blocked {
+			continue
+		}
+		if len(result.Warnings) > 0 {
+			c.Content = string(result.Content)
+			if c.RawContent != "" {
+				c.RawContent = c.Content
+			}
+			annotateSecretScan([]*chunk.Chunk{c}, result)
+			c.ID = regeneratedPDFChunkID(c)
+		}
+		guarded = append(guarded, c)
+	}
+	return guarded, warnings
+}
+
+func regeneratedPDFChunkID(c *chunk.Chunk) string {
+	if c == nil {
+		return ""
+	}
+	contentHash := hashString(c.Content)
+	disambiguator := pdfChunkDisambiguator(c.Metadata)
+	input := fmt.Sprintf("%s:%s", c.FilePath, contentHash)
+	if disambiguator != "" {
+		input = fmt.Sprintf("%s:%s:%s", c.FilePath, contentHash, disambiguator)
+	}
+	return hashString(input)
+}
+
+func pdfChunkDisambiguator(metadata map[string]string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	page := metadata["page_number"]
+	if page == "" {
+		page = metadata["page_start"]
+	}
+	if page == "" {
+		return ""
+	}
+	if part := metadata["split_part"]; part != "" {
+		return fmt.Sprintf("page%s_part%s", page, part)
+	}
+	return "page" + page
 }
 
 // enrichWithContext adds LLM-generated context to chunks (CR-1 Contextual Retrieval).
@@ -762,7 +952,7 @@ func (r *Runner) buildIndices(ctx context.Context, chunks []*chunk.Chunk, dataDi
 	for i, c := range chunks {
 		docs[i] = &store.Document{
 			ID:      c.ID,
-			Content: c.Content,
+			Content: store.BM25DocumentContent(c.FilePath, c.Content),
 		}
 	}
 	if err := r.bm25.Index(ctx, docs); err != nil {

@@ -613,6 +613,8 @@ func pathConfidenceLabel(path []adjacency) ConfidenceLabel {
 
 func confidenceRank(label ConfidenceLabel) int {
 	switch label {
+	case ConfidenceExact:
+		return 4
 	case ConfidenceHigh:
 		return 3
 	case ConfidenceMedium:
@@ -628,7 +630,7 @@ func outgoingRole(kind EdgeKind) GraphRole {
 	switch kind {
 	case EdgeKindFileDeclaresPackage:
 		return RoleDeclaresPackage
-	case EdgeKindPackageImports:
+	case EdgeKindPackageImports, EdgeKindFileImports:
 		return RoleImports
 	case EdgeKindFileDefinesSymbol:
 		return RoleDefines
@@ -638,7 +640,7 @@ func outgoingRole(kind EdgeKind) GraphRole {
 		return RoleDefinesConfigKey
 	case EdgeKindTestCoversImplementation:
 		return RoleTestCovers
-	case EdgeKindDocMentionsPath:
+	case EdgeKindDocMentionsPath, EdgeKindDocMentionsFile, EdgeKindDocMentionsSymbol, EdgeKindDocMentionsConfigKey:
 		return RoleMentionsPath
 	default:
 		return RoleRelated
@@ -649,7 +651,7 @@ func incomingRole(kind EdgeKind) GraphRole {
 	switch kind {
 	case EdgeKindFileDeclaresPackage:
 		return RoleDeclaredBy
-	case EdgeKindPackageImports:
+	case EdgeKindPackageImports, EdgeKindFileImports:
 		return RoleImportedBy
 	case EdgeKindFileDefinesSymbol:
 		return RoleDefinedBy
@@ -659,7 +661,7 @@ func incomingRole(kind EdgeKind) GraphRole {
 		return RoleConfigKeyDefinedBy
 	case EdgeKindTestCoversImplementation:
 		return RoleCoveredByTest
-	case EdgeKindDocMentionsPath:
+	case EdgeKindDocMentionsPath, EdgeKindDocMentionsFile, EdgeKindDocMentionsSymbol, EdgeKindDocMentionsConfigKey:
 		return RoleMentionedByDoc
 	default:
 		return RoleRelated

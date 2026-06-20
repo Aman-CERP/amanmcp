@@ -90,6 +90,9 @@ func (r *PlainRenderer) Complete(stats CompletionStats) {
 		_, _ = fmt.Fprintln(r.out, "Stage Breakdown:")
 		_, _ = fmt.Fprintf(r.out, "  Scan:    %s (files discovered)\n", stats.Stages.Scan.Round(100*millisecond))
 		_, _ = fmt.Fprintf(r.out, "  Chunk:   %s (code parsed)\n", stats.Stages.Chunk.Round(100*millisecond))
+		if stats.Stages.Graph > 0 {
+			_, _ = fmt.Fprintf(r.out, "  Graph:   %s (AmanGraph overlay)\n", stats.Stages.Graph.Round(100*millisecond))
+		}
 		if stats.Stages.Context > 0 {
 			_, _ = fmt.Fprintf(r.out, "  Context: %s (CR-1 enrichment)\n", stats.Stages.Context.Round(100*millisecond))
 		}

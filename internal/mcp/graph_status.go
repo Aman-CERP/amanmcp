@@ -52,9 +52,11 @@ func (s *Server) handleGraphStatusResource(ctx context.Context) (*mcp.ReadResour
 			Freshness: graph.Freshness{
 				State: graph.FreshnessUnknown,
 			},
-			Nodes:      graph.CountSummary{ByKind: map[string]int{}},
-			Edges:      graph.CountSummary{ByKind: map[string]int{}},
-			Confidence: map[string]int{},
+			Nodes:       graph.CountSummary{ByKind: map[string]int{}},
+			Edges:       graph.CountSummary{ByKind: map[string]int{}},
+			ActiveEdges: graph.CountSummary{ByKind: map[string]int{}},
+			StaleEdges:  graph.CountSummary{ByKind: map[string]int{}},
+			Confidence:  map[string]int{},
 			Warnings: []graph.StatusWarning{{
 				Code:    graph.WarningGraphUnavailable,
 				Message: "graph status provider is not configured",
@@ -64,7 +66,7 @@ func (s *Server) handleGraphStatusResource(ctx context.Context) (*mcp.ReadResour
 		var err error
 		snapshot, err = provider.Snapshot(ctx, graph.StatusOptions{
 			Now:        time.Now().UTC(),
-			StaleAfter: 24 * time.Hour,
+			StaleAfter: graph.DefaultStaleAfter,
 		})
 		if err != nil {
 			return nil, MapError(err)

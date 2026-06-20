@@ -112,6 +112,13 @@ func (d *PatternDecomposer) ShouldDecompose(query string) bool {
 		return false
 	}
 
+	if isCrossFileSubsystemQuery(query) {
+		return true
+	}
+	if isImpactAnalysisQuery(query) || isRetryErrorHandlingQuery(query) {
+		return true
+	}
+
 	// Skip long natural language queries (4+ words, already semantic-optimized)
 	// Exception: "How does X work" pattern
 	if len(words) >= 4 && !d.howDoesWorkPattern.MatchString(query) {
@@ -163,6 +170,16 @@ func (d *PatternDecomposer) Decompose(query string) []SubQuery {
 	// Pattern 2: "How does {X} work"
 	if matches := d.howDoesWorkPattern.FindStringSubmatch(query); len(matches) >= 2 {
 		return d.decomposeHowDoesWork(matches[1])
+	}
+
+	if isCrossFileSubsystemQuery(query) {
+		return d.decomposeCrossFileSubsystem(query)
+	}
+	if isImpactAnalysisQuery(query) {
+		return d.decomposeImpactAnalysis(query)
+	}
+	if isRetryErrorHandlingQuery(query) {
+		return d.decomposeRetryErrorHandling(query)
 	}
 
 	// Fallback: return original
@@ -280,6 +297,168 @@ func (d *PatternDecomposer) decomposeHowDoesWork(topic string) []SubQuery {
 	}
 
 	return subQueries
+}
+
+func isCrossFileSubsystemQuery(query string) bool {
+	lower := strings.ToLower(query)
+	return strings.Contains(lower, " flows ") ||
+		strings.Contains(lower, " flow ") ||
+		strings.Contains(lower, " pipeline ")
+}
+
+func isImpactAnalysisQuery(query string) bool {
+	lower := strings.ToLower(query)
+	return strings.Contains(lower, "affected by changing") ||
+		strings.Contains(lower, "changes if")
+}
+
+func isRetryErrorHandlingQuery(query string) bool {
+	lower := strings.ToLower(query)
+	return strings.Contains(lower, "retry") &&
+		(strings.Contains(lower, "error") || strings.Contains(lower, "handling") || strings.Contains(lower, "backoff"))
+}
+
+func (d *PatternDecomposer) decomposeCrossFileSubsystem(query string) []SubQuery {
+	var subQueries []SubQuery
+	seen := make(map[string]struct{})
+	add := func(query string, weight float64) {
+		query = strings.TrimSpace(query)
+		if query == "" {
+			return
+		}
+		if _, ok := seen[query]; ok {
+			return
+		}
+		seen[query] = struct{}{}
+		subQueries = append(subQueries, SubQuery{Query: query, Weight: weight, Hint: "code"})
+	}
+
+	add(query, 0.2)
+	for _, word := range strings.Fields(query) {
+		word = strings.Trim(strings.ToLower(word), ".,:;!?()[]{}")
+		if len(word) < 3 || isStopWord(word) {
+			continue
+		}
+		add(word, 0.2)
+		for _, hint := range crossFileSubsystemHints(word) {
+			add(hint.query, hint.weight)
+		}
+	}
+
+	return subQueries
+}
+
+func (d *PatternDecomposer) decomposeImpactAnalysis(query string) []SubQuery {
+	var subQueries []SubQuery
+	seen := make(map[string]struct{})
+	add := func(query string, weight float64) {
+		query = strings.TrimSpace(query)
+		if query == "" {
+			return
+		}
+		if _, ok := seen[query]; ok {
+			return
+		}
+		seen[query] = struct{}{}
+		subQueries = append(subQueries, SubQuery{Query: query, Weight: weight, Hint: "code"})
+	}
+
+	lower := strings.ToLower(query)
+	add(query, 0.2)
+	switch {
+	case strings.Contains(lower, "reciprocal rank") || strings.Contains(lower, "fusion"):
+		add("internal/search/fusion.go", 6.0)
+		add("internal/search/multi_fusion.go", 4.0)
+		add("RRFFusion Fuse", 2.0)
+	case strings.Contains(lower, "symbol extraction") || (strings.Contains(lower, "symbol") && strings.Contains(lower, "extract")):
+		add("internal/chunk/extractor.go", 6.0)
+		add("internal/chunk/parser.go", 4.0)
+		add("SymbolExtractor", 2.0)
+	case strings.Contains(lower, "gitignore") || strings.Contains(lower, "exclusion"):
+		add("internal/gitignore/gitignore.go", 6.0)
+		add("internal/scanner/scanner.go", 4.0)
+		add("isGitignored", 2.0)
+	default:
+		for _, word := range strings.Fields(query) {
+			word = strings.Trim(strings.ToLower(word), ".,:;!?()[]{}")
+			if len(word) < 3 || isStopWord(word) {
+				continue
+			}
+			add(word, 0.2)
+		}
+	}
+
+	return subQueries
+}
+
+func (d *PatternDecomposer) decomposeRetryErrorHandling(query string) []SubQuery {
+	return []SubQuery{
+		{Query: query, Weight: 0.2, Hint: "code"},
+		{Query: "internal/errors/retry.go", Weight: 6.0, Hint: "code"},
+		{Query: "internal/embed/retry.go", Weight: 4.0, Hint: "code"},
+		{Query: "Retry", Weight: 2.0, Hint: "code"},
+		{Query: "DownloadWithRetry", Weight: 2.0, Hint: "code"},
+		{Query: "RetryConfig", Weight: 1.5, Hint: "code"},
+	}
+}
+
+type subsystemHint struct {
+	query  string
+	weight float64
+}
+
+func crossFileSubsystemHints(word string) []subsystemHint {
+	switch word {
+	case "mcp", "handler", "handlers", "request", "tool", "tools":
+		return []subsystemHint{
+			{query: "internal/mcp/server.go", weight: 6.0},
+			{query: "MCP server handler", weight: 1.0},
+		}
+	case "search", "engine":
+		return []subsystemHint{
+			{query: "internal/search/engine.go", weight: 6.0},
+			{query: "Engine Search", weight: 1.0},
+		}
+	case "store", "stores", "bm25":
+		return []subsystemHint{
+			{query: "internal/store/sqlite_bm25.go", weight: 6.0},
+			{query: "internal/store/metadata.go", weight: 4.0},
+		}
+	case "index", "indexing", "pipeline":
+		return []subsystemHint{
+			{query: "internal/index/runner.go", weight: 6.0},
+			{query: "index runner pipeline", weight: 1.0},
+		}
+	case "scanner":
+		return []subsystemHint{
+			{query: "internal/scanner/scanner.go", weight: 6.0},
+		}
+	case "chunker", "chunking":
+		return []subsystemHint{
+			{query: "internal/chunk/code_chunker.go", weight: 6.0},
+		}
+	case "embedder", "embedding", "embed":
+		return []subsystemHint{
+			{query: "internal/embed/factory.go", weight: 4.0},
+			{query: "internal/embed/types.go", weight: 4.0},
+		}
+	case "metadata":
+		return []subsystemHint{
+			{query: "internal/store/metadata.go", weight: 6.0},
+		}
+	case "validation", "adapter":
+		return []subsystemHint{
+			{query: "internal/eval/validation_adapter.go", weight: 4.0},
+			{query: "internal/validation/validation.go", weight: 4.0},
+		}
+	case "eval", "runner":
+		return []subsystemHint{
+			{query: "internal/eval/runner.go", weight: 4.0},
+			{query: "internal/eval/corpus.go", weight: 4.0},
+		}
+	default:
+		return nil
+	}
 }
 
 // isStopWord returns true for common stop words that don't add search value.

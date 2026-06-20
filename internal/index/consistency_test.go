@@ -64,6 +64,9 @@ func (m *MockMetadataForConsistency) GetChunks(ctx context.Context, ids []string
 func (m *MockMetadataForConsistency) GetChunksByFile(ctx context.Context, fileID string) ([]*store.Chunk, error) {
 	return nil, nil
 }
+func (m *MockMetadataForConsistency) GetChunksByPath(ctx context.Context, path string, limit int) ([]*store.Chunk, error) {
+	return nil, nil
+}
 func (m *MockMetadataForConsistency) GetChunksBySymbol(ctx context.Context, name string, limit int) ([]*store.Chunk, error) {
 	return nil, nil
 }

@@ -466,7 +466,7 @@ func runInit(ctx context.Context, cmd *cobra.Command, global, force, offline, co
 		}
 
 		startTime := time.Now()
-		if err := runIndexWithResume(ctx, cmd, absRoot, offline, false, resume, force); err != nil {
+		if err := runIndexWithResume(ctx, cmd, absRoot, offline, false, resume, force, graphBuildOptions{}); err != nil {
 			return fmt.Errorf("indexing failed: %w", err)
 		}
 		duration := time.Since(startTime)

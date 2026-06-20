@@ -140,6 +140,10 @@ func shouldPreserveExactLexicalQuery(query string) bool {
 		return false
 	}
 
+	if declarationSymbolNeedle(query) != "" {
+		return true
+	}
+
 	if quotedPattern.MatchString(query) ||
 		filePathPattern.MatchString(query) ||
 		errorCodePattern.MatchString(query) {
@@ -155,6 +159,42 @@ func shouldPreserveExactLexicalQuery(query string) bool {
 		exportedIdentifierPattern.MatchString(query) ||
 		snakeCasePattern.MatchString(query) ||
 		screamingSnakePattern.MatchString(query)
+}
+
+func declarationSymbolNeedle(query string) string {
+	fields := strings.Fields(strings.TrimSpace(query))
+	if len(fields) != 3 {
+		return ""
+	}
+	if !strings.EqualFold(fields[0], "type") {
+		return ""
+	}
+	switch strings.ToLower(fields[2]) {
+	case "struct", "interface":
+	default:
+		return ""
+	}
+	if !isASCIIGoIdentifier(fields[1]) {
+		return ""
+	}
+	return fields[1]
+}
+
+func isASCIIGoIdentifier(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i, r := range value {
+		switch {
+		case r == '_':
+		case r >= 'A' && r <= 'Z':
+		case r >= 'a' && r <= 'z':
+		case i > 0 && r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // ExpandToTerms returns expanded terms as a slice (useful for multi-query search).

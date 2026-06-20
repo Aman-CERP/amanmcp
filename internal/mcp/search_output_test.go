@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -91,6 +92,116 @@ func TestSDKSearchHandlers_DefaultOutputIncludesCompactQuality(t *testing.T) {
 			assert.Nil(t, output.Results[0].Explain)
 		})
 	}
+}
+
+func TestToSearchResultOutput_ExposesPDFMetadataFlat(t *testing.T) {
+	output := ToSearchResultOutput(&search.SearchResult{
+		Chunk: &store.Chunk{
+			ID:          "pdf-1",
+			FilePath:    "docs/spec.pdf",
+			Content:     "PDF content",
+			ContentType: store.ContentTypePDF,
+			Language:    "pdf",
+			Metadata: map[string]string{
+				"content_type": "pdf",
+				"chunker":      "pdf",
+				"page_number":  "2",
+				"page_start":   "2",
+				"page_end":     "3",
+			},
+		},
+		Score: 0.8,
+	})
+
+	assert.Equal(t, "pdf", output.ContentType)
+	assert.Equal(t, "pdf", output.Chunker)
+	assert.Equal(t, "2", output.PageNumber)
+	assert.Equal(t, "2", output.PageStart)
+	assert.Equal(t, "3", output.PageEnd)
+}
+
+func TestToSearchResultOutput_ReportsLanguageSupportTierPerResult(t *testing.T) {
+	tests := []struct {
+		name  string
+		chunk *store.Chunk
+		want  string
+	}{
+		{
+			name: "tier 1 parser backed code",
+			chunk: &store.Chunk{
+				FilePath:    "internal/auth/handler.go",
+				Content:     "func AuthMiddleware() {}",
+				ContentType: store.ContentTypeCode,
+				Language:    "go",
+				Metadata:    map[string]string{"chunk_provenance": "ast"},
+			},
+			want: "tier_1_parser_backed",
+		},
+		{
+			name: "tier 2 detected line fallback code",
+			chunk: &store.Chunk{
+				FilePath:    "src/lib.rs",
+				Content:     "fn main() {}",
+				ContentType: store.ContentTypeText,
+				Language:    "rust",
+				Metadata:    map[string]string{"chunk_provenance": "line_fallback"},
+			},
+			want: "tier_2_line_fallback",
+		},
+		{
+			name: "tier 3 plain text fallback",
+			chunk: &store.Chunk{
+				FilePath:    "notes/unknown.txt",
+				Content:     "plain text",
+				ContentType: store.ContentTypeText,
+			},
+			want: "tier_3_plain_text",
+		},
+		{
+			name: "document formats are not parser backed code support",
+			chunk: &store.Chunk{
+				FilePath:    "docs/spec.pdf",
+				Content:     "PDF content",
+				ContentType: store.ContentTypePDF,
+				Language:    "pdf",
+				Metadata:    map[string]string{"content_type": "pdf", "chunker": "pdf"},
+			},
+			want: "tier_3_plain_text",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output := ToSearchResultOutput(&search.SearchResult{Chunk: tt.chunk})
+
+			assert.Equal(t, tt.want, output.LanguageSupportTier)
+		})
+	}
+}
+
+func TestBuildSearchOutput_DoesNotPutLanguageSupportTierOnSearchQuality(t *testing.T) {
+	output := buildSearchOutput(searchOutputBuildContext{}, []*search.SearchResult{
+		{
+			Chunk: &store.Chunk{
+				FilePath:    "internal/auth/handler.go",
+				Content:     "func AuthMiddleware() {}",
+				ContentType: store.ContentTypeCode,
+				Language:    "go",
+				Metadata:    map[string]string{"chunk_provenance": "ast"},
+			},
+		},
+	}, nil)
+
+	require.Len(t, output.Results, 1)
+	assert.Equal(t, "tier_1_parser_backed", output.Results[0].LanguageSupportTier)
+
+	encoded, err := json.Marshal(output.SearchQuality)
+	require.NoError(t, err)
+
+	var searchQualityFields map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &searchQualityFields))
+	assert.NotContains(t, searchQualityFields, "language_support_tier")
+	assert.NotContains(t, searchQualityFields, "language_support_tiers")
 }
 
 func TestSDKSearchHandler_ExplainIsOptIn(t *testing.T) {

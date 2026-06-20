@@ -126,6 +126,16 @@ func TestDetectContentType(t *testing.T) {
 	}
 }
 
+func TestScanner_IsBinaryFile_AllowsPDFsThroughTextExtractionPath(t *testing.T) {
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "fixture.pdf")
+	require.NoError(t, os.WriteFile(path, []byte("%PDF-1.7\x00binary-marker\n%%EOF"), 0o644))
+
+	scanner := &Scanner{}
+
+	assert.False(t, scanner.isBinaryFile(path), "PDFs may contain null bytes but must reach the PDF chunker")
+}
+
 func TestScanner_Scan_BasicFiles(t *testing.T) {
 	// Create temp directory with test files
 	tmpDir := t.TempDir()

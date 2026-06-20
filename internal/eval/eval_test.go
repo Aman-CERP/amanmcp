@@ -130,6 +130,31 @@ func TestSelectQueries_Subsets(t *testing.T) {
 	}
 }
 
+func TestSelectQueries_QuickIncludesPDFQueries(t *testing.T) {
+	pdfExact := query("PDF-EXACT", "exact_identifier", "project_memory", false)
+	pdfExact.Metadata = map[string]string{"content_type": "pdf"}
+	pdfPath := query("PDF-PATH", "path_lookup", "project_memory", false)
+	pdfPath.Metadata = map[string]string{"content_type": "pdf"}
+
+	corpus := Corpus{Queries: []Query{
+		query("EXACT-Q1", "exact_identifier", "exact_lookup", false),
+		query("PATH-Q1", "path_lookup", "exact_lookup", false),
+		query("QUOTE-Q1", "quoted_string", "exact_lookup", false),
+		query("NL-Q1", "natural_language_intent", "code", false),
+		query("DOC-Q1", "docs_to_code", "project_memory", false),
+		query("NEG-Q1", "negative_adversarial", "general", false),
+		query("CFG-Q1", "config_error", "code", false),
+		pdfExact,
+		pdfPath,
+	}}
+
+	got, err := SelectQueries(corpus.Queries, Selection{Subset: "quick"})
+
+	require.NoError(t, err)
+	assert.Contains(t, queryIDs(got), "PDF-EXACT")
+	assert.Contains(t, queryIDs(got), "PDF-PATH")
+}
+
 func TestSelectQueries_GraphGateSubsetExcludesHoldoutAndIncludesExactRegression(t *testing.T) {
 	corpus := Corpus{Queries: []Query{
 		query("GRAPH-Q1", "caller_callee", "code", false),
@@ -189,7 +214,7 @@ queries:
 	assert.Contains(t, report.BaselineComparison.RegressionReasons, "exact lookup baseline missing")
 }
 
-func TestRunner_ExactLookupGateDetectsRankPathAndResultIDRegression(t *testing.T) {
+func TestRunner_ExactLookupGateDetectsRankAndPathRegression(t *testing.T) {
 	corpusPath := writeTempCorpus(t, `
 queries:
   - id: EXACT-Q1
@@ -271,9 +296,145 @@ queries:
 	require.NotNil(t, report)
 	assert.True(t, report.ExactLookupGate.Compared)
 	assert.False(t, report.ExactLookupGate.Passed)
-	assert.Len(t, report.ExactLookupGate.Failures, 4)
+	assert.Len(t, report.ExactLookupGate.Failures, 2)
 	assert.Contains(t, report.BaselineComparison.RegressionReasons, "exact lookup gate failed")
 	assert.Equal(t, 1.0, report.ExactLookupGate.Classes["quoted_string"].PassRate)
+}
+
+func TestRunner_ExactLookupGateIgnoresOpaqueResultIDChurn(t *testing.T) {
+	corpusPath := writeTempCorpus(t, `
+queries:
+  - id: EXACT-Q1
+    name: exact owner
+    query: "SearchOptions"
+    tool: search_code
+    class: exact_identifier
+    job: exact_lookup
+    expected_results:
+      - path: internal/search/types.go
+        symbol: SearchOptions
+        grade: 3
+        rationale: owner
+    holdout: false
+    source: test
+`)
+	outDir := t.TempDir()
+	baselinePath := filepath.Join(outDir, "baseline.json")
+	baseline := Report{
+		Queries: []QueryResult{
+			exactQueryResult("EXACT-Q1", "exact_identifier", "internal/search/types.go", "SearchOptions", "sr1_old", 1),
+		},
+	}
+	baseline.Summary = summarize(baseline.Queries)
+	baseline.Metrics = calculateMetrics(baseline.Queries)
+	baselineData, err := json.Marshal(baseline)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(baselinePath, baselineData, 0o644))
+
+	runner := NewRunner(sequenceSearcher{responses: map[string]SearchResponse{
+		"EXACT-Q1": {Results: []SearchResult{{Path: "internal/search/types.go", Symbol: "SearchOptions", ResultID: "sr1_new"}}},
+	}})
+
+	report, err := runner.Run(context.Background(), Options{
+		CorpusPath:       corpusPath,
+		Subset:           "full",
+		Output:           "json",
+		OutDir:           outDir,
+		BaselinePath:     baselinePath,
+		FailOnRegression: true,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, report)
+	assert.True(t, report.ExactLookupGate.Compared)
+	assert.True(t, report.ExactLookupGate.Passed)
+	assert.Empty(t, report.ExactLookupGate.Failures)
+}
+
+func TestRunner_ExactLookupGateAllowsCurrentQueriesMissingFromBaseline(t *testing.T) {
+	corpusPath := writeTempCorpus(t, `
+queries:
+  - id: EXACT-Q1
+    name: exact owner
+    query: "SearchOptions"
+    tool: search_code
+    class: exact_identifier
+    job: exact_lookup
+    expected_results:
+      - path: internal/search/types.go
+        symbol: SearchOptions
+        grade: 3
+        rationale: owner
+    holdout: false
+    source: test
+  - id: EXACT-Q2
+    name: new exact owner
+    query: "SearchResult"
+    tool: search_code
+    class: exact_identifier
+    job: exact_lookup
+    expected_results:
+      - path: internal/search/types.go
+        symbol: SearchResult
+        grade: 3
+        rationale: owner
+    holdout: false
+    source: test
+`)
+	outDir := t.TempDir()
+	baselinePath := filepath.Join(outDir, "baseline.json")
+	baseline := Report{
+		Queries: []QueryResult{
+			exactQueryResult("EXACT-Q1", "exact_identifier", "internal/search/types.go", "SearchOptions", "sr1_exact", 1),
+		},
+	}
+	baseline.Summary = summarize(baseline.Queries)
+	baseline.Metrics = calculateMetrics(baseline.Queries)
+	baselineData, err := json.Marshal(baseline)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(baselinePath, baselineData, 0o644))
+
+	runner := NewRunner(sequenceSearcher{responses: map[string]SearchResponse{
+		"EXACT-Q1": {Results: []SearchResult{{Path: "internal/search/types.go", Symbol: "SearchOptions", ResultID: "sr1_exact"}}},
+		"EXACT-Q2": {Results: []SearchResult{{Path: "internal/search/types.go", Symbol: "SearchResult", ResultID: "sr1_new_exact"}}},
+	}})
+
+	report, err := runner.Run(context.Background(), Options{
+		CorpusPath:       corpusPath,
+		Subset:           "full",
+		Output:           "json",
+		OutDir:           outDir,
+		BaselinePath:     baselinePath,
+		FailOnRegression: true,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, report)
+	assert.True(t, report.ExactLookupGate.Compared)
+	assert.True(t, report.ExactLookupGate.Passed)
+	assert.Equal(t, 2, report.ExactLookupGate.CurrentQueryCount)
+	assert.Equal(t, 1, report.ExactLookupGate.BaselineQueryCount)
+	assert.Empty(t, report.ExactLookupGate.Failures)
+}
+
+func TestExactMatchPrefersHighestGradeEvidence(t *testing.T) {
+	result := QueryResult{
+		ExpectedResults: []ExpectedResult{
+			{Path: "internal/config/config.go", Grade: 3},
+			{Path: "internal/daemon/config.go", Grade: 2},
+		},
+		TopResults: []SearchResult{
+			{Path: "internal/daemon/config.go", Symbol: "Config", ResultID: "sr-daemon"},
+			{Path: "internal/config/config.go", Symbol: "Config", ResultID: "sr-config"},
+		},
+	}
+
+	got, ok := exactMatch(result)
+
+	require.True(t, ok)
+	assert.Equal(t, "internal/config/config.go", got.path)
+	assert.Equal(t, 2, got.rank)
+	assert.Equal(t, "sr-config", got.resultID)
 }
 
 func TestRunner_GeneratesJSONAndMarkdownReports(t *testing.T) {
@@ -317,6 +478,55 @@ queries:
 	require.NoError(t, err)
 	assert.Contains(t, string(md), "# Search Eval Report")
 	assert.Contains(t, string(md), "Q1")
+}
+
+func TestRunner_PopulatesProfileSourceClassAndLanguageDimensions(t *testing.T) {
+	corpusPath := writeTempCorpus(t, `
+queries:
+  - id: Q1
+    name: test source owner
+    query: "source metadata tests"
+    tool: search_code
+    profile: code
+    class: natural_language_intent
+    job: code
+    expected_results:
+      - path: internal/search/source_metadata_test.go
+        grade: 3
+        rationale: focused test owner
+    holdout: false
+    source: manual
+`)
+	outDir := t.TempDir()
+	runner := NewRunner(fakeSearcher{results: []SearchResult{{Path: "internal/search/source_metadata_test.go"}}})
+
+	report, err := runner.Run(context.Background(), Options{
+		CorpusPath: corpusPath,
+		Subset:     "full",
+		Output:     "both",
+		OutDir:     outDir,
+	})
+
+	require.NoError(t, err)
+	require.Len(t, report.Queries, 1)
+	assert.Equal(t, "code", report.Queries[0].Profile)
+	assert.Equal(t, "test", report.Queries[0].SourceClass)
+	assert.Equal(t, "go", report.Queries[0].Language)
+	assert.Contains(t, report.ByProfile, "code")
+	assert.Contains(t, report.BySourceClass, "test")
+	assert.Contains(t, report.ByLanguage, "go")
+
+	data, err := os.ReadFile(filepath.Join(outDir, "latest.json"))
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"by_profile"`)
+	assert.Contains(t, string(data), `"by_source_class"`)
+	assert.Contains(t, string(data), `"by_language"`)
+
+	md, err := os.ReadFile(filepath.Join(outDir, "latest.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(md), "## By Profile")
+	assert.Contains(t, string(md), "## By Source Class")
+	assert.Contains(t, string(md), "## By Language")
 }
 
 func TestRunner_PrepareFailureFailsBeforeReports(t *testing.T) {
@@ -393,6 +603,125 @@ queries:
 	require.NotNil(t, report)
 	assert.True(t, report.BaselineComparison.Regressed)
 	assert.Contains(t, err.Error(), "regression")
+}
+
+func TestRunner_DimensionRegressionFailsWhenAggregateIsFlat(t *testing.T) {
+	corpusPath := writeTempCorpus(t, `
+queries:
+  - id: Q-CODE
+    name: code owner
+    query: "search engine code owner"
+    tool: search_code
+    profile: code
+    class: natural_language_intent
+    job: code
+    expected_results:
+      - path: internal/search/engine.go
+        grade: 3
+        rationale: code owner
+    holdout: false
+    source: manual
+  - id: Q-PM
+    name: pm docs owner
+    query: "validation specification"
+    tool: search_docs
+    profile: project-memory
+    class: natural_language_intent
+    job: project_memory
+    expected_results:
+      - path: .aman-pm/validation/spec.md
+        grade: 3
+        rationale: pm owner
+    holdout: false
+    source: manual
+`)
+	outDir := t.TempDir()
+	baselinePath := filepath.Join(outDir, "baseline.json")
+	baseline := Report{
+		Queries: []QueryResult{
+			dimensionQueryResult("Q-CODE", "code", "code", "go", "internal/search/engine.go", true),
+			dimensionQueryResult("Q-PM", "project-memory", "pm", "markdown", ".aman-pm/validation/spec.md", false),
+		},
+	}
+	baseline.Summary = summarize(baseline.Queries)
+	baseline.Metrics = calculateMetrics(baseline.Queries)
+	baselineData, err := json.Marshal(baseline)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(baselinePath, baselineData, 0o644))
+
+	runner := NewRunner(sequenceSearcher{responses: map[string]SearchResponse{
+		"Q-CODE": {Results: []SearchResult{{Path: "internal/other.go"}}},
+		"Q-PM":   {Results: []SearchResult{{Path: ".aman-pm/validation/spec.md"}}},
+	}})
+	report, err := runner.Run(context.Background(), Options{
+		CorpusPath:       corpusPath,
+		Subset:           "full",
+		Output:           "json",
+		OutDir:           outDir,
+		BaselinePath:     baselinePath,
+		FailOnRegression: true,
+	})
+
+	require.Error(t, err)
+	require.NotNil(t, report)
+	assert.InDelta(t, 0.0, report.BaselineComparison.PassRateDelta, 0.0001)
+	assert.True(t, report.BaselineComparison.Regressed)
+	assert.Contains(t, report.BaselineComparison.RegressionReasons, "dimension regression: profile code pass rate decreased")
+	require.NotEmpty(t, report.DimensionRegressions)
+	assert.Contains(t, dimensionRegressionKeys(report.DimensionRegressions), "profile/code/pass_rate")
+}
+
+func TestCompareDimensionBaselinesDetectsEveryDimension(t *testing.T) {
+	baseline := &Report{
+		ByClass:       map[string]Metrics{"natural_language_intent": {PassRate: 1, RecallAt10: 1}},
+		ByJob:         map[string]Metrics{"code": {PassRate: 1, RecallAt10: 1}},
+		ByProfile:     map[string]Metrics{"code": {PassRate: 1, RecallAt10: 1}},
+		BySourceClass: map[string]Metrics{"docs": {PassRate: 1, RecallAt10: 1}},
+		ByLanguage:    map[string]Metrics{"go": {PassRate: 1, RecallAt10: 1}},
+	}
+	report := &Report{
+		Run:           RunMetadata{Tolerances: defaultTolerances()},
+		ByClass:       map[string]Metrics{"natural_language_intent": {PassRate: 0, RecallAt10: 0}},
+		ByJob:         map[string]Metrics{"code": {PassRate: 0, RecallAt10: 0}},
+		ByProfile:     map[string]Metrics{"code": {PassRate: 0, RecallAt10: 0}},
+		BySourceClass: map[string]Metrics{"docs": {PassRate: 0, RecallAt10: 0}},
+		ByLanguage:    map[string]Metrics{"go": {PassRate: 0, RecallAt10: 0}},
+	}
+
+	compareDimensionBaselines(baseline, report)
+
+	keys := dimensionRegressionKeys(report.DimensionRegressions)
+	assert.Contains(t, keys, "class/natural_language_intent/pass_rate")
+	assert.Contains(t, keys, "job/code/pass_rate")
+	assert.Contains(t, keys, "profile/code/pass_rate")
+	assert.Contains(t, keys, "source_class/docs/pass_rate")
+	assert.Contains(t, keys, "language/go/pass_rate")
+	assert.Contains(t, report.BaselineComparison.RegressionReasons, "dimension regression: language go pass rate decreased")
+}
+
+func TestCompareDimensionBaselinesRecomputesLegacyBaselinePassRate(t *testing.T) {
+	baseline := &Report{
+		Queries: []QueryResult{
+			dimensionQueryResult("Q-CODE", "code", "code", "go", "internal/search/engine.go", true),
+		},
+		ByClass: map[string]Metrics{
+			"natural_language_intent": {RecallAt10: 1},
+		},
+		ByJob: map[string]Metrics{
+			"code": {RecallAt10: 1},
+		},
+	}
+	report := buildReport(Options{Subset: "full"}, []QueryResult{
+		dimensionQueryResult("Q-CODE", "code", "code", "go", "internal/search/engine.go", false),
+	})
+
+	compareDimensionBaselines(baseline, report)
+
+	keys := dimensionRegressionKeys(report.DimensionRegressions)
+	assert.Contains(t, keys, "class/natural_language_intent/pass_rate")
+	assert.Contains(t, keys, "job/code/pass_rate")
+	assert.Contains(t, report.BaselineComparison.RegressionReasons, "dimension regression: class natural_language_intent pass rate decreased")
+	assert.Contains(t, report.BaselineComparison.RegressionReasons, "dimension regression: job code pass rate decreased")
 }
 
 func TestRunner_GraphEvalGatePassesAndReportsFields(t *testing.T) {
@@ -570,7 +899,7 @@ func TestBuildReport_GraphEvalGateFailsLowBaselineAbsoluteFloor(t *testing.T) {
 	assert.Contains(t, classGate.Reasons, "current recall@10 below low-baseline absolute floor")
 }
 
-func TestRunner_GraphEvalGateKillsOnExactLookupRegression(t *testing.T) {
+func TestRunner_GraphEvalGateAllowsExactResultIDChurn(t *testing.T) {
 	corpusPath := writeTempCorpus(t, `
 queries:
   - id: CALL-Q1
@@ -626,14 +955,14 @@ queries:
 		FailOnRegression: true,
 	})
 
-	require.Error(t, err)
+	require.NoError(t, err)
 	require.NotNil(t, report)
-	assert.False(t, report.ExactLookupGate.Passed)
-	assert.False(t, report.GraphEvalGate.Passed)
-	assert.Equal(t, GraphRecommendationKill, report.GraphEvalGate.Recommendation)
-	assert.Contains(t, report.GraphEvalGate.Reasons, "exact lookup gate failed")
-	assert.Contains(t, report.BaselineComparison.RegressionReasons, "exact lookup gate failed")
-	assert.Contains(t, report.BaselineComparison.RegressionReasons, "graph eval gate failed")
+	assert.True(t, report.ExactLookupGate.Passed)
+	assert.True(t, report.GraphEvalGate.Passed)
+	assert.Empty(t, report.ExactLookupGate.Failures)
+	assert.NotContains(t, report.GraphEvalGate.Reasons, "exact lookup gate failed")
+	assert.NotContains(t, report.BaselineComparison.RegressionReasons, "exact lookup gate failed")
+	assert.NotContains(t, report.BaselineComparison.RegressionReasons, "graph eval gate failed")
 }
 
 func TestRunner_TokenBaselineComparisonDetectsRegression(t *testing.T) {
@@ -699,6 +1028,46 @@ queries:
 	require.NotNil(t, report)
 	assert.True(t, report.BaselineComparison.Regressed)
 	assert.Contains(t, err.Error(), "token budget")
+}
+
+func TestTokenRegressionReasons_ClassStatsUseCommonQueries(t *testing.T) {
+	report := &Report{
+		Run: RunMetadata{Tolerances: defaultTolerances()},
+		Queries: []QueryResult{
+			{
+				ID:            "IMPACT-Q01",
+				Tool:          "search_code",
+				Class:         "impact_analysis",
+				TokenEstimate: TokenEstimate{TokensPerResult: 100},
+				TopResults:    []SearchResult{{Path: "internal/search/fusion.go"}},
+			},
+			{
+				ID:            "IMPACT-Q04",
+				Tool:          "search_code",
+				Class:         "impact_analysis",
+				TokenEstimate: TokenEstimate{TokensPerResult: 1000},
+				TopResults:    []SearchResult{{Path: "internal/search/source_metadata.go"}},
+			},
+		},
+	}
+	baseline := tokenBaseline{
+		QueryClasses: map[string]tokenBudgetStats{
+			"impact_analysis": {
+				Count:               2,
+				MeanTokensPerResult: 100,
+				P95TokensPerResult:  100,
+			},
+		},
+		Queries: []tokenBaselineQuery{
+			{ID: "IMPACT-Q01", Tool: "search_code", Class: "impact_analysis", ResultCount: 1, TokensPerResult: 100},
+			{ID: "HOLDOUT-Q06", Tool: "search_code", Class: "impact_analysis", ResultCount: 1, TokensPerResult: 100},
+		},
+	}
+
+	reasons := tokenRegressionReasons(report, baseline)
+
+	assert.NotContains(t, reasons, "token budget class impact_analysis mean tokens/result increased")
+	assert.NotContains(t, reasons, "token budget class impact_analysis p95 tokens/result increased")
 }
 
 func TestRunner_WritesReportWhenBaselineIsMalformed(t *testing.T) {
@@ -870,6 +1239,73 @@ func TestMatchedGrade_RequiresExpectedSymbolWhenSpecified(t *testing.T) {
 	assert.Equal(t, 0, matchedGrade(expected, SearchResult{Path: "internal/store/hnsw.go"}))
 	assert.Equal(t, 0, matchedGrade(expected, SearchResult{Path: "internal/store/hnsw.go", Symbol: "Other"}))
 	assert.Equal(t, 3, matchedGrade(expected, SearchResult{Path: "internal/store/hnsw.go", Symbol: "HNSWStore"}))
+}
+
+func TestMatchedGrade_AllowsSplitChunkSymbolSuffix(t *testing.T) {
+	expected := []ExpectedResult{{
+		Path:   "internal/mcp/server.go",
+		Symbol: "registerTools",
+		Grade:  3,
+	}}
+
+	assert.Equal(t, 3, matchedGrade(expected, SearchResult{
+		Path:   "internal/mcp/server.go",
+		Symbol: "registerTools_part1",
+	}))
+	assert.Equal(t, 0, matchedGrade(expected, SearchResult{
+		Path:   "internal/mcp/server.go",
+		Symbol: "registerToolsExtra_part1",
+	}))
+}
+
+func TestMatchedGrade_RequiresPDFPageWhenSpecified(t *testing.T) {
+	expected := []ExpectedResult{{
+		Path:  "internal/validation/testdata/eval-pdfs/technical-spec.pdf",
+		Page:  2,
+		Grade: 3,
+	}}
+
+	assert.Equal(t, 0, matchedGrade(expected, SearchResult{
+		Path:      "internal/validation/testdata/eval-pdfs/technical-spec.pdf",
+		PageStart: "1",
+		PageEnd:   "1",
+	}))
+	assert.Equal(t, 3, matchedGrade(expected, SearchResult{
+		Path:      "internal/validation/testdata/eval-pdfs/technical-spec.pdf",
+		PageStart: "2",
+		PageEnd:   "2",
+	}))
+}
+
+func TestCalculateMetrics_IncludesPDFClassMetrics(t *testing.T) {
+	metrics := calculateMetrics([]QueryResult{
+		{
+			Metadata:        map[string]string{"content_type": "pdf"},
+			Passed:          true,
+			FirstUsefulRank: 3,
+			TopResults:      []SearchResult{{Path: "doc.pdf"}},
+		},
+		{
+			Metadata:        map[string]string{"content_type": "pdf"},
+			Passed:          false,
+			FirstUsefulRank: -1,
+		},
+	})
+
+	assert.Equal(t, 0.5, metrics.PDFPassRate)
+	assert.Equal(t, 0.5, metrics.PDFRecallAt10)
+}
+
+func TestMarkdownReport_IncludesNegativeAdversarialPassRateInSummary(t *testing.T) {
+	report := buildReport(Options{Subset: "full"}, []QueryResult{
+		{ID: "NEG-Q1", Class: "negative_adversarial", Job: "general", Passed: true, FirstUsefulRank: -1},
+		{ID: "NEG-Q2", Class: "negative_adversarial", Job: "general", Passed: false, FirstUsefulRank: 1},
+		{ID: "EXACT-Q1", Class: "exact_identifier", Job: "exact_lookup", Passed: true, FirstUsefulRank: 1},
+	})
+
+	got := markdownReport(report)
+
+	assert.Contains(t, got, "- Negative adversarial pass rate: 0.50")
 }
 
 func TestCalculateMetrics_UsesTrueNDCGAt10(t *testing.T) {
@@ -1055,4 +1491,42 @@ func graphQueryResult(id, class string, passed bool) QueryResult {
 		MatchedGrade:    matchedGrade,
 		TokenEstimate:   TokenEstimate{TokensPerResult: 10, ResultTokens: 10},
 	}
+}
+
+func dimensionQueryResult(id, profile, sourceClass, language, path string, passed bool) QueryResult {
+	results := []SearchResult{{Path: "internal/other.go"}}
+	firstRank := -1
+	matchedGrade := 0
+	if passed {
+		results = []SearchResult{{Path: path}}
+		firstRank = 1
+		matchedGrade = 3
+	}
+	return QueryResult{
+		ID:          id,
+		Class:       "natural_language_intent",
+		Job:         "code",
+		Profile:     profile,
+		SourceClass: sourceClass,
+		Language:    language,
+		ExpectedResults: []ExpectedResult{{
+			Path:  path,
+			Grade: 3,
+		}},
+		TopResults:      results,
+		Passed:          passed,
+		FirstUsefulRank: firstRank,
+		MatchedGrade:    matchedGrade,
+	}
+}
+
+func dimensionRegressionKeys(regressions []DimensionRegression) []string {
+	keys := make([]string, 0, len(regressions))
+	for _, regression := range regressions {
+		if !regression.Regressed {
+			continue
+		}
+		keys = append(keys, regression.Dimension+"/"+regression.Group+"/"+regression.Metric)
+	}
+	return keys
 }

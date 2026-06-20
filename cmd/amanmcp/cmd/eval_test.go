@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -78,6 +79,45 @@ queries:
 
 	require.NoError(t, err)
 	assert.Contains(t, buf.String(), "latest.md")
+}
+
+func TestEvalSearchCmd_PrintsDimensionRegressionsWhenRunnerReturnsReportAndError(t *testing.T) {
+	outDir := t.TempDir()
+	restore := stubEvalRunner(t, evalRunnerFunc(func(context.Context, eval.Options) (*eval.Report, error) {
+		return &eval.Report{
+			Summary: eval.Summary{QueryCount: 2, PassRate: 0.50},
+			BaselineComparison: eval.BaselineComparison{
+				Regressed: true,
+			},
+			DimensionRegressions: []eval.DimensionRegression{{
+				Dimension:     "profile",
+				Group:         "code",
+				Metric:        "pass_rate",
+				BaselineValue: 1.00,
+				CurrentValue:  0.00,
+				Delta:         -1.00,
+				Tolerance:     -0.0001,
+				Regressed:     true,
+			}},
+			OutputPaths: eval.OutputPaths{
+				JSON: filepath.Join(outDir, "latest.json"),
+			},
+		}, errors.New("eval regression detected")
+	}))
+	defer restore()
+
+	cmd := NewRootCmd()
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetArgs([]string{"eval", "search", "--out-dir", outDir, "--fail-on-regression"})
+
+	err := cmd.Execute()
+
+	require.Error(t, err)
+	assert.Contains(t, buf.String(), "Dimension regressions")
+	assert.Contains(t, buf.String(), "profile/code pass_rate")
+	assert.Contains(t, buf.String(), "latest.json")
 }
 
 func TestEvalSearchCmd_MalformedCorpusFailure(t *testing.T) {

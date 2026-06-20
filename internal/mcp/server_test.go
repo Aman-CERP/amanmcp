@@ -120,6 +120,18 @@ func (m *MockMetadataStore) GetChunks(_ context.Context, ids []string) ([]*store
 func (m *MockMetadataStore) GetChunksByFile(_ context.Context, _ string) ([]*store.Chunk, error) {
 	return m.Chunks, nil
 }
+func (m *MockMetadataStore) GetChunksByPath(_ context.Context, path string, limit int) ([]*store.Chunk, error) {
+	result := make([]*store.Chunk, 0, len(m.Chunks))
+	for _, c := range m.Chunks {
+		if c.FilePath == path {
+			result = append(result, c)
+			if limit > 0 && len(result) >= limit {
+				break
+			}
+		}
+	}
+	return result, nil
+}
 func (m *MockMetadataStore) GetChunksBySymbol(_ context.Context, _ string, _ int) ([]*store.Chunk, error) {
 	return nil, nil
 }

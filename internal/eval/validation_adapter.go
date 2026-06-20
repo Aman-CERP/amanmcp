@@ -48,10 +48,14 @@ func (s *ValidationSearcher) Search(ctx context.Context, query Query) (SearchRes
 	results := make([]SearchResult, 0, len(result.Results))
 	for _, item := range result.Results {
 		results = append(results, SearchResult{
-			Path:     item.FilePath,
-			Symbol:   item.Symbol,
-			Text:     item.Content,
-			ResultID: item.ResultID,
+			Path:        item.FilePath,
+			Symbol:      item.Symbol,
+			Text:        item.Content,
+			ResultID:    item.ResultID,
+			ContentType: item.ContentType,
+			PageNumber:  item.PageNumber,
+			PageStart:   item.PageStart,
+			PageEnd:     item.PageEnd,
 		})
 	}
 	return SearchResponse{Results: results, ResponseBytes: result.ResponseBytes}, nil

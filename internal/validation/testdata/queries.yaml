@@ -297,14 +297,14 @@ tier2:
 negative:
   - id: N-Q1
     name: Non-existent symbol
-    query: "xyznonexistent123"
+    query: "AmanMCPNoSuchSymbolQ1Z9Y8X7W6V5"
     tool: search
     class: negative_adversarial
     job: general
     expected: []
     holdout: false
     source: dogfood-negative
-    notes: "Should return empty, not crash."
+    notes: "Scenario: zero-result. Should return empty, not crash."
 
   - id: N-Q2
     name: SQL injection attempt
@@ -482,14 +482,14 @@ graded:
 
   - id: CONFIG-Q01
     name: Default search weights config
-    query: "default BM25 semantic weights configuration"
+    query: "NewConfig BM25Weight SemanticWeight RRFConstant default search config"
     tool: search_code
     class: config_error
     job: code
     expected_results:
       - path: internal/config/config.go
         grade: 3
-        rationale: "Configuration defaults define search weights."
+        rationale: "Runtime project configuration defaults define search weights."
     holdout: false
     source: manual
 
@@ -902,6 +902,152 @@ graded:
     holdout: false
     source: manual
 
+  - id: PDF-Q01
+    name: PDF spec API exact term
+    query: "PDF_SPEC_API"
+    tool: search_docs
+    class: exact_identifier
+    job: exact_lookup
+    expected_results:
+      - path: internal/validation/testdata/eval-pdfs/technical-spec.pdf
+        page: 1
+        grade: 3
+        rationale: "Technical spec fixture defines the PDF_SPEC_API exact term on page 1."
+    metadata:
+      content_type: pdf
+    holdout: false
+    source: task-doc03
+    notes: "PDF exact identifier coverage."
+
+  - id: PDF-Q02
+    name: PDF RFC exact identifier
+    query: "RFC-PDF-017"
+    tool: search_docs
+    class: exact_identifier
+    job: exact_lookup
+    expected_results:
+      - path: internal/validation/testdata/eval-pdfs/rfc-pdf-context.pdf
+        page: 1
+        grade: 3
+        rationale: "RFC fixture defines RFC-PDF-017 on page 1."
+    metadata:
+      content_type: pdf
+    holdout: false
+    source: task-doc03
+    notes: "PDF RFC identifier coverage."
+
+  - id: PDF-Q03
+    name: PDF technical spec path lookup
+    query: "internal/validation/testdata/eval-pdfs/technical-spec.pdf"
+    tool: search_docs
+    class: path_lookup
+    job: exact_lookup
+    expected_results:
+      - path: internal/validation/testdata/eval-pdfs/technical-spec.pdf
+        grade: 3
+        rationale: "Direct path query should retrieve the technical spec PDF fixture."
+    metadata:
+      content_type: pdf
+    holdout: false
+    source: task-doc03
+    notes: "PDF path lookup coverage."
+
+  - id: PDF-Q04
+    name: PDF design doc path lookup
+    query: "internal/validation/testdata/eval-pdfs/design-doc-pdf-indexing.pdf"
+    tool: search_docs
+    class: path_lookup
+    job: exact_lookup
+    expected_results:
+      - path: internal/validation/testdata/eval-pdfs/design-doc-pdf-indexing.pdf
+        grade: 3
+        rationale: "Direct path query should retrieve the design doc PDF fixture."
+    metadata:
+      content_type: pdf
+    holdout: false
+    source: task-doc03
+    notes: "PDF path lookup coverage."
+
+  - id: PDF-Q05
+    name: PDF chunk metadata intent
+    query: "how does PDF chunking preserve page aware metadata"
+    tool: search_docs
+    class: natural_language_intent
+    job: general
+    expected_results:
+      - path: internal/validation/testdata/eval-pdfs/technical-spec.pdf
+        page: 1
+        grade: 3
+        rationale: "Technical spec fixture describes page-aware PDF chunk metadata."
+      - path: internal/validation/testdata/eval-pdfs/design-doc-pdf-indexing.pdf
+        page: 1
+        grade: 2
+        rationale: "Design doc fixture also describes page-aware PDF metadata."
+    metadata:
+      content_type: pdf
+    holdout: false
+    source: task-doc03
+    notes: "PDF natural-language retrieval coverage."
+
+  - id: PDF-Q06
+    name: PDF scanner binary guard intent
+    query: "which PDF document explains that scanner binary guard allows .pdf"
+    tool: search_docs
+    class: natural_language_intent
+    job: general
+    expected_results:
+      - path: internal/validation/testdata/eval-pdfs/design-doc-pdf-indexing.pdf
+        page: 1
+        grade: 3
+        rationale: "Design doc fixture states that the scanner binary guard allows .pdf."
+      - path: internal/validation/testdata/eval-pdfs/rfc-pdf-context.pdf
+        page: 2
+        grade: 2
+        rationale: "RFC fixture also mentions the scanner guard on page 2."
+    metadata:
+      content_type: pdf
+    holdout: false
+    source: task-doc03
+    notes: "PDF natural-language scanner coverage."
+
+  - id: PDF-Q07
+    name: PDF docs to chunker constructor
+    query: "PDFChunker NewPDFChunker page aware chunking metadata"
+    tool: search_docs
+    class: docs_to_code
+    job: project_memory
+    expected_results:
+      - path: internal/validation/testdata/eval-pdfs/technical-spec.pdf
+        page: 1
+        grade: 3
+        rationale: "Technical spec fixture links PDFChunker, NewPDFChunker, and page-aware metadata."
+      - path: internal/validation/testdata/eval-pdfs/design-doc-pdf-indexing.pdf
+        page: 2
+        grade: 2
+        rationale: "Design doc fixture links PDFChunker metadata to docs-to-code search."
+    metadata:
+      content_type: pdf
+    holdout: false
+    source: task-doc03
+    notes: "PDF docs-to-code constructor coverage."
+
+  - id: PDF-Q08
+    name: PDF docs to reader API
+    query: "github.com/ledongthuc/pdf pdf.NewReader bytes.NewReader file.Content"
+    tool: search_docs
+    class: docs_to_code
+    job: project_memory
+    expected_results:
+      - path: internal/validation/testdata/eval-pdfs/rfc-pdf-context.pdf
+        page: 1
+        grade: 3
+        rationale: "RFC fixture captures the ledongthuc/pdf in-memory reader API."
+    metadata:
+      content_type: pdf
+    holdout: false
+    source: task-doc03
+    notes: "PDF docs-to-code dependency API coverage."
+
   - id: HOLDOUT-Q01
     name: Holdout exact option query
     query: "WithMultiQuerySearch option"
@@ -1077,3 +1223,380 @@ graded:
     holdout: true
     source: holdout
     notes: "Should not crash and should not produce high-confidence answers."
+
+  - id: CONFIG-Q03
+    name: Natural-language default search weights
+    query: "where are default search weights configured"
+    tool: search_code
+    profile: code
+    class: config_error
+    job: code
+    expected_results:
+      - path: internal/config/config.go
+        grade: 3
+        rationale: "Runtime project configuration owns the default BM25, semantic, and RRF search weights."
+      - path: internal/search/types.go
+        grade: 2
+        rationale: "Search package defines fallback default weights used by the engine."
+      - path: internal/search/engine.go
+        grade: 2
+        rationale: "Search engine applies configured or classified weights during fusion."
+    holdout: false
+    source: task-dir04
+    notes: "Restores governed natural-language default-weight coverage removed from the quick gate."
+
+  - id: CONFIG-Q04
+    name: Profile rule defaults configuration
+    query: "where are default search profile rules configured"
+    tool: search_code
+    profile: code
+    class: config_error
+    job: code
+    expected_results:
+      - path: internal/search/source_metadata.go
+        symbol: DefaultProfileRules
+        grade: 3
+        rationale: "Defines built-in profile eligibility rules."
+      - path: internal/config/config.go
+        grade: 2
+        rationale: "Project config exposes data-driven profile rule overrides."
+    holdout: false
+    source: task-dir04
+    notes: "Covers profile configuration as code behavior, not only docs."
+
+  - id: NL-Q02
+    name: Secret redaction before indexing
+    query: "how does indexing redact secrets before embeddings and BM25"
+    tool: search_code
+    profile: code
+    class: natural_language_intent
+    job: code
+    expected_results:
+      - path: internal/index/runner.go
+        grade: 3
+        rationale: "Index runner applies secret scanning before chunk persistence, embeddings, and BM25 indexing."
+      - path: internal/secrets/scanner.go
+        grade: 2
+        rationale: "Secret scanner implements detection and redaction policy."
+    holdout: false
+    source: task-dir04
+
+  - id: NL-Q03
+    name: Profile mismatch explanation
+    query: "how does search explain profile mismatch results"
+    tool: search_code
+    profile: code
+    class: natural_language_intent
+    job: code
+    expected_results:
+      - path: internal/search/source_metadata.go
+        symbol: ExplainProfileEligibility
+        grade: 3
+        rationale: "Source metadata package explains profile eligibility and mismatch actions."
+      - path: internal/search/options.go
+        grade: 2
+        rationale: "Search option filtering records profile mismatches."
+    holdout: false
+    source: task-dir04
+
+  - id: QUOTE-Q04
+    name: Negative adversarial metric literal
+    query: "\"negative_adversarial_pass_rate\""
+    tool: search_code
+    profile: code
+    class: quoted_string
+    job: exact_lookup
+    expected_results:
+      - path: internal/eval/types.go
+        grade: 3
+        rationale: "Eval metrics schema exposes the negative adversarial pass-rate JSON field."
+      - path: internal/eval/runner.go
+        grade: 2
+        rationale: "Eval runner calculates and renders the metric."
+    holdout: false
+    source: task-dir05
+
+  - id: PATH-Q05
+    name: Source metadata path lookup
+    query: "internal/search/source_metadata.go"
+    tool: search
+    profile: code
+    class: path_lookup
+    job: exact_lookup
+    expected_results:
+      - path: internal/search/source_metadata.go
+        grade: 3
+        rationale: "Direct path query should retrieve source metadata implementation."
+    holdout: false
+    source: task-dir04
+
+  - id: DOC-Q04
+    name: Eval harness spec to runner
+    query: "F37 search eval harness runner metrics implementation"
+    tool: search_docs
+    profile: project-memory
+    class: docs_to_code
+    job: project_memory
+    expected_results:
+      - path: .aman-pm/product/F37-search-eval-harness.md
+        grade: 3
+        rationale: "Product spec defines the eval harness and metrics."
+      - path: internal/eval/runner.go
+        grade: 2
+        rationale: "Runner implements report generation and metrics calculation."
+    holdout: false
+    source: task-dir04
+
+  - id: PM-Q05
+    name: DIR04 corpus expansion task lookup
+    query: "Sprint 18 expand eval corpus holdout governance task"
+    tool: search_docs
+    profile: project-memory
+    class: natural_language_intent
+    job: pm_inspection
+    expected_results:
+      - path: .aman-pm/backlog/tasks/active/TASK-DIR04-expand-eval-corpus.md
+        grade: 3
+        rationale: "Active task owns the corpus expansion and holdout-governance requirements."
+    holdout: false
+    source: task-dir04
+
+  - id: PM-Q06
+    name: DIR05 adversarial task lookup
+    query: "Sprint 18 adversarial negative query coverage task"
+    tool: search_docs
+    profile: project-memory
+    class: natural_language_intent
+    job: pm_inspection
+    expected_results:
+      - path: .aman-pm/backlog/tasks/active/TASK-DIR05-adversarial-negative-queries.md
+        grade: 3
+        rationale: "Active task owns adversarial negative query coverage."
+    holdout: false
+    source: task-dir05
+
+  - id: TEST-Q04
+    name: Source metadata tests to implementation
+    query: "TestProfileEligibility ProjectMemory excludes review corpus implementation"
+    tool: search_code
+    profile: code
+    class: test_to_implementation
+    job: code
+    expected_results:
+      - path: internal/search/source_metadata.go
+        grade: 3
+        rationale: "Implements profile eligibility tested by source_metadata_test."
+      - path: internal/search/source_metadata_test.go
+        grade: 2
+        rationale: "Focused tests document profile eligibility behavior."
+    holdout: false
+    source: task-dir04
+
+  - id: CALL-Q03
+    name: Eval CLI runner call path
+    query: "eval command creates ValidationSearcher and Runner"
+    tool: search_code
+    profile: code
+    class: caller_callee
+    job: code
+    expected_results:
+      - path: cmd/amanmcp/cmd/eval.go
+        grade: 3
+        rationale: "Eval command wires CLI flags to the eval runner."
+      - path: internal/eval/validation_adapter.go
+        grade: 2
+        rationale: "Validation searcher adapts validation queries to eval runner searches."
+    holdout: false
+    source: task-dir04
+
+  - id: IMPACT-Q04
+    name: Source metadata change impact
+    query: "what is affected by changing source authority profile metadata"
+    tool: search_code
+    profile: code
+    class: impact_analysis
+    job: code
+    expected_results:
+      - path: internal/search/source_metadata.go
+        grade: 3
+        rationale: "Owns source authority and profile classification."
+      - path: internal/search/options.go
+        grade: 2
+        rationale: "Applies source metadata to ranking and profile filtering."
+      - path: internal/search/engine.go
+        grade: 2
+        rationale: "Search engine propagates metadata rules into search options."
+    holdout: false
+    source: task-dir04
+
+  - id: CROSS-Q03
+    name: Eval corpus loading subsystem
+    query: "query corpus yaml loads through validation adapter eval runner"
+    tool: search_code
+    profile: code
+    class: cross_file_subsystem
+    job: code
+    expected_results:
+      - path: internal/eval/corpus.go
+        grade: 3
+        rationale: "Eval corpus loader parses and validates the YAML corpus."
+      - path: internal/eval/runner.go
+        grade: 2
+        rationale: "Runner selects corpus rows and scores results."
+      - path: internal/validation/validation.go
+        grade: 2
+        rationale: "Legacy validation loader shares the same corpus file."
+    holdout: false
+    source: task-dir04
+
+  - id: NEG-Q08
+    name: Implementation request must not be satisfied by test file
+    query: "Search function MockBM25Index engine_test.go implementation"
+    tool: search_code
+    profile: code
+    class: negative_adversarial
+    job: code
+    expected_results:
+      - path: internal/search/engine_test.go
+        grade: 0
+        rationale: "An implementation request must not be satisfied by the search engine test file."
+      - path: internal/search/options_test.go
+        grade: 0
+        rationale: "Test pollution should fail the adversarial query."
+    holdout: false
+    source: task-dir05
+    notes: "Scenario: implementation-not-test."
+
+  - id: NEG-Q09
+    name: Raw secret string should not become searchable
+    query: "tok_DO_NOT_INDEX_RAW_SECRET_9x8y7z6w5v4u3t2s1r0q"
+    tool: search_code
+    profile: code
+    class: negative_adversarial
+    job: code
+    expected_results: []
+    holdout: false
+    source: task-dir05
+    notes: "Scenario: secret-leak. A made-up high-entropy token should return zero results."
+
+  - id: HEXP-Q01
+    name: Holdout eval runner markdown metric
+    query: "markdown search eval report negative adversarial pass rate"
+    tool: search_code
+    profile: code
+    class: natural_language_intent
+    job: code
+    expected_results:
+      - path: internal/eval/runner.go
+        grade: 3
+        rationale: "Runner renders eval metrics into markdown reports."
+      - path: internal/eval/types.go
+        grade: 2
+        rationale: "Metrics schema includes the negative adversarial pass-rate field."
+    holdout: true
+    source: task-dir04-holdout
+
+  - id: HEXP-Q02
+    name: Holdout eval CLI path
+    query: "cmd/amanmcp/cmd/eval.go"
+    tool: search
+    profile: code
+    class: path_lookup
+    job: exact_lookup
+    expected_results:
+      - path: cmd/amanmcp/cmd/eval.go
+        grade: 3
+        rationale: "Direct path query should retrieve the eval command."
+    holdout: true
+    source: task-dir04-holdout
+
+  - id: HEXP-Q03
+    name: Holdout task corpus governance
+    query: "holdout governance at least 20 queries protected from tuning"
+    tool: search_docs
+    profile: project-memory
+    class: natural_language_intent
+    job: pm_inspection
+    expected_results:
+      - path: .aman-pm/backlog/tasks/active/TASK-DIR04-expand-eval-corpus.md
+        grade: 3
+        rationale: "Task spec defines the holdout governance requirement."
+    holdout: true
+    source: task-dir04-holdout
+
+  - id: HEXP-Q04
+    name: Holdout review corpus profile
+    query: "PR11 adversarial review merge ready blocker"
+    tool: search_docs
+    profile: review-corpus
+    class: natural_language_intent
+    job: project_memory
+    expected_results:
+      - path: vend_feedback/gpt-5-codex_20260512T114135+0530_pr11_adversarial_review.md
+        grade: 3
+        rationale: "Review-corpus profile should retrieve advisory vend_feedback when explicitly selected."
+    holdout: true
+    source: task-dir04-holdout
+
+  - id: HEXP-Q05
+    name: Holdout archive profile history
+    query: "archived strategic improvements roadmap"
+    tool: search_docs
+    profile: archive
+    class: natural_language_intent
+    job: project_memory
+    expected_results:
+      - path: archive/roadmap/strategic-improvements-2026.md
+        grade: 3
+        rationale: "Archive profile should retrieve historical roadmap material only when explicitly selected."
+    holdout: true
+    source: task-dir04-holdout
+
+  - id: HEXP-Q06
+    name: Holdout config profile docs
+    query: "configuration reference excludes archive and testdata"
+    tool: search_docs
+    profile: project-memory
+    class: config_error
+    job: project_memory
+    expected_results:
+      - path: docs/reference/configuration.md
+        grade: 3
+        rationale: "Configuration reference documents default excluded paths."
+      - path: internal/config/config.go
+        grade: 2
+        rationale: "Config implementation owns exclusion settings."
+    holdout: true
+    source: task-dir04-holdout
+
+  - id: HEXP-Q07
+    name: Holdout exact source metadata type
+    query: "type SourceMetadata struct"
+    tool: search_code
+    profile: code
+    class: exact_identifier
+    job: exact_lookup
+    expected_results:
+      - path: internal/search/source_metadata.go
+        symbol: SourceMetadata
+        grade: 3
+        rationale: "SourceMetadata type owns source authority/profile metadata fields."
+    holdout: true
+    source: task-dir04-holdout
+
+  - id: HEXP-Q08
+    name: Holdout serve secret scanner wiring
+    query: "serve command wires SecretScanner DefaultPolicy into index runner"
+    tool: search_code
+    profile: code
+    class: caller_callee
+    job: code
+    expected_results:
+      - path: cmd/amanmcp/cmd/serve.go
+        grade: 3
+        rationale: "Serve command wires the default secret scanner into runner dependencies."
+      - path: internal/secrets/scanner.go
+        grade: 2
+        rationale: "Secret scanner policy implementation is the callee."
+    holdout: true
+    source: task-dir04-holdout

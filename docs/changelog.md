@@ -4,6 +4,11 @@ Public-facing highlights of major changes. See `.aman-pm/changelog/` for detaile
 
 ---
 
+## [v0.14.0] - 2026-06-20
+
+- **Update**: Minor improvements and fixes
+
+
 ## [v0.12.1] - 2026-05-03
 
 - **Update**: Minor improvements and fixes
@@ -54,10 +59,6 @@ Public-facing highlights of major changes. See `.aman-pm/changelog/` for detaile
 - **Feature**: SQLite FTS5 BM25 backend with concurrent multi-process access (default)
 - **Feature**: `--local` flag for search command to bypass daemon
 - **Fix**: CLI blocked when MCP server running (BoltDB exclusive lock issue)
-
-## [v0.5.0] - 2026-01-14
-
-- **Feature**: Tiered validation for 90% faster commit validation
 
 
 ---

@@ -174,6 +174,12 @@ func ValidateCorpus(corpus Corpus) error {
 			if expected.Grade < 0 || expected.Grade > 3 {
 				return fmt.Errorf("query %s has invalid grade %d", query.ID, expected.Grade)
 			}
+			if expected.Page < 0 || expected.PageStart < 0 || expected.PageEnd < 0 {
+				return fmt.Errorf("query %s has negative page expectation", query.ID)
+			}
+			if expected.PageStart > 0 && expected.PageEnd > 0 && expected.PageEnd < expected.PageStart {
+				return fmt.Errorf("query %s has page_end before page_start", query.ID)
+			}
 		}
 	}
 	return nil

@@ -16,7 +16,7 @@ var (
 	quotedPattern = regexp.MustCompile(`^["'].*["']$`)
 
 	// File paths: path/to/file.ext (common extensions)
-	filePathPattern = regexp.MustCompile(`(?i)^[\w\-\./\\]+\.(go|ts|tsx|js|jsx|py|md|json|yaml|yml|toml|css|scss|html|rs|java|kt|c|cpp|h|hpp|rb|php|swift|sh|bash|zsh)$`)
+	filePathPattern = regexp.MustCompile(`(?i)^[\w\-\./\\]+\.(go|ts|tsx|js|jsx|py|md|pdf|json|yaml|yml|toml|css|scss|html|rs|java|kt|c|cpp|h|hpp|rb|php|swift|sh|bash|zsh)$`)
 
 	// Technical identifiers
 	camelCasePattern          = regexp.MustCompile(`^[a-z]+([A-Z][a-z0-9]*)+$`)
@@ -83,6 +83,12 @@ func (p *PatternClassifier) classifyQuery(query string) QueryType {
 
 // isLexicalQuery checks if the query matches lexical patterns.
 func (p *PatternClassifier) isLexicalQuery(query string) bool {
+	// ADR references are stable technical identifiers. They should anchor BM25
+	// even when accompanied by descriptive implementation terms.
+	if adrRefPattern.MatchString(query) {
+		return true
+	}
+
 	// Error codes
 	if errorCodePattern.MatchString(query) {
 		return true

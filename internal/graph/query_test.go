@@ -87,6 +87,41 @@ func TestQueryService_DegradesForStaleGraphButReturnsEvidence(t *testing.T) {
 	assert.NotEmpty(t, got.Results)
 }
 
+func TestQueryService_ExcludesStaleEdgesByDefaultAndIncludesOnOptIn(t *testing.T) {
+	ctx := context.Background()
+	repo := newTestSQLiteRepository(t)
+	projectID := "project-stale-edge-query"
+	doc := upsertTestNode(t, ctx, repo, projectID, NodeKindDoc, "docs/design.md")
+	file := upsertTestNode(t, ctx, repo, projectID, NodeKindFile, "internal/impl.go")
+	require.NoError(t, repo.UpsertEdgeOnlyForTest(ctx, Edge{
+		ProjectID:       projectID,
+		Kind:            EdgeKindDocMentionsFile,
+		FromNodeID:      doc.ID,
+		ToNodeID:        file.ID,
+		Extractor:       ExtractorCheap,
+		SourcePath:      "docs/design.md",
+		Confidence:      0.9,
+		ConfidenceLabel: ConfidenceHigh,
+		Stale:           true,
+		Evidence:        Evidence{Method: "test", SourcePath: "docs/design.md", LineStart: 1, LineEnd: 1},
+	}))
+	require.NoError(t, repo.RecordBuild(ctx, BuildMetadata{
+		ProjectID:   projectID,
+		Status:      GraphStatusFresh,
+		CompletedAt: fixedGraphTime(),
+	}))
+
+	service := NewQueryService(repo, QueryServiceOptions{Now: fixedGraphTime})
+	defaultResult, err := service.Query(ctx, QueryRequest{ProjectID: projectID, Query: "impl.go"})
+	require.NoError(t, err)
+	assert.Empty(t, defaultResult.Results)
+
+	withStale, err := service.Query(ctx, QueryRequest{ProjectID: projectID, Query: "impl.go", IncludeStale: true})
+	require.NoError(t, err)
+	require.Len(t, withStale.Results, 1)
+	assert.True(t, withStale.Results[0].Stale)
+}
+
 func TestQueryService_UnusableGraphReturnsVisibleWarning(t *testing.T) {
 	service := NewQueryService(newTestSQLiteRepository(t), QueryServiceOptions{Now: fixedGraphTime})
 

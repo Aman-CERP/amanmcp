@@ -45,6 +45,30 @@ func TestShouldDecompose(t *testing.T) {
 			expected: true,
 			reason:   "How does X work pattern for generic queries",
 		},
+		{
+			name:     "cross-file flow query - should decompose",
+			query:    "search request flows from MCP handler through engine to stores",
+			expected: true,
+			reason:   "Cross-file subsystem flow query benefits from component path hints",
+		},
+		{
+			name:     "indexing pipeline query - should decompose",
+			query:    "indexing pipeline scanner chunker embedder metadata store",
+			expected: true,
+			reason:   "Pipeline query spans multiple implementation components",
+		},
+		{
+			name:     "impact analysis query - should decompose",
+			query:    "what is affected by changing symbol extraction",
+			expected: true,
+			reason:   "Impact queries need owner and dependent implementation hints",
+		},
+		{
+			name:     "retry error handling query - should decompose",
+			query:    "error handling retry",
+			expected: true,
+			reason:   "Retry/error handling is a stable implementation subsystem",
+		},
 
 		// Should NOT decompose: specific identifiers
 		{
@@ -166,6 +190,34 @@ func TestDecompose(t *testing.T) {
 			query:          "How does RRF fusion work",
 			minSubQueries:  2,
 			mustContain:    []string{"RRF", "fusion"}, // Key terms extracted
+			mustNotContain: []string{},
+		},
+		{
+			name:           "cross-file flow query",
+			query:          "search request flows from MCP handler through engine to stores",
+			minSubQueries:  6,
+			mustContain:    []string{"internal/mcp/server.go", "internal/search/engine.go", "internal/store/sqlite_bm25.go"},
+			mustNotContain: []string{},
+		},
+		{
+			name:           "indexing pipeline query",
+			query:          "indexing pipeline scanner chunker embedder metadata store",
+			minSubQueries:  6,
+			mustContain:    []string{"internal/index/runner.go", "internal/scanner/scanner.go", "internal/chunk/code_chunker.go"},
+			mustNotContain: []string{},
+		},
+		{
+			name:           "impact symbol extraction query",
+			query:          "what is affected by changing symbol extraction",
+			minSubQueries:  4,
+			mustContain:    []string{"internal/chunk/extractor.go", "internal/chunk/parser.go", "SymbolExtractor"},
+			mustNotContain: []string{},
+		},
+		{
+			name:           "retry error handling query",
+			query:          "error handling retry",
+			minSubQueries:  4,
+			mustContain:    []string{"internal/errors/retry.go", "internal/embed/retry.go", "Retry"},
 			mustNotContain: []string{},
 		},
 		{

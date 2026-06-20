@@ -83,16 +83,393 @@ search:
 	}
 
 	assert.Equal(t, 2, byKind[EdgeKindFileDeclaresPackage])
-	assert.Equal(t, 2, byKind[EdgeKindPackageImports])
+	assert.Equal(t, 2, byKind[EdgeKindFileImports])
 	assert.Equal(t, 1, byKind[EdgeKindFileDefinesSymbol])
 	assert.Equal(t, 1, byKind[EdgeKindSymbolHasChunk])
 	assert.GreaterOrEqual(t, byKind[EdgeKindFileDefinesConfigKey], 3)
 	assert.Equal(t, 1, byKind[EdgeKindTestCoversImplementation])
-	assert.Equal(t, 2, byKind[EdgeKindDocMentionsPath])
+	assert.Equal(t, 2, byKind[EdgeKindDocMentionsFile])
 
 	assertEdgeEvidence(t, edges, EdgeKindTestCoversImplementation, true, ConfidenceMedium)
-	assertEdgeEvidence(t, edges, EdgeKindDocMentionsPath, true, ConfidenceMedium)
-	assertEdgeEvidence(t, edges, EdgeKindFileDeclaresPackage, false, ConfidenceHigh)
+	assertEdgeEvidence(t, edges, EdgeKindDocMentionsFile, false, ConfidenceMedium)
+	assertEdgeEvidence(t, edges, EdgeKindFileDeclaresPackage, false, ConfidenceExact)
+}
+
+func TestConfidenceLabelFor_UsesStableADRBands(t *testing.T) {
+	tests := []struct {
+		name       string
+		confidence float64
+		want       ConfidenceLabel
+	}{
+		{name: "exact", confidence: 1.0, want: ConfidenceExact},
+		{name: "high boundary", confidence: 0.9, want: ConfidenceHigh},
+		{name: "medium below high", confidence: 0.89, want: ConfidenceMedium},
+		{name: "medium boundary", confidence: 0.7, want: ConfidenceMedium},
+		{name: "low below medium", confidence: 0.69, want: ConfidenceLow},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, confidenceLabelFor(tt.confidence))
+		})
+	}
+}
+
+func TestCheapExtractor_ExtractsADR041CoreEdgeSet(t *testing.T) {
+	ctx := context.Background()
+	repo := newTestSQLiteRepository(t)
+
+	files := []SourceFile{
+		{
+			Path:     "internal/graph/sample.go",
+			Language: "go",
+			Content: []byte(`package graph
+
+import (
+	"context"
+	"fmt"
+)
+
+func Build() {}
+`),
+			Chunks: []SourceChunk{{
+				ID:        "chunk-go-build",
+				FilePath:  "internal/graph/sample.go",
+				Language:  "go",
+				StartLine: 8,
+				EndLine:   8,
+				Symbols: []SourceSymbol{{
+					Name:      "Build",
+					Kind:      "function",
+					StartLine: 8,
+					EndLine:   8,
+					Signature: "func Build()",
+				}},
+			}},
+		},
+		{
+			Path:     "internal/graph/sample_test.go",
+			Language: "go",
+			Content:  []byte("package graph\n\nfunc TestBuild(t *testing.T) {}\n"),
+		},
+		{
+			Path:     "web/component.tsx",
+			Language: "typescript",
+			Content:  []byte("import React from 'react';\nimport { helper } from './helper';\nexport function Component() { return helper(); }\n"),
+		},
+		{
+			Path:     "scripts/tool.js",
+			Language: "javascript",
+			Content:  []byte("const fs = require('fs');\nexport { run } from './run.js';\n"),
+		},
+		{
+			Path:     "pkg/service.py",
+			Language: "python",
+			Content:  []byte("import os\nfrom pkg.helpers import value\n\ndef run():\n    return value\n"),
+		},
+		{
+			Path:        ".amanmcp.yaml",
+			Language:    "yaml",
+			ContentType: SourceContentTypeConfig,
+			Content: []byte(`embedder:
+  provider: ollama
+search:
+  limit: 10
+`),
+		},
+		{
+			Path:        "docs/graph.md",
+			Language:    "markdown",
+			ContentType: SourceContentTypeMarkdown,
+			Content:     []byte("See [`sample`](../internal/graph/sample.go), `Build`, and `embedder.provider`.\n"),
+		},
+	}
+
+	require.NoError(t, IndexCheapEdges(ctx, repo, "project-1", files, CheapExtractorOptions{
+		Now:        fixedGraphTime,
+		StaleAfter: 24 * time.Hour,
+	}))
+
+	nodes, err := repo.ListNodes(ctx, NodeQuery{ProjectID: "project-1"})
+	require.NoError(t, err)
+	primaryKindsByPath := map[string][]NodeKind{}
+	for _, node := range nodes {
+		switch node.Kind {
+		case NodeKindFile, NodeKindTestFile, NodeKindDoc, NodeKindConfigFile:
+			primaryKindsByPath[node.SourcePath] = append(primaryKindsByPath[node.SourcePath], node.Kind)
+		}
+	}
+	assert.Equal(t, []NodeKind{NodeKindFile}, primaryKindsByPath["internal/graph/sample.go"])
+	assert.Equal(t, []NodeKind{NodeKindTestFile}, primaryKindsByPath["internal/graph/sample_test.go"])
+	assert.Equal(t, []NodeKind{NodeKindFile}, primaryKindsByPath["web/component.tsx"])
+	assert.Equal(t, []NodeKind{NodeKindFile}, primaryKindsByPath["scripts/tool.js"])
+	assert.Equal(t, []NodeKind{NodeKindFile}, primaryKindsByPath["pkg/service.py"])
+	assert.Equal(t, []NodeKind{NodeKindConfigFile}, primaryKindsByPath[".amanmcp.yaml"])
+	assert.Equal(t, []NodeKind{NodeKindDoc}, primaryKindsByPath["docs/graph.md"])
+
+	edges, err := repo.ListEdges(ctx, EdgeQuery{ProjectID: "project-1"})
+	require.NoError(t, err)
+	byKind := edgeCountByKind(edges)
+
+	assert.Equal(t, len(files), byKind[EdgeKindProjectContainsFile])
+	assert.Equal(t, 2, byKind[EdgeKindFileDeclaresPackage])
+	assert.GreaterOrEqual(t, byKind[EdgeKindFileImports], 8)
+	assert.Equal(t, 1, byKind[EdgeKindFileDefinesSymbol])
+	assert.Equal(t, 1, byKind[EdgeKindSymbolHasChunk])
+	assert.GreaterOrEqual(t, byKind[EdgeKindFileDefinesConfigKey], 3)
+	assert.Equal(t, 1, byKind[EdgeKindTestCoversImplementation])
+	assert.Equal(t, 1, byKind[EdgeKindDocMentionsFile])
+	assert.Equal(t, 1, byKind[EdgeKindDocMentionsSymbol])
+	assert.Equal(t, 1, byKind[EdgeKindDocMentionsConfigKey])
+	assert.Zero(t, byKind[EdgeKindPackageImports], "package_imports must not be the Sprint 19 import acceptance signal")
+	assert.Zero(t, byKind[EdgeKindDocMentionsPath], "doc_mentions_path must not be the Sprint 19 doc acceptance signal")
+
+	assertEdgeEvidence(t, edges, EdgeKindProjectContainsFile, false, ConfidenceExact)
+	assertEdgeEvidence(t, edges, EdgeKindFileImports, false, ConfidenceHigh)
+	assertEdgeEvidence(t, edges, EdgeKindFileDefinesSymbol, false, ConfidenceHigh)
+	assertEdgeEvidence(t, edges, EdgeKindSymbolHasChunk, false, ConfidenceExact)
+	assertEdgeEvidence(t, edges, EdgeKindDocMentionsFile, false, ConfidenceHigh)
+	assertEdgeEvidence(t, edges, EdgeKindDocMentionsSymbol, true, ConfidenceMedium)
+	assertEdgeEvidence(t, edges, EdgeKindDocMentionsConfigKey, true, ConfidenceMedium)
+	assertEveryEdgeHasSourceRange(t, edges)
+}
+
+func TestCheapExtractor_TestImplementationEdgesAreLanguageAwareAndConservative(t *testing.T) {
+	ctx := context.Background()
+	repo := newTestSQLiteRepository(t)
+	files := []SourceFile{
+		{Path: "pkg/math.go", Language: "go", Content: []byte("package pkg\n")},
+		{Path: "pkg/math_test.go", Language: "go", Content: []byte("package pkg\n")},
+		{Path: "src/user.py", Language: "python", Content: []byte("def load_user():\n    return None\n")},
+		{Path: "tests/test_user.py", Language: "python", Content: []byte("from src.user import load_user\n")},
+		{Path: "web/Button.tsx", Language: "typescript", Content: []byte("export function Button() { return null }\n")},
+		{Path: "web/Button.test.tsx", Language: "typescript", Content: []byte("import { Button } from './Button'\n")},
+		{Path: "ui/Card.jsx", Language: "javascript", Content: []byte("export function Card() { return null }\n")},
+		{Path: "ui/Card.test.jsx", Language: "javascript", Content: []byte("import { Card } from './Card'\n")},
+		{Path: "lib/format.js", Language: "javascript", Content: []byte("exports.format = () => ''\n")},
+		{Path: "lib/__tests__/format.spec.js", Language: "javascript", Content: []byte("const { format } = require('../format')\n")},
+		{Path: "lib/__tests__/orphan.spec.js", Language: "javascript", Content: []byte("test('nothing', () => {})\n")},
+	}
+
+	require.NoError(t, IndexCheapEdges(ctx, repo, "project-1", files, CheapExtractorOptions{Now: fixedGraphTime}))
+
+	edges, err := repo.ListEdges(ctx, EdgeQuery{ProjectID: "project-1", Kind: EdgeKindTestCoversImplementation})
+	require.NoError(t, err)
+	require.Len(t, edges, 5)
+	byConfidence := map[ConfidenceLabel]int{}
+	for _, edge := range edges {
+		byConfidence[edge.ConfidenceLabel]++
+		assert.True(t, edge.Evidence.Heuristic)
+		assert.NotEmpty(t, edge.Evidence.Method)
+		assert.NotContains(t, edge.SourcePath, "orphan")
+	}
+	assert.Equal(t, 4, byConfidence[ConfidenceMedium])
+	assert.Equal(t, 1, byConfidence[ConfidenceLow])
+
+	nodes, err := repo.ListNodes(ctx, NodeQuery{ProjectID: "project-1"})
+	require.NoError(t, err)
+	byID := nodesByID(nodes)
+	for _, edge := range edges {
+		assert.Equal(t, NodeKindTestFile, byID[edge.FromNodeID].Kind)
+		assert.Equal(t, NodeKindFile, byID[edge.ToNodeID].Kind)
+	}
+}
+
+func TestCheapExtractor_TestImplementationEdgesAreCappedAndDeterministic(t *testing.T) {
+	ctx := context.Background()
+	repo := newTestSQLiteRepository(t)
+	files := []SourceFile{
+		{Path: "tests/suite.spec.js", Language: "javascript", Content: []byte("require('../src/a')\nrequire('../src/b')\nrequire('../src/c')\nrequire('../src/d')\nrequire('../src/e')\nrequire('../src/f')\n")},
+	}
+	for _, name := range []string{"a", "b", "c", "d", "e", "f"} {
+		files = append(files, SourceFile{
+			Path:     "src/" + name + ".js",
+			Language: "javascript",
+			Content:  []byte("exports." + name + " = () => ''\n"),
+		})
+	}
+
+	require.NoError(t, IndexCheapEdges(ctx, repo, "project-1", files, CheapExtractorOptions{Now: fixedGraphTime}))
+
+	edges, err := repo.ListEdges(ctx, EdgeQuery{ProjectID: "project-1", Kind: EdgeKindTestCoversImplementation})
+	require.NoError(t, err)
+	require.Len(t, edges, maxTestImplementationTargets)
+	got := make([]string, 0, len(edges))
+	for _, edge := range edges {
+		got = append(got, edge.ToNodeID)
+		assert.Equal(t, ConfidenceLow, edge.ConfidenceLabel)
+	}
+	assert.Equal(t, append([]string(nil), got...), sortedStrings(got), "test edge targets must be emitted in deterministic order")
+}
+
+func TestCheapExtractor_TestImplementationImportDerivedEdgesUseLowConfidence(t *testing.T) {
+	ctx := context.Background()
+	repo := newTestSQLiteRepository(t)
+	files := []SourceFile{
+		{Path: "lib/format.js", Language: "javascript", Content: []byte("exports.format = () => ''\n")},
+		{Path: "lib/__tests__/formatter.spec.js", Language: "javascript", Content: []byte("const { format } = require('../format')\n")},
+	}
+
+	require.NoError(t, IndexCheapEdges(ctx, repo, "project-1", files, CheapExtractorOptions{Now: fixedGraphTime}))
+
+	edges, err := repo.ListEdges(ctx, EdgeQuery{ProjectID: "project-1", Kind: EdgeKindTestCoversImplementation})
+	require.NoError(t, err)
+	require.Len(t, edges, 1)
+	assert.Equal(t, ConfidenceLow, edges[0].ConfidenceLabel)
+	assert.Equal(t, "test_import_reference", edges[0].Evidence.Method)
+	assert.True(t, edges[0].Evidence.Heuristic)
+}
+
+func TestCheapExtractor_DocAndConfigEdgesUseCanonicalTargets(t *testing.T) {
+	ctx := context.Background()
+	repo := newTestSQLiteRepository(t)
+	files := []SourceFile{
+		{
+			Path:     "cmd/root.go",
+			Language: "go",
+			Content:  []byte("package cmd\nfunc Execute() {}\n"),
+			Chunks: []SourceChunk{{
+				ID:        "chunk-execute",
+				FilePath:  "cmd/root.go",
+				Language:  "go",
+				StartLine: 2,
+				EndLine:   2,
+				Symbols: []SourceSymbol{{
+					Name:      "Execute",
+					Kind:      "function",
+					StartLine: 2,
+					EndLine:   2,
+					Signature: "func Execute()",
+				}},
+			}},
+		},
+		{Path: ".env", Language: "dotenv", ContentType: SourceContentTypeConfig, Content: []byte("AMAN_PROVIDER=ollama\nNESTED_VALUE='safe'\n")},
+		{Path: "app.properties", Language: "properties", ContentType: SourceContentTypeConfig, Content: []byte("search.limit=10\nsearch.mode=hybrid\n")},
+		{Path: "settings.json", Language: "json", ContentType: SourceContentTypeConfig, Content: []byte(`{"server":{"host":"localhost"}}`)},
+		{Path: "pyproject.toml", Language: "toml", ContentType: SourceContentTypeConfig, Content: []byte("[tool.aman]\nmode = \"static\"\n")},
+		{
+			Path:        "docs/root.md",
+			Language:    "markdown",
+			ContentType: SourceContentTypeMarkdown,
+			Content:     []byte("Use [root](../cmd/root.go), call `Execute`, configure `AMAN_PROVIDER`, and ignore `missing.symbol`.\n"),
+		},
+	}
+
+	require.NoError(t, IndexCheapEdges(ctx, repo, "project-1", files, CheapExtractorOptions{Now: fixedGraphTime}))
+
+	edges, err := repo.ListEdges(ctx, EdgeQuery{ProjectID: "project-1"})
+	require.NoError(t, err)
+	byKind := edgeCountByKind(edges)
+	assert.Equal(t, 1, byKind[EdgeKindDocMentionsFile])
+	assert.Equal(t, 1, byKind[EdgeKindDocMentionsSymbol])
+	assert.Equal(t, 1, byKind[EdgeKindDocMentionsConfigKey])
+	assert.GreaterOrEqual(t, byKind[EdgeKindFileDefinesConfigKey], 8)
+	assert.Zero(t, byKind[EdgeKindDocMentionsPath])
+}
+
+func TestCheapExtractor_MalformedConfigRecordsExtractorFailureAndKeepsOtherResults(t *testing.T) {
+	ctx := context.Background()
+	repo := newTestSQLiteRepository(t)
+	files := []SourceFile{
+		{Path: "good.yaml", Language: "yaml", ContentType: SourceContentTypeConfig, Content: []byte("server:\n  port: 8080\n")},
+		{Path: "bad.yaml", Language: "yaml", ContentType: SourceContentTypeConfig, Content: []byte(":\n")},
+	}
+
+	summary, err := UpdateCheapEdgesWithSummary(ctx, repo, "project-1", files, CheapExtractorOptions{Now: fixedGraphTime})
+	require.NoError(t, err)
+	assert.True(t, summary.HadErrors)
+
+	goodEdges, err := repo.ListEdges(ctx, EdgeQuery{ProjectID: "project-1", SourcePath: "good.yaml", Kind: EdgeKindFileDefinesConfigKey})
+	require.NoError(t, err)
+	require.NotEmpty(t, goodEdges)
+
+	snapshot, err := repo.Snapshot(ctx, StatusOptions{ProjectID: "project-1", Now: fixedGraphTime()})
+	require.NoError(t, err)
+	var badRun *ExtractorSummary
+	for i := range snapshot.Extractors {
+		if snapshot.Extractors[i].SourcePath == "bad.yaml" {
+			badRun = &snapshot.Extractors[i]
+			break
+		}
+	}
+	require.NotNil(t, badRun)
+	assert.Equal(t, ExtractorStatusFailed, badRun.Status)
+	assert.Equal(t, 1, badRun.ErrorCount)
+	assert.Contains(t, badRun.Message, "parse config bad.yaml")
+}
+
+func TestCheapExtractor_DocMentionsSkipAmbiguousSymbolNames(t *testing.T) {
+	ctx := context.Background()
+	repo := newTestSQLiteRepository(t)
+	files := []SourceFile{
+		{
+			Path:     "internal/a/close.go",
+			Language: "go",
+			Content:  []byte("package a\nfunc Close() {}\n"),
+			Chunks: []SourceChunk{{
+				ID:        "chunk-close-a",
+				FilePath:  "internal/a/close.go",
+				Language:  "go",
+				StartLine: 2,
+				EndLine:   2,
+				Symbols: []SourceSymbol{{
+					Name:      "Close",
+					Kind:      "function",
+					StartLine: 2,
+					EndLine:   2,
+					Signature: "func Close()",
+				}},
+			}},
+		},
+		{
+			Path:     "internal/b/close.go",
+			Language: "go",
+			Content:  []byte("package b\nfunc Close() {}\n"),
+			Chunks: []SourceChunk{{
+				ID:        "chunk-close-b",
+				FilePath:  "internal/b/close.go",
+				Language:  "go",
+				StartLine: 2,
+				EndLine:   2,
+				Symbols: []SourceSymbol{{
+					Name:      "Close",
+					Kind:      "function",
+					StartLine: 2,
+					EndLine:   2,
+					Signature: "func Close()",
+				}},
+			}},
+		},
+		{
+			Path:        "docs/close.md",
+			Language:    "markdown",
+			ContentType: SourceContentTypeMarkdown,
+			Content:     []byte("The `Close` hook is intentionally ambiguous here.\n"),
+		},
+	}
+
+	require.NoError(t, IndexCheapEdges(ctx, repo, "project-1", files, CheapExtractorOptions{Now: fixedGraphTime}))
+
+	edges, err := repo.ListEdges(ctx, EdgeQuery{ProjectID: "project-1", SourcePath: "docs/close.md", Kind: EdgeKindDocMentionsSymbol})
+	require.NoError(t, err)
+	assert.Empty(t, edges)
+}
+
+func TestCheapExtractor_GoPackageNodesAreScopedByDirectory(t *testing.T) {
+	ctx := context.Background()
+	repo := newTestSQLiteRepository(t)
+	files := []SourceFile{
+		{Path: "internal/util/a.go", Language: "go", Content: []byte("package util\n")},
+		{Path: "pkg/util/b.go", Language: "go", Content: []byte("package util\n")},
+	}
+
+	require.NoError(t, IndexCheapEdges(ctx, repo, "project-1", files, CheapExtractorOptions{Now: fixedGraphTime}))
+
+	nodes, err := repo.ListNodes(ctx, NodeQuery{ProjectID: "project-1", Kind: NodeKindPackage})
+	require.NoError(t, err)
+	require.Len(t, nodes, 2)
+	keys := []string{nodes[0].Key, nodes[1].Key}
+	assert.ElementsMatch(t, []string{"internal/util#util", "pkg/util#util"}, keys)
 }
 
 func TestCheapExtractor_WeakEvidenceDoesNotCreateFalsePreciseEdges(t *testing.T) {
@@ -122,7 +499,7 @@ func TestCheapExtractor_WeakEvidenceDoesNotCreateFalsePreciseEdges(t *testing.T)
 	require.NoError(t, err)
 	for _, edge := range edges {
 		assert.NotEqual(t, EdgeKindTestCoversImplementation, edge.Kind)
-		assert.NotEqual(t, EdgeKindDocMentionsPath, edge.Kind)
+		assert.NotEqual(t, EdgeKindDocMentionsFile, edge.Kind)
 	}
 }
 
@@ -142,9 +519,9 @@ func TestCheapExtractor_DocMentionsRequirePathContext(t *testing.T) {
 		})
 	}
 
-	assert.Equal(t, []knownPathMention{{Path: "cmd/run.go", Line: 1}}, mentionedKnownPaths("see `cmd/run.go` for the entry point", pathSet, "docs/x.md"))
-	assert.Equal(t, []knownPathMention{{Path: "cmd/run.go", Line: 2}}, mentionedKnownPaths("see:\ncmd/run.go\n", pathSet, "docs/x.md"))
-	assert.Equal(t, []knownPathMention{{Path: "cmd/run.go", Line: 1}}, mentionedKnownPaths("[entry](cmd/run.go \"source\")", pathSet, "docs/x.md"))
+	assertKnownPathMentions(t, []knownPathMention{{Path: "cmd/run.go", Line: 1}}, mentionedKnownPaths("see `cmd/run.go` for the entry point", pathSet, "docs/x.md"))
+	assertKnownPathMentions(t, []knownPathMention{{Path: "cmd/run.go", Line: 2}}, mentionedKnownPaths("see:\ncmd/run.go\n", pathSet, "docs/x.md"))
+	assertKnownPathMentions(t, []knownPathMention{{Path: "cmd/run.go", Line: 1}}, mentionedKnownPaths("[entry](cmd/run.go \"source\")", pathSet, "docs/x.md"))
 }
 
 func TestCheapExtractor_RebuildIsStableAndRemovesStaleSourceEdges(t *testing.T) {
@@ -257,14 +634,49 @@ func sortedEdgeKeys(t *testing.T, ctx context.Context, repo Repository) []string
 	return keys
 }
 
+func sortedStrings(values []string) []string {
+	out := append([]string(nil), values...)
+	sort.Strings(out)
+	return out
+}
+
 func assertEdgeEvidence(t *testing.T, edges []Edge, kind EdgeKind, heuristic bool, label ConfidenceLabel) {
 	t.Helper()
 	for _, edge := range edges {
 		if edge.Kind == kind {
 			assert.Equal(t, heuristic, edge.Evidence.Heuristic)
 			assert.Equal(t, label, edge.ConfidenceLabel)
+			assert.NotEmpty(t, edge.Evidence.SourcePath)
+			assert.NotZero(t, edge.Evidence.LineStart)
+			assert.NotZero(t, edge.Evidence.LineEnd)
 			return
 		}
 	}
 	require.Failf(t, "edge not found", "kind %s not found", kind)
+}
+
+func edgeCountByKind(edges []Edge) map[EdgeKind]int {
+	counts := make(map[EdgeKind]int)
+	for _, edge := range edges {
+		counts[edge.Kind]++
+	}
+	return counts
+}
+
+func assertEveryEdgeHasSourceRange(t *testing.T, edges []Edge) {
+	t.Helper()
+	for _, edge := range edges {
+		assert.NotEmpty(t, edge.Evidence.SourcePath, "edge %s", edge.NaturalKey())
+		assert.Greater(t, edge.Evidence.LineStart, 0, "edge %s", edge.NaturalKey())
+		assert.GreaterOrEqual(t, edge.Evidence.LineEnd, edge.Evidence.LineStart, "edge %s", edge.NaturalKey())
+	}
+}
+
+func assertKnownPathMentions(t *testing.T, want, got []knownPathMention) {
+	t.Helper()
+	require.Len(t, got, len(want))
+	for i := range want {
+		assert.Equal(t, want[i].Path, got[i].Path)
+		assert.Equal(t, want[i].Line, got[i].Line)
+	}
 }

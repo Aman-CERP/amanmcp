@@ -49,7 +49,7 @@ With AmanMCP:    Claude searches YOUR code and gives specific answers
 
 - **Hybrid Search** - Combines keyword (BM25) + semantic (vector) search
 - **AST Chunking** - Uses tree-sitter for intelligent code splitting
-- **Multi-Language** - Go, TypeScript, JavaScript, Python, HTML, CSS
+- **Language Tiers** - Parser-backed Go, TypeScript, JavaScript, and Python; detected line fallback for additional code languages
 - **Auto-Discovery** - Detects project type and structure automatically
 - **Incremental Updates** - Only re-indexes changed files
 - **Claude Code Integration** - Native MCP protocol support
@@ -237,7 +237,7 @@ source ~/.zshrc  # or restart your terminal
 
 **Option C: Build from Source (Developers)**
 
-Requires Go 1.25.9+ and C toolchain:
+Requires Go 1.26.4+ and C toolchain:
 
 ```bash
 git clone https://github.com/Aman-CERP/amanmcp
@@ -280,7 +280,7 @@ amanmcp version
 **Expected output:**
 
 ```
-amanmcp 0.10.2 (commit: abc1234, built: 2026-01-16T00:00:00Z, go: go1.25.9)
+amanmcp 0.10.2 (commit: abc1234, built: 2026-01-16T00:00:00Z, go: go1.26.4)
 ```
 
 If you see `zsh: killed`, see the [Troubleshooting](#troubleshooting) section below.

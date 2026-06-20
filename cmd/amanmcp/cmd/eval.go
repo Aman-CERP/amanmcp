@@ -97,16 +97,50 @@ func runEvalSearch(cmd *cobra.Command, opts eval.Options) error {
 		}
 	}
 
-	report, err := newEvalSearchRunner(root).Run(cmd.Context(), opts)
-	if err != nil {
-		return err
+	report, runErr := newEvalSearchRunner(root).Run(cmd.Context(), opts)
+	if report != nil {
+		writeEvalSearchSummary(cmd, report)
 	}
-
-	if report.OutputPaths.JSON != "" {
-		fmt.Fprintf(cmd.OutOrStdout(), "JSON report: %s\n", report.OutputPaths.JSON)
-	}
-	if report.OutputPaths.Markdown != "" {
-		fmt.Fprintf(cmd.OutOrStdout(), "Markdown report: %s\n", report.OutputPaths.Markdown)
+	if runErr != nil {
+		return runErr
 	}
 	return nil
+}
+
+func writeEvalSearchSummary(cmd *cobra.Command, report *eval.Report) {
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "Eval summary: %d queries, pass rate %.2f, regressed: %t\n",
+		report.Summary.QueryCount,
+		report.Summary.PassRate,
+		report.BaselineComparison.Regressed,
+	)
+	if regressions := regressedDimensions(report.DimensionRegressions); len(regressions) > 0 {
+		fmt.Fprintln(out, "Dimension regressions:")
+		for _, regression := range regressions {
+			fmt.Fprintf(out, "- %s/%s %s delta %.2f (baseline %.2f, current %.2f)\n",
+				regression.Dimension,
+				regression.Group,
+				regression.Metric,
+				regression.Delta,
+				regression.BaselineValue,
+				regression.CurrentValue,
+			)
+		}
+	}
+	if report.OutputPaths.JSON != "" {
+		fmt.Fprintf(out, "JSON report: %s\n", report.OutputPaths.JSON)
+	}
+	if report.OutputPaths.Markdown != "" {
+		fmt.Fprintf(out, "Markdown report: %s\n", report.OutputPaths.Markdown)
+	}
+}
+
+func regressedDimensions(regressions []eval.DimensionRegression) []eval.DimensionRegression {
+	out := make([]eval.DimensionRegression, 0, len(regressions))
+	for _, regression := range regressions {
+		if regression.Regressed {
+			out = append(out, regression)
+		}
+	}
+	return out
 }

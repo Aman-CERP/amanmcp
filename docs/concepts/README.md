@@ -16,6 +16,7 @@ This section explains the core concepts and architecture behind AmanMCP. Read th
 | [Vector Search](vector-search/) | Embeddings, HNSW index, semantic similarity | [Overview](vector-search/overview.md) |
 | [Query Processing](query-processing.md) | How queries are classified and weighted | Single doc |
 | [Two-Stage Retrieval](two-stage-retrieval.md) | Bi-encoders vs cross-encoders, reranking | Single doc |
+| [Language Support Tiers](language-tiers.md) | Parser-backed vs fallback language support | Single doc |
 
 ### Infrastructure Concepts
 
@@ -182,6 +183,7 @@ flowchart LR
 | **Vector Search** | Text → numbers (embeddings) → find similar meanings |
 | **Query Processing** | Classify query type → adjust search weights |
 | **Two-Stage Retrieval** | Fast recall with embeddings, precise rerank with cross-encoder |
+| **Language Support Tiers** | Per-result labels for parser-backed, line-fallback, and plain-text support |
 | **Indexing Pipeline** | Files → parse → chunk → embed → store |
 | **Tree-sitter** | Parse code into AST, extract complete functions |
 | **Caching** | Embed once, search instantly |

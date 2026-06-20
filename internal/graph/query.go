@@ -34,7 +34,7 @@ type QueryService struct {
 // NewQueryService constructs a graph query service.
 func NewQueryService(repo Repository, opts QueryServiceOptions) *QueryService {
 	if opts.StaleAfter <= 0 {
-		opts.StaleAfter = 24 * time.Hour
+		opts.StaleAfter = DefaultStaleAfter
 	}
 	if opts.Now == nil {
 		opts.Now = func() time.Time { return time.Now().UTC() }
@@ -69,10 +69,11 @@ type QueryServiceOptions struct {
 
 // QueryRequest is the input contract for graph relationship queries.
 type QueryRequest struct {
-	ProjectID string
-	Mode      string
-	Query     string
-	Limit     int
+	ProjectID    string
+	Mode         string
+	Query        string
+	Limit        int
+	IncludeStale bool
 }
 
 // QueryResponse is the compact graph evidence envelope.
@@ -97,6 +98,7 @@ type QueryResult struct {
 	ConfidenceLabel ConfidenceLabel `json:"confidence_label"`
 	EvidenceMethod  string          `json:"evidence_method"`
 	EvidenceSnippet string          `json:"evidence_snippet,omitempty"`
+	Stale           bool            `json:"stale,omitempty"`
 	GraphPath       []string        `json:"graph_path"`
 }
 
@@ -143,7 +145,7 @@ func (s *QueryService) Query(ctx context.Context, req QueryRequest) (QueryRespon
 	if err != nil {
 		return QueryResponse{}, fmt.Errorf("list graph nodes: %w", err)
 	}
-	edges, err := s.repo.ListEdges(ctx, EdgeQuery{ProjectID: req.ProjectID})
+	edges, err := s.repo.ListEdges(ctx, EdgeQuery{ProjectID: req.ProjectID, ExcludeStale: !req.IncludeStale})
 	if err != nil {
 		return QueryResponse{}, fmt.Errorf("list graph edges: %w", err)
 	}
@@ -274,6 +276,7 @@ func relatedResults(nodes map[string]Node, edges []Edge, seeds []Node, mode stri
 			ConfidenceLabel: edge.ConfidenceLabel,
 			EvidenceMethod:  edge.Evidence.Method,
 			EvidenceSnippet: safeEvidenceSnippet(edge.Evidence.Snippet),
+			Stale:           edge.Stale,
 			GraphPath:       []string{seed.ID, string(edge.Kind), related.ID},
 		})
 	}
@@ -302,7 +305,7 @@ func roleFor(kind EdgeKind, mode string) string {
 		switch kind {
 		case EdgeKindTestCoversImplementation:
 			return "test_or_implementation"
-		case EdgeKindDocMentionsPath:
+		case EdgeKindDocMentionsPath, EdgeKindDocMentionsFile, EdgeKindDocMentionsSymbol, EdgeKindDocMentionsConfigKey:
 			return "documented_reference"
 		default:
 			return "related"

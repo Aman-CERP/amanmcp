@@ -25,6 +25,16 @@ type SQLiteRepository struct {
 	schemaCurrent bool
 }
 
+type graphMigration struct {
+	version     int
+	description string
+	apply       func(context.Context, *sql.Tx) error
+}
+
+func graphRecoveryHint() string {
+	return "run `amanmcp index --force <project-path>` or remove `.amanmcp/graph.db` and rerun `amanmcp index <project-path>`"
+}
+
 // OpenSQLiteRepository opens or creates a graph repository at dbPath.
 func OpenSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
@@ -47,6 +57,11 @@ func OpenSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 }
 
 func (r *SQLiteRepository) initSchema() error {
+	ctx := context.Background()
+	if err := r.checkDatabaseIntegrity(ctx); err != nil {
+		return err
+	}
+
 	pragmas := []string{
 		"PRAGMA foreign_keys = ON",
 		"PRAGMA journal_mode = WAL",
@@ -59,7 +74,96 @@ func (r *SQLiteRepository) initSchema() error {
 		}
 	}
 
-	schema := `
+	version, hasVersionTable, err := r.detectSchemaVersion(ctx)
+	if err != nil {
+		return err
+	}
+	if hasVersionTable && version > SchemaVersion {
+		return fmt.Errorf("graph database was created by a newer AmanMCP schema version %d; this binary supports version %d. To rebuild the disposable graph overlay, %s", version, SchemaVersion, graphRecoveryHint())
+	}
+	if err := r.applySchemaMigrations(ctx, version); err != nil {
+		return err
+	}
+	if err := r.validateSchemaContract(ctx); err != nil {
+		return err
+	}
+	r.schemaMu.Lock()
+	r.schemaCurrent = true
+	r.schemaMu.Unlock()
+	return nil
+}
+
+func (r *SQLiteRepository) checkDatabaseIntegrity(ctx context.Context) error {
+	var result string
+	if err := r.db.QueryRowContext(ctx, `PRAGMA quick_check`).Scan(&result); err != nil {
+		return fmt.Errorf("corrupt graph database: %s: %w", graphRecoveryHint(), err)
+	}
+	if result != "ok" {
+		return fmt.Errorf("corrupt graph database: PRAGMA quick_check returned %q; %s", result, graphRecoveryHint())
+	}
+	return nil
+}
+
+func (r *SQLiteRepository) detectSchemaVersion(ctx context.Context) (int, bool, error) {
+	var tableName string
+	err := r.db.QueryRowContext(ctx,
+		`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'graph_schema_version'`).Scan(&tableName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("detect graph schema version table: %w", err)
+	}
+
+	version, err := r.schemaVersion(ctx)
+	if err != nil {
+		return 0, true, err
+	}
+	if version == 0 {
+		return 0, true, fmt.Errorf("graph schema version is missing; %s", graphRecoveryHint())
+	}
+	return version, true, nil
+}
+
+func (r *SQLiteRepository) applySchemaMigrations(ctx context.Context, fromVersion int) error {
+	if fromVersion == SchemaVersion {
+		return nil
+	}
+	if fromVersion > SchemaVersion {
+		return fmt.Errorf("graph database was created by a newer AmanMCP schema version %d; this binary supports version %d. To rebuild the disposable graph overlay, %s", fromVersion, SchemaVersion, graphRecoveryHint())
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin graph schema migration: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, migration := range graphMigrations() {
+		if migration.version <= fromVersion {
+			continue
+		}
+		if migration.version > SchemaVersion {
+			break
+		}
+		if err := migration.apply(ctx, tx); err != nil {
+			return fmt.Errorf("apply graph schema migration %d (%s): %w", migration.version, migration.description, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit graph schema migration: %w", err)
+	}
+	return nil
+}
+
+func graphMigrations() []graphMigration {
+	return []graphMigration{
+		{
+			version:     1,
+			description: "initial graph overlay schema",
+			apply: func(ctx context.Context, tx *sql.Tx) error {
+				return execGraphSchemaMigration(ctx, tx, `
 CREATE TABLE IF NOT EXISTS graph_schema_version (
 	version INTEGER PRIMARY KEY,
 	applied_at TEXT NOT NULL
@@ -134,11 +238,212 @@ CREATE TABLE IF NOT EXISTS graph_extractor_runs (
 );
 
 INSERT OR IGNORE INTO graph_schema_version (version, applied_at) VALUES (1, CURRENT_TIMESTAMP);
-`
-	if _, err := r.db.Exec(schema); err != nil {
-		return fmt.Errorf("execute graph schema: %w", err)
+`)
+			},
+		},
+		{
+			version:     2,
+			description: "ADR-041 schema metadata, source versions, and lookup indexes",
+			apply: func(ctx context.Context, tx *sql.Tx) error {
+				if err := addColumnIfMissing(ctx, tx, "graph_schema_version", "description", "TEXT NOT NULL DEFAULT ''"); err != nil {
+					return err
+				}
+				if _, err := tx.ExecContext(ctx,
+					`UPDATE graph_schema_version SET description = ? WHERE version = 1 AND description = ''`,
+					"initial graph overlay schema"); err != nil {
+					return fmt.Errorf("backfill graph schema v1 description: %w", err)
+				}
+				if err := addColumnIfMissing(ctx, tx, "graph_edges", "source_version", "TEXT NOT NULL DEFAULT ''"); err != nil {
+					return err
+				}
+				if err := execGraphSchemaMigration(ctx, tx, `
+CREATE INDEX IF NOT EXISTS idx_graph_nodes_project_source_path ON graph_nodes(project_id, source_path);
+CREATE INDEX IF NOT EXISTS idx_graph_nodes_project_language ON graph_nodes(project_id, language);
+CREATE INDEX IF NOT EXISTS idx_graph_edges_project_from_node ON graph_edges(project_id, from_node_id);
+CREATE INDEX IF NOT EXISTS idx_graph_edges_project_to_node ON graph_edges(project_id, to_node_id);
+CREATE INDEX IF NOT EXISTS idx_graph_edges_project_source_path ON graph_edges(project_id, source_path);
+CREATE INDEX IF NOT EXISTS idx_graph_edges_project_extractor ON graph_edges(project_id, extractor);
+CREATE INDEX IF NOT EXISTS idx_graph_edges_project_stale ON graph_edges(project_id, stale);
+INSERT OR IGNORE INTO graph_schema_version (version, applied_at, description) VALUES (2, CURRENT_TIMESTAMP, 'ADR-041 schema metadata, source versions, and lookup indexes');
+`); err != nil {
+					return err
+				}
+				return nil
+			},
+		},
+		{
+			version:     3,
+			description: "separate full and incremental graph build metadata",
+			apply: func(ctx context.Context, tx *sql.Tx) error {
+				if err := execGraphSchemaMigration(ctx, tx, `
+CREATE TABLE IF NOT EXISTS graph_builds_v3 (
+	project_id TEXT NOT NULL,
+	build_kind TEXT NOT NULL DEFAULT 'full',
+	status TEXT NOT NULL,
+	started_at TEXT NOT NULL DEFAULT '',
+	completed_at TEXT NOT NULL DEFAULT '',
+	source_version TEXT NOT NULL DEFAULT '',
+	message TEXT NOT NULL DEFAULT '',
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY(project_id, build_kind)
+);
+INSERT OR REPLACE INTO graph_builds_v3 (
+	project_id, build_kind, status, started_at, completed_at, source_version, message, updated_at
+)
+SELECT project_id, 'full', status, started_at, completed_at, source_version, message, updated_at
+FROM graph_builds;
+DROP TABLE graph_builds;
+ALTER TABLE graph_builds_v3 RENAME TO graph_builds;
+INSERT OR IGNORE INTO graph_schema_version (version, applied_at, description) VALUES (3, CURRENT_TIMESTAMP, 'separate full and incremental graph build metadata');
+`); err != nil {
+					return err
+				}
+				return nil
+			},
+		},
+	}
+}
+
+func execGraphSchemaMigration(ctx context.Context, tx *sql.Tx, statement string) error {
+	if _, err := tx.ExecContext(ctx, statement); err != nil {
+		return fmt.Errorf("execute graph schema SQL: %w", err)
 	}
 	return nil
+}
+
+func addColumnIfMissing(ctx context.Context, tx *sql.Tx, table, column, definition string) error {
+	hasColumn, err := tableHasColumn(ctx, tx, table, column)
+	if err != nil {
+		return err
+	}
+	if hasColumn {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition)); err != nil {
+		return fmt.Errorf("add graph schema column %s.%s: %w", table, column, err)
+	}
+	return nil
+}
+
+func tableHasColumn(ctx context.Context, query interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, table, column string) (bool, error) {
+	rows, err := query.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return false, fmt.Errorf("inspect graph schema table %s: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, pk int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return false, fmt.Errorf("scan graph schema table %s: %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterate graph schema table %s: %w", table, err)
+	}
+	return false, nil
+}
+
+func (r *SQLiteRepository) validateSchemaContract(ctx context.Context) error {
+	version, err := r.schemaVersion(ctx)
+	if err != nil {
+		return err
+	}
+	if version != SchemaVersion {
+		return fmt.Errorf("graph schema version %d incompatible with binary version %d", version, SchemaVersion)
+	}
+
+	requiredColumns := map[string][]string{
+		"graph_schema_version": {"version", "applied_at", "description"},
+		"graph_nodes": {
+			"id", "project_id", "kind", "key", "source_path", "name", "language", "symbol_kind",
+			"start_line", "end_line", "metadata_json", "created_at", "updated_at",
+		},
+		"graph_edges": {
+			"id", "project_id", "kind", "from_node_id", "to_node_id", "extractor", "source_path",
+			"evidence_json", "confidence", "confidence_label", "stale", "source_version", "created_at", "updated_at",
+		},
+		"graph_builds": {
+			"project_id", "build_kind", "status", "started_at", "completed_at", "source_version", "message", "updated_at",
+		},
+		"graph_extractor_runs": {
+			"project_id", "extractor", "source_path", "status", "started_at", "completed_at",
+			"node_count", "edge_count", "warning_count", "error_count", "warnings_json", "errors_json", "updated_at",
+		},
+	}
+	for table, columns := range requiredColumns {
+		for _, column := range columns {
+			hasColumn, err := tableHasColumn(ctx, r.db, table, column)
+			if err != nil {
+				return err
+			}
+			if !hasColumn {
+				return fmt.Errorf("graph schema missing required column %s.%s; %s", table, column, graphRecoveryHint())
+			}
+		}
+	}
+
+	requiredIndexes := map[string][]string{
+		"graph_nodes": {
+			"idx_graph_nodes_project_kind",
+			"idx_graph_nodes_project_source_path",
+			"idx_graph_nodes_project_language",
+		},
+		"graph_edges": {
+			"idx_graph_edges_project_kind",
+			"idx_graph_edges_scope",
+			"idx_graph_edges_project_from_node",
+			"idx_graph_edges_project_to_node",
+			"idx_graph_edges_project_source_path",
+			"idx_graph_edges_project_extractor",
+			"idx_graph_edges_project_stale",
+		},
+	}
+	for table, indexes := range requiredIndexes {
+		for _, index := range indexes {
+			exists, err := indexExists(ctx, r.db, table, index)
+			if err != nil {
+				return err
+			}
+			if !exists {
+				return fmt.Errorf("graph schema missing required index %s on %s; %s", index, table, graphRecoveryHint())
+			}
+		}
+	}
+	return nil
+}
+
+func indexExists(ctx context.Context, query interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, table, index string) (bool, error) {
+	rows, err := query.QueryContext(ctx, `PRAGMA index_list(`+table+`)`)
+	if err != nil {
+		return false, fmt.Errorf("inspect graph schema indexes for %s: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var seq, unique, partial int
+		var name, origin string
+		if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+			return false, fmt.Errorf("scan graph schema indexes for %s: %w", table, err)
+		}
+		if name == index {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterate graph schema indexes for %s: %w", table, err)
+	}
+	return false, nil
 }
 
 // Close closes the underlying SQLite connection.
@@ -287,6 +592,60 @@ func (r *SQLiteRepository) ReplaceEdges(ctx context.Context, replacement EdgeRep
 	return nil
 }
 
+// MarkEdgesToSourceStale marks active edges that point at nodes owned by the
+// supplied source path. It preserves the edge for degraded graph explanations
+// while making stale evidence visible to status/query callers.
+func (r *SQLiteRepository) MarkEdgesToSourceStale(ctx context.Context, projectID, sourcePath string) error {
+	if projectID == "" {
+		return fmt.Errorf("project_id is required")
+	}
+	if sourcePath == "" {
+		return fmt.Errorf("source_path is required")
+	}
+	if err := r.ensureSchemaCurrent(ctx); err != nil {
+		return err
+	}
+	normalized := filepath.ToSlash(sourcePath)
+	if _, err := r.db.ExecContext(ctx, `
+UPDATE graph_edges
+SET stale = 1, updated_at = ?
+WHERE project_id = ?
+  AND stale = 0
+  AND to_node_id IN (
+    SELECT id FROM graph_nodes WHERE project_id = ? AND source_path = ?
+  )
+`, formatTime(time.Now().UTC()), projectID, projectID, normalized); err != nil {
+		return fmt.Errorf("mark graph inbound edges stale for %s: %w", normalized, err)
+	}
+	return nil
+}
+
+// PurgeStaleEdges deletes stale edges older than the supplied threshold.
+func (r *SQLiteRepository) PurgeStaleEdges(ctx context.Context, projectID string, olderThan time.Time) (int, error) {
+	if projectID == "" {
+		return 0, fmt.Errorf("project_id is required")
+	}
+	if olderThan.IsZero() {
+		return 0, fmt.Errorf("older_than is required")
+	}
+	if err := r.ensureSchemaCurrent(ctx); err != nil {
+		return 0, err
+	}
+	result, err := r.db.ExecContext(ctx,
+		`DELETE FROM graph_edges WHERE project_id = ? AND stale = 1 AND updated_at < ?`,
+		projectID,
+		formatTime(olderThan),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("purge stale graph edges: %w", err)
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count purged stale graph edges: %w", err)
+	}
+	return int(deleted), nil
+}
+
 func (r *SQLiteRepository) upsertNodeTx(ctx context.Context, tx *sql.Tx, node Node) (Node, error) {
 	node, err := normalizeNode(node)
 	if err != nil {
@@ -342,16 +701,17 @@ func (r *SQLiteRepository) execUpsertEdge(ctx context.Context, exec interface {
 	_, err = exec.ExecContext(ctx, `
 INSERT INTO graph_edges (
 	id, project_id, kind, from_node_id, to_node_id, extractor, source_path,
-	evidence_json, confidence, confidence_label, stale, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	evidence_json, confidence, confidence_label, stale, source_version, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(project_id, extractor, source_path, kind, from_node_id, to_node_id) DO UPDATE SET
 	evidence_json = excluded.evidence_json,
 	confidence = excluded.confidence,
 	confidence_label = excluded.confidence_label,
 	stale = excluded.stale,
+	source_version = excluded.source_version,
 	updated_at = excluded.updated_at
 `, edge.ID, edge.ProjectID, edge.Kind, edge.FromNodeID, edge.ToNodeID, edge.Extractor,
-		edge.SourcePath, string(evidenceJSON), edge.Confidence, edge.ConfidenceLabel, stale,
+		edge.SourcePath, string(evidenceJSON), edge.Confidence, edge.ConfidenceLabel, stale, edge.SourceVersion,
 		formatTime(edge.CreatedAt), formatTime(edge.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("upsert graph edge %s: %w", edge.NaturalKey(), err)
@@ -429,7 +789,7 @@ func (r *SQLiteRepository) ListNodes(ctx context.Context, query NodeQuery) ([]No
 
 // ListEdges returns graph edges sorted by deterministic natural key.
 func (r *SQLiteRepository) ListEdges(ctx context.Context, query EdgeQuery) ([]Edge, error) {
-	sqlQuery := `SELECT id, project_id, kind, from_node_id, to_node_id, extractor, source_path, evidence_json, confidence, confidence_label, stale, created_at, updated_at FROM graph_edges WHERE 1=1`
+	sqlQuery := `SELECT id, project_id, kind, from_node_id, to_node_id, extractor, source_path, source_version, evidence_json, confidence, confidence_label, stale, created_at, updated_at FROM graph_edges WHERE 1=1`
 	args := []any{}
 	if query.ProjectID != "" {
 		sqlQuery += ` AND project_id = ?`
@@ -446,6 +806,12 @@ func (r *SQLiteRepository) ListEdges(ctx context.Context, query EdgeQuery) ([]Ed
 	if query.SourcePath != "" {
 		sqlQuery += ` AND source_path = ?`
 		args = append(args, query.SourcePath)
+	}
+	if query.ExcludeStale {
+		sqlQuery += ` AND stale = 0`
+	}
+	if query.OnlyStale {
+		sqlQuery += ` AND stale = 1`
 	}
 	sqlQuery += ` ORDER BY project_id, extractor, source_path, kind, from_node_id, to_node_id ASC`
 	rows, err := r.db.QueryContext(ctx, sqlQuery, args...)
@@ -468,7 +834,7 @@ func (r *SQLiteRepository) ListEdges(ctx context.Context, query EdgeQuery) ([]Ed
 	return edges, nil
 }
 
-// RecordBuild stores the latest build metadata for a project.
+// RecordBuild stores the latest build metadata for a project/build kind.
 func (r *SQLiteRepository) RecordBuild(ctx context.Context, metadata BuildMetadata) error {
 	if metadata.ProjectID == "" {
 		return fmt.Errorf("project_id is required")
@@ -476,21 +842,24 @@ func (r *SQLiteRepository) RecordBuild(ctx context.Context, metadata BuildMetada
 	if err := r.ensureSchemaCurrent(ctx); err != nil {
 		return err
 	}
+	if metadata.Kind == "" {
+		metadata.Kind = BuildKindFull
+	}
 	if metadata.Status == "" {
 		metadata.Status = GraphStatusFresh
 	}
 	now := time.Now().UTC()
 	_, err := r.db.ExecContext(ctx, `
-INSERT INTO graph_builds (project_id, status, started_at, completed_at, source_version, message, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(project_id) DO UPDATE SET
+INSERT INTO graph_builds (project_id, build_kind, status, started_at, completed_at, source_version, message, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(project_id, build_kind) DO UPDATE SET
 	status = excluded.status,
 	started_at = excluded.started_at,
 	completed_at = excluded.completed_at,
 	source_version = excluded.source_version,
 	message = excluded.message,
 	updated_at = excluded.updated_at
-`, metadata.ProjectID, metadata.Status, formatTime(metadata.StartedAt), formatTime(metadata.CompletedAt),
+`, metadata.ProjectID, metadata.Kind, metadata.Status, formatTime(metadata.StartedAt), formatTime(metadata.CompletedAt),
 		metadata.SourceVersion, metadata.Message, formatTime(now))
 	if err != nil {
 		return fmt.Errorf("record graph build: %w", err)
@@ -601,7 +970,7 @@ func (r *SQLiteRepository) Snapshot(ctx context.Context, opts StatusOptions) (*S
 	now := effectiveNow(opts.Now)
 	staleAfter := opts.StaleAfter
 	if staleAfter <= 0 {
-		staleAfter = 24 * time.Hour
+		staleAfter = DefaultStaleAfter
 	}
 
 	snapshot := &StatusSnapshot{
@@ -613,9 +982,11 @@ func (r *SQLiteRepository) Snapshot(ctx context.Context, opts StatusOptions) (*S
 			State:             FreshnessUnknown,
 			StaleAfterSeconds: int64(staleAfter.Seconds()),
 		},
-		Nodes:      CountSummary{ByKind: map[string]int{}},
-		Edges:      CountSummary{ByKind: map[string]int{}},
-		Confidence: map[string]int{},
+		Nodes:       CountSummary{ByKind: map[string]int{}},
+		Edges:       CountSummary{ByKind: map[string]int{}},
+		ActiveEdges: CountSummary{ByKind: map[string]int{}},
+		StaleEdges:  CountSummary{ByKind: map[string]int{}},
+		Confidence:  map[string]int{},
 	}
 
 	version, err := r.schemaVersion(ctx)
@@ -636,7 +1007,21 @@ func (r *SQLiteRepository) Snapshot(ctx context.Context, opts StatusOptions) (*S
 	if err := r.populateCounts(ctx, opts.ProjectID, snapshot); err != nil {
 		return nil, err
 	}
-	build, ok, err := r.latestBuild(ctx, opts.ProjectID)
+	fullBuild, hasFullBuild, err := r.latestBuild(ctx, opts.ProjectID, BuildKindFull)
+	if err != nil {
+		return nil, err
+	}
+	incrementalBuild, hasIncrementalBuild, err := r.latestBuild(ctx, opts.ProjectID, BuildKindIncremental)
+	if err != nil {
+		return nil, err
+	}
+	if hasFullBuild {
+		snapshot.LastFullBuild = buildTiming(fullBuild)
+	}
+	if hasIncrementalBuild {
+		snapshot.LastIncrementalUpdate = buildTiming(incrementalBuild)
+	}
+	build, ok, err := r.latestBuildAny(ctx, opts.ProjectID)
 	if err != nil {
 		return nil, err
 	}
@@ -757,6 +1142,48 @@ func (r *SQLiteRepository) populateCounts(ctx context.Context, projectID string,
 		return fmt.Errorf("iterate graph edge counts: %w", err)
 	}
 
+	activeRows, err := r.db.QueryContext(ctx, `SELECT kind, COUNT(*) FROM graph_edges WHERE (? = '' OR project_id = ?) AND stale = 0 GROUP BY kind`, projectID, projectID)
+	if err != nil {
+		return fmt.Errorf("count active graph edges: %w", err)
+	}
+	defer func() { _ = activeRows.Close() }()
+	for activeRows.Next() {
+		var kind string
+		var count int
+		if err := activeRows.Scan(&kind, &count); err != nil {
+			return fmt.Errorf("scan active graph edge count: %w", err)
+		}
+		snapshot.ActiveEdges.ByKind[kind] = count
+		snapshot.ActiveEdges.Total += count
+	}
+	if err := activeRows.Err(); err != nil {
+		return fmt.Errorf("iterate active graph edge counts: %w", err)
+	}
+
+	staleRows, err := r.db.QueryContext(ctx, `SELECT kind, COUNT(*) FROM graph_edges WHERE (? = '' OR project_id = ?) AND stale = 1 GROUP BY kind`, projectID, projectID)
+	if err != nil {
+		return fmt.Errorf("count stale graph edges: %w", err)
+	}
+	defer func() { _ = staleRows.Close() }()
+	for staleRows.Next() {
+		var kind string
+		var count int
+		if err := staleRows.Scan(&kind, &count); err != nil {
+			return fmt.Errorf("scan stale graph edge count: %w", err)
+		}
+		snapshot.StaleEdges.ByKind[kind] = count
+		snapshot.StaleEdges.Total += count
+	}
+	if err := staleRows.Err(); err != nil {
+		return fmt.Errorf("iterate stale graph edge counts: %w", err)
+	}
+	if snapshot.StaleEdges.Total > 0 {
+		snapshot.Warnings = append(snapshot.Warnings, StatusWarning{
+			Code:    WarningGraphStaleEdges,
+			Message: fmt.Sprintf("graph contains %d stale edge(s)", snapshot.StaleEdges.Total),
+		})
+	}
+
 	confidenceRows, err := r.db.QueryContext(ctx, `SELECT confidence_label, COUNT(*) FROM graph_edges WHERE (? = '' OR project_id = ?) GROUP BY confidence_label`, projectID, projectID)
 	if err != nil {
 		return fmt.Errorf("count graph confidence labels: %w", err)
@@ -773,16 +1200,38 @@ func (r *SQLiteRepository) populateCounts(ctx context.Context, projectID string,
 	return confidenceRows.Err()
 }
 
-func (r *SQLiteRepository) latestBuild(ctx context.Context, projectID string) (BuildMetadata, bool, error) {
+func buildTiming(build BuildMetadata) *BuildTiming {
+	return &BuildTiming{
+		StartedAt:     formatTime(build.StartedAt),
+		CompletedAt:   formatTime(build.CompletedAt),
+		SourceVersion: build.SourceVersion,
+	}
+}
+
+func (r *SQLiteRepository) latestBuild(ctx context.Context, projectID string, kind BuildKind) (BuildMetadata, bool, error) {
 	row := r.db.QueryRowContext(ctx, `
-SELECT project_id, status, started_at, completed_at, source_version, message
+SELECT project_id, build_kind, status, started_at, completed_at, source_version, message
+FROM graph_builds
+WHERE (? = '' OR project_id = ?) AND build_kind = ?
+ORDER BY updated_at DESC
+LIMIT 1`, projectID, projectID, kind)
+	return scanBuildMetadata(row)
+}
+
+func (r *SQLiteRepository) latestBuildAny(ctx context.Context, projectID string) (BuildMetadata, bool, error) {
+	row := r.db.QueryRowContext(ctx, `
+SELECT project_id, build_kind, status, started_at, completed_at, source_version, message
 FROM graph_builds
 WHERE (? = '' OR project_id = ?)
 ORDER BY updated_at DESC
 LIMIT 1`, projectID, projectID)
+	return scanBuildMetadata(row)
+}
+
+func scanBuildMetadata(row *sql.Row) (BuildMetadata, bool, error) {
 	var build BuildMetadata
 	var startedAt, completedAt string
-	err := row.Scan(&build.ProjectID, &build.Status, &startedAt, &completedAt, &build.SourceVersion, &build.Message)
+	err := row.Scan(&build.ProjectID, &build.Kind, &build.Status, &startedAt, &completedAt, &build.SourceVersion, &build.Message)
 	if errors.Is(err, sql.ErrNoRows) {
 		return BuildMetadata{}, false, nil
 	}
@@ -892,7 +1341,7 @@ func scanEdge(scanner interface {
 	var kind, confidenceLabel, evidenceJSON, createdAt, updatedAt string
 	var stale int
 	if err := scanner.Scan(&edge.ID, &edge.ProjectID, &kind, &edge.FromNodeID, &edge.ToNodeID, &edge.Extractor,
-		&edge.SourcePath, &evidenceJSON, &edge.Confidence, &confidenceLabel, &stale, &createdAt, &updatedAt); err != nil {
+		&edge.SourcePath, &edge.SourceVersion, &evidenceJSON, &edge.Confidence, &confidenceLabel, &stale, &createdAt, &updatedAt); err != nil {
 		return Edge{}, fmt.Errorf("scan graph edge: %w", err)
 	}
 	edge.Kind = EdgeKind(kind)

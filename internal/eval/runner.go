@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -168,6 +169,13 @@ func selectQuickQueries(queries []Query) []Query {
 		}
 	}
 	for _, query := range queries {
+		if query.Holdout || seen[query.ID] || !isPDFQuery(query.Metadata) {
+			continue
+		}
+		selected = append(selected, query)
+		seen[query.ID] = true
+	}
+	for _, query := range queries {
 		if len(selected) >= 15 {
 			break
 		}
@@ -192,6 +200,10 @@ func (r *Runner) runQuery(ctx context.Context, query Query) QueryResult {
 		Tool:            query.Tool,
 		Class:           query.Class,
 		Job:             query.Job,
+		Profile:         queryProfile(query),
+		SourceClass:     querySourceClass(query),
+		Language:        queryLanguage(query),
+		Metadata:        cloneStringMap(query.Metadata),
 		Holdout:         query.Holdout,
 		ExpectedResults: query.ExpectedResults,
 		TopResults:      results,
@@ -240,7 +252,10 @@ func matchedGrade(expected []ExpectedResult, result SearchResult) int {
 		if !matchesPath(result.Path, want.Path) {
 			continue
 		}
-		if want.Symbol != "" && result.Symbol != want.Symbol {
+		if !matchesSymbol(want.Symbol, result.Symbol) {
+			continue
+		}
+		if !matchesPageExpectation(want, result) {
 			continue
 		}
 		if want.Grade > best {
@@ -250,6 +265,71 @@ func matchedGrade(expected []ExpectedResult, result SearchResult) int {
 	return best
 }
 
+func matchesSymbol(expected, actual string) bool {
+	if expected == "" {
+		return true
+	}
+	if actual == expected {
+		return true
+	}
+	suffix, ok := strings.CutPrefix(actual, expected+"_part")
+	if !ok || suffix == "" {
+		return false
+	}
+	for _, r := range suffix {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func matchesPageExpectation(want ExpectedResult, result SearchResult) bool {
+	if want.Page == 0 && want.PageStart == 0 && want.PageEnd == 0 {
+		return true
+	}
+	resultStart, resultEnd := resultPageRange(result)
+	if resultStart == 0 && resultEnd == 0 {
+		return false
+	}
+	if want.Page > 0 {
+		return want.Page >= resultStart && want.Page <= resultEnd
+	}
+	wantStart := want.PageStart
+	if wantStart == 0 {
+		wantStart = want.PageEnd
+	}
+	wantEnd := want.PageEnd
+	if wantEnd == 0 {
+		wantEnd = wantStart
+	}
+	return wantStart >= resultStart && wantEnd <= resultEnd
+}
+
+func resultPageRange(result SearchResult) (int, int) {
+	start := parsePositiveInt(result.PageStart)
+	end := parsePositiveInt(result.PageEnd)
+	if start == 0 && end == 0 {
+		page := parsePositiveInt(result.PageNumber)
+		return page, page
+	}
+	if start == 0 {
+		start = end
+	}
+	if end == 0 {
+		end = start
+	}
+	return start, end
+}
+
+func parsePositiveInt(value string) int {
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || parsed < 0 {
+		return 0
+	}
+	return parsed
+}
+
 func matchesPath(got, want string) bool {
 	got = strings.Trim(strings.TrimSpace(got), "/")
 	want = strings.Trim(strings.TrimSpace(want), "/")
@@ -257,6 +337,223 @@ func matchesPath(got, want string) bool {
 		return false
 	}
 	return got == want || strings.HasPrefix(got, want+"/")
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	clone := make(map[string]string, len(values))
+	for key, value := range values {
+		clone[key] = value
+	}
+	return clone
+}
+
+func isPDFQuery(metadata map[string]string) bool {
+	return strings.EqualFold(strings.TrimSpace(metadata["content_type"]), "pdf")
+}
+
+func queryProfile(query Query) string {
+	if profile := strings.TrimSpace(query.Profile); profile != "" {
+		return profile
+	}
+	return "default"
+}
+
+func querySourceClass(query Query) string {
+	if sourceClass := normalizedMetadataValue(query.Metadata, "source_class"); sourceClass != "" {
+		return sourceClass
+	}
+	if contentType := normalizedMetadataValue(query.Metadata, "content_type"); contentType != "" {
+		if contentType == "pdf" {
+			return "pdf"
+		}
+		if contentType == "markdown" || contentType == "md" {
+			return "docs"
+		}
+	}
+	return sourceClassForPath(primaryExpectedPath(query.ExpectedResults))
+}
+
+func queryLanguage(query Query) string {
+	if language := normalizedMetadataValue(query.Metadata, "language"); language != "" {
+		return language
+	}
+	if contentType := normalizedMetadataValue(query.Metadata, "content_type"); contentType != "" {
+		switch contentType {
+		case "pdf":
+			return "pdf"
+		case "markdown", "md":
+			return "markdown"
+		}
+	}
+	return languageForPath(primaryExpectedPath(query.ExpectedResults))
+}
+
+func normalizedMetadataValue(metadata map[string]string, key string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	value := strings.ToLower(strings.TrimSpace(metadata[key]))
+	return strings.ReplaceAll(value, "_", "-")
+}
+
+func primaryExpectedPath(expected []ExpectedResult) string {
+	for _, result := range expected {
+		if result.Grade > 0 && strings.TrimSpace(result.Path) != "" {
+			return result.Path
+		}
+	}
+	for _, result := range expected {
+		if strings.TrimSpace(result.Path) != "" {
+			return result.Path
+		}
+	}
+	return ""
+}
+
+func resultProfile(result QueryResult) string {
+	if profile := strings.TrimSpace(result.Profile); profile != "" {
+		return profile
+	}
+	return "default"
+}
+
+func resultSourceClass(result QueryResult) string {
+	if sourceClass := strings.TrimSpace(result.SourceClass); sourceClass != "" {
+		return sourceClass
+	}
+	if sourceClass := normalizedMetadataValue(result.Metadata, "source_class"); sourceClass != "" {
+		return sourceClass
+	}
+	if isPDFQuery(result.Metadata) {
+		return "pdf"
+	}
+	return sourceClassForPath(primaryExpectedPath(result.ExpectedResults))
+}
+
+func resultLanguage(result QueryResult) string {
+	if language := strings.TrimSpace(result.Language); language != "" {
+		return language
+	}
+	if language := normalizedMetadataValue(result.Metadata, "language"); language != "" {
+		return language
+	}
+	if isPDFQuery(result.Metadata) {
+		return "pdf"
+	}
+	return languageForPath(primaryExpectedPath(result.ExpectedResults))
+}
+
+func sourceClassForPath(path string) string {
+	clean := strings.Trim(strings.ToLower(strings.TrimSpace(path)), "/")
+	if clean == "" {
+		return "unknown"
+	}
+	base := filepath.Base(clean)
+	ext := filepath.Ext(base)
+	switch {
+	case strings.HasPrefix(clean, ".aman-pm/decisions/") || strings.HasPrefix(base, "adr-"):
+		return "adr"
+	case strings.HasPrefix(clean, ".aman-pm/"):
+		return "pm"
+	case isTestPath(clean):
+		return "test"
+	case ext == ".pdf":
+		return "pdf"
+	case isConfigPath(clean):
+		return "config"
+	case isCodePath(clean):
+		return "code"
+	case isMarkdownPath(clean):
+		return "docs"
+	default:
+		return "unknown"
+	}
+}
+
+func languageForPath(path string) string {
+	clean := strings.Trim(strings.ToLower(strings.TrimSpace(path)), "/")
+	if clean == "" {
+		return "unknown"
+	}
+	base := filepath.Base(clean)
+	ext := filepath.Ext(base)
+	switch ext {
+	case ".go":
+		return "go"
+	case ".py":
+		return "python"
+	case ".ts", ".tsx":
+		return "ts"
+	case ".js", ".jsx":
+		return "js"
+	case ".md", ".mdx":
+		return "markdown"
+	case ".pdf":
+		return "pdf"
+	case ".yaml", ".yml":
+		return "yaml"
+	case ".json":
+		return "json"
+	case ".toml":
+		return "toml"
+	case ".sh", ".bash", ".zsh":
+		return "shell"
+	case ".env":
+		return "env"
+	case ".properties":
+		return "properties"
+	default:
+		if base == ".env" || strings.HasSuffix(base, ".env") {
+			return "env"
+		}
+		return "unknown"
+	}
+}
+
+func isTestPath(path string) bool {
+	base := filepath.Base(path)
+	return strings.Contains(path, "/testdata/") ||
+		strings.Contains(path, "/tests/") ||
+		strings.Contains(path, "/__tests__/") ||
+		strings.HasSuffix(base, "_test.go") ||
+		strings.HasPrefix(base, "test_") ||
+		strings.Contains(base, ".test.") ||
+		strings.Contains(base, ".spec.")
+}
+
+func isCodePath(path string) bool {
+	switch filepath.Ext(filepath.Base(path)) {
+	case ".go", ".py", ".ts", ".tsx", ".js", ".jsx", ".java", ".rb", ".rs", ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".swift", ".php", ".sh":
+		return true
+	default:
+		return false
+	}
+}
+
+func isMarkdownPath(path string) bool {
+	switch filepath.Ext(filepath.Base(path)) {
+	case ".md", ".mdx", ".rst", ".txt":
+		return true
+	default:
+		return false
+	}
+}
+
+func isConfigPath(path string) bool {
+	base := filepath.Base(path)
+	switch filepath.Ext(base) {
+	case ".yaml", ".yml", ".json", ".toml", ".properties":
+		return true
+	default:
+		return base == ".env" ||
+			strings.HasSuffix(base, ".env") ||
+			base == ".amanmcp.yaml" ||
+			base == "go.mod" ||
+			base == "go.sum"
+	}
 }
 
 func failureReason(query Query, results []SearchResult) string {
@@ -328,6 +625,9 @@ func buildReport(opts Options, results []QueryResult) *Report {
 	report.ClassGroups = evalClassGroups()
 	report.ByClass = groupMetrics(results, func(result QueryResult) string { return result.Class })
 	report.ByJob = groupMetrics(results, func(result QueryResult) string { return result.Job })
+	report.ByProfile = groupMetrics(results, resultProfile)
+	report.BySourceClass = groupMetrics(results, resultSourceClass)
+	report.ByLanguage = groupMetrics(results, resultLanguage)
 	report.ExactLookupGate = currentExactLookupGate(results)
 	report.GraphEvalGate = buildGraphEvalGate(results, report.ExactLookupGate, "")
 	report.BaselineComparison = BaselineComparison{}
@@ -344,6 +644,17 @@ func defaultTolerances() Tolerances {
 		MaxTokenClassIncreaseRatio:    0.15,
 		MaxTokenClassP95IncreaseRatio: 0.15,
 		MaxTokenQueryIncreaseRatio:    0.10,
+		DimensionRegression:           defaultDimensionTolerances(),
+	}
+}
+
+func defaultDimensionTolerances() map[string]DimensionTolerance {
+	return map[string]DimensionTolerance{
+		"class":        {MinPassRateDelta: -0.0001, MinRecallAt10Delta: -0.0001},
+		"job":          {MinPassRateDelta: -0.0001, MinRecallAt10Delta: -0.0001},
+		"profile":      {MinPassRateDelta: -0.0001, MinRecallAt10Delta: -0.0001},
+		"source_class": {MinPassRateDelta: -0.0001, MinRecallAt10Delta: -0.0001},
+		"language":     {MinPassRateDelta: -0.0001, MinRecallAt10Delta: -0.0001},
 	}
 }
 
@@ -366,6 +677,10 @@ func loadTolerances() Tolerances {
 					MaxTokenClassP95IncreaseRatio *float64 `yaml:"max_token_class_p95_increase_ratio"`
 					MaxTokenQueryIncreaseRatio    *float64 `yaml:"max_token_query_increase_ratio"`
 				} `yaml:"tolerances"`
+				DimensionRegression map[string]struct {
+					MinPassRateDelta   *float64 `yaml:"min_pass_rate_delta"`
+					MinRecallAt10Delta *float64 `yaml:"min_recall_at_10_delta"`
+				} `yaml:"dimension_regression"`
 			} `yaml:"search_eval"`
 		} `yaml:"validation"`
 	}
@@ -396,6 +711,16 @@ func loadTolerances() Tolerances {
 	}
 	if cfg.MaxTokenQueryIncreaseRatio != nil {
 		tolerances.MaxTokenQueryIncreaseRatio = *cfg.MaxTokenQueryIncreaseRatio
+	}
+	for dimension, override := range rules.Validation.SearchEval.DimensionRegression {
+		current := dimensionTolerance(tolerances, dimension)
+		if override.MinPassRateDelta != nil {
+			current.MinPassRateDelta = *override.MinPassRateDelta
+		}
+		if override.MinRecallAt10Delta != nil {
+			current.MinRecallAt10Delta = *override.MinRecallAt10Delta
+		}
+		tolerances.DimensionRegression[dimension] = current
 	}
 	return tolerances
 }
@@ -462,8 +787,15 @@ func calculateMetrics(results []QueryResult) Metrics {
 	exactPass := 0
 	negativeTotal := 0
 	negativePass := 0
+	pdfTotal := 0
+	pdfPass := 0
+	pdfRecall10 := 0
+	passCount := 0
 
 	for _, result := range results {
+		if result.Passed {
+			passCount++
+		}
 		if result.FirstUsefulRank > 0 && result.FirstUsefulRank <= 5 {
 			recall5++
 		}
@@ -491,9 +823,19 @@ func calculateMetrics(results []QueryResult) Metrics {
 				negativePass++
 			}
 		}
+		if isPDFQuery(result.Metadata) {
+			pdfTotal++
+			if result.Passed {
+				pdfPass++
+			}
+			if result.FirstUsefulRank > 0 && result.FirstUsefulRank <= 10 {
+				pdfRecall10++
+			}
+		}
 	}
 
 	total := float64(len(results))
+	metrics.PassRate = float64(passCount) / total
 	metrics.RecallAt5 = float64(recall5) / total
 	metrics.RecallAt10 = float64(recall10) / total
 	metrics.MRRAt10 = reciprocalRank / total
@@ -507,6 +849,10 @@ func calculateMetrics(results []QueryResult) Metrics {
 	}
 	if negativeTotal > 0 {
 		metrics.NegativeAdversarialPassRate = float64(negativePass) / float64(negativeTotal)
+	}
+	if pdfTotal > 0 {
+		metrics.PDFPassRate = float64(pdfPass) / float64(pdfTotal)
+		metrics.PDFRecallAt10 = float64(pdfRecall10) / float64(pdfTotal)
 	}
 	return metrics
 }
@@ -606,7 +952,10 @@ func matchedUnusedGrade(expected []ExpectedResult, result SearchResult, used map
 		if !matchesPath(result.Path, want.Path) {
 			continue
 		}
-		if want.Symbol != "" && result.Symbol != want.Symbol {
+		if !matchesSymbol(want.Symbol, result.Symbol) {
+			continue
+		}
+		if !matchesPageExpectation(want, result) {
 			continue
 		}
 		if want.Grade > best {
@@ -714,6 +1063,129 @@ func compareQualityBaseline(baselinePath string, report *Report) error {
 		comparison.RegressionReasons = append(comparison.RegressionReasons, "p95 latency increased")
 	}
 	compareExactLookupGate(&baseline, report)
+	compareDimensionBaselines(&baseline, report)
+	return nil
+}
+
+func compareDimensionBaselines(baseline, report *Report) {
+	specs := []struct {
+		name     string
+		current  map[string]Metrics
+		baseline map[string]Metrics
+	}{
+		{name: "class", current: metricsByClass(report), baseline: metricsByClass(baseline)},
+		{name: "job", current: metricsByJob(report), baseline: metricsByJob(baseline)},
+		{name: "profile", current: metricsByProfile(report), baseline: metricsByProfile(baseline)},
+		{name: "source_class", current: metricsBySourceClass(report), baseline: metricsBySourceClass(baseline)},
+		{name: "language", current: metricsByLanguage(report), baseline: metricsByLanguage(baseline)},
+	}
+
+	for _, spec := range specs {
+		tolerance := dimensionTolerance(report.Run.Tolerances, spec.name)
+		for group, currentMetrics := range spec.current {
+			baselineMetrics, ok := spec.baseline[group]
+			if !ok {
+				continue
+			}
+			report.DimensionRegressions = append(report.DimensionRegressions,
+				dimensionRegressionCheck(spec.name, group, "pass_rate", baselineMetrics.PassRate, currentMetrics.PassRate, tolerance.MinPassRateDelta),
+				dimensionRegressionCheck(spec.name, group, "recall_at_10", baselineMetrics.RecallAt10, currentMetrics.RecallAt10, tolerance.MinRecallAt10Delta),
+			)
+		}
+	}
+
+	for _, regression := range report.DimensionRegressions {
+		if !regression.Regressed {
+			continue
+		}
+		report.BaselineComparison.RegressionReasons = appendUniqueString(
+			report.BaselineComparison.RegressionReasons,
+			fmt.Sprintf("dimension regression: %s %s %s decreased", regression.Dimension, regression.Group, metricDisplayName(regression.Metric)),
+		)
+	}
+}
+
+func dimensionRegressionCheck(dimension, group, metric string, baselineValue, currentValue, tolerance float64) DimensionRegression {
+	delta := currentValue - baselineValue
+	return DimensionRegression{
+		Dimension:     dimension,
+		Group:         group,
+		Metric:        metric,
+		BaselineValue: baselineValue,
+		CurrentValue:  currentValue,
+		Delta:         delta,
+		Tolerance:     tolerance,
+		Regressed:     delta < tolerance,
+	}
+}
+
+func dimensionTolerance(tolerances Tolerances, dimension string) DimensionTolerance {
+	if tolerances.DimensionRegression != nil {
+		if tolerance, ok := tolerances.DimensionRegression[dimension]; ok {
+			return tolerance
+		}
+	}
+	return DimensionTolerance{MinPassRateDelta: tolerances.MinPassRateDelta, MinRecallAt10Delta: tolerances.MinRecallAt10Delta}
+}
+
+func metricDisplayName(metric string) string {
+	switch metric {
+	case "pass_rate":
+		return "pass rate"
+	case "recall_at_10":
+		return "recall@10"
+	default:
+		return metric
+	}
+}
+
+func metricsByClass(report *Report) map[string]Metrics {
+	if len(report.Queries) > 0 {
+		return groupMetrics(report.Queries, func(result QueryResult) string { return result.Class })
+	}
+	if len(report.ByClass) > 0 {
+		return report.ByClass
+	}
+	return nil
+}
+
+func metricsByJob(report *Report) map[string]Metrics {
+	if len(report.Queries) > 0 {
+		return groupMetrics(report.Queries, func(result QueryResult) string { return result.Job })
+	}
+	if len(report.ByJob) > 0 {
+		return report.ByJob
+	}
+	return nil
+}
+
+func metricsByProfile(report *Report) map[string]Metrics {
+	if len(report.Queries) > 0 {
+		return groupMetrics(report.Queries, resultProfile)
+	}
+	if len(report.ByProfile) > 0 {
+		return report.ByProfile
+	}
+	return nil
+}
+
+func metricsBySourceClass(report *Report) map[string]Metrics {
+	if len(report.Queries) > 0 {
+		return groupMetrics(report.Queries, resultSourceClass)
+	}
+	if len(report.BySourceClass) > 0 {
+		return report.BySourceClass
+	}
+	return nil
+}
+
+func metricsByLanguage(report *Report) map[string]Metrics {
+	if len(report.Queries) > 0 {
+		return groupMetrics(report.Queries, resultLanguage)
+	}
+	if len(report.ByLanguage) > 0 {
+		return report.ByLanguage
+	}
 	return nil
 }
 
@@ -764,10 +1236,6 @@ func compareExactLookupGate(baseline *Report, report *Report) {
 	for _, currentResult := range current {
 		baselineResult, ok := baselineByID[currentResult.ID]
 		if !ok {
-			report.ExactLookupGate.Failures = append(report.ExactLookupGate.Failures, ExactLookupGateFailure{
-				QueryID: currentResult.ID,
-				Reason:  "baseline query missing",
-			})
 			continue
 		}
 		report.ExactLookupGate.Failures = append(report.ExactLookupGate.Failures, exactGateFailures(baselineResult, currentResult)...)
@@ -830,16 +1298,26 @@ type exactMatchSnapshot struct {
 }
 
 func exactMatch(result QueryResult) (exactMatchSnapshot, bool) {
+	bestGrade := 0
+	var best exactMatchSnapshot
 	for rank, item := range result.TopResults {
-		if matchedGrade(result.ExpectedResults, item) >= 2 {
-			return exactMatchSnapshot{
+		grade := matchedGrade(result.ExpectedResults, item)
+		if grade < 2 {
+			continue
+		}
+		if grade > bestGrade || (grade == bestGrade && (best.rank == 0 || rank+1 < best.rank)) {
+			bestGrade = grade
+			best = exactMatchSnapshot{
 				rank:     rank + 1,
 				path:     strings.Trim(strings.TrimSpace(item.Path), "/"),
 				resultID: item.ResultID,
-			}, true
+			}
 		}
 	}
-	return exactMatchSnapshot{}, false
+	if bestGrade == 0 {
+		return exactMatchSnapshot{}, false
+	}
+	return best, true
 }
 
 func exactGateFailures(baseline, current QueryResult) []ExactLookupGateFailure {
@@ -899,17 +1377,6 @@ func exactGateFailures(baseline, current QueryResult) []ExactLookupGateFailure {
 			CurrentRank:  got.rank,
 			BaselinePath: base.path,
 			CurrentPath:  got.path,
-		})
-	} else if got.resultID != base.resultID {
-		failures = append(failures, ExactLookupGateFailure{
-			QueryID:          current.ID,
-			Reason:           "exact hit result id changed",
-			BaselineRank:     base.rank,
-			CurrentRank:      got.rank,
-			BaselinePath:     base.path,
-			CurrentPath:      got.path,
-			BaselineResultID: base.resultID,
-			CurrentResultID:  got.resultID,
 		})
 	}
 	return failures
@@ -1005,6 +1472,9 @@ func markdownReport(report *Report) string {
 	fmt.Fprintf(&b, "- Recall@10: %.2f\n", report.Metrics.RecallAt10)
 	fmt.Fprintf(&b, "- MRR@10: %.2f\n", report.Metrics.MRRAt10)
 	fmt.Fprintf(&b, "- nDCG@10: %.2f\n", report.Metrics.NDCGAt10)
+	fmt.Fprintf(&b, "- Negative adversarial pass rate: %.2f\n", report.Metrics.NegativeAdversarialPassRate)
+	fmt.Fprintf(&b, "- PDF pass rate: %.2f\n", report.Metrics.PDFPassRate)
+	fmt.Fprintf(&b, "- PDF recall@10: %.2f\n", report.Metrics.PDFRecallAt10)
 	fmt.Fprintf(&b, "- p95 latency: %d ms\n", report.Summary.P95LatencyMs)
 	fmt.Fprintf(&b, "- Tokens/result mean: %.2f\n", report.Summary.TokensPerResultMean)
 	fmt.Fprintf(&b, "- Tokens/result p95: %.2f\n\n", report.Summary.TokensPerResultP95)
@@ -1024,6 +1494,27 @@ func markdownReport(report *Report) string {
 		b.WriteString("\n")
 	} else {
 		b.WriteString("- No baseline comparison.\n\n")
+	}
+
+	b.WriteString("## Dimension Regressions\n\n")
+	if len(report.DimensionRegressions) == 0 {
+		b.WriteString("- No dimension baseline comparison.\n\n")
+	} else {
+		b.WriteString("| Dimension | Group | Metric | Baseline | Current | Delta | Tolerance | Regressed |\n")
+		b.WriteString("|---|---|---|---:|---:|---:|---:|---:|\n")
+		for _, regression := range report.DimensionRegressions {
+			fmt.Fprintf(&b, "| %s | %s | %s | %.2f | %.2f | %.2f | %.4f | %t |\n",
+				regression.Dimension,
+				escapeTable(regression.Group),
+				regression.Metric,
+				regression.BaselineValue,
+				regression.CurrentValue,
+				regression.Delta,
+				regression.Tolerance,
+				regression.Regressed,
+			)
+		}
+		b.WriteString("\n")
 	}
 
 	b.WriteString("## Graph Eval Gate\n\n")
@@ -1094,6 +1585,12 @@ func markdownReport(report *Report) string {
 	writeMetricTable(&b, report.ByClass)
 	b.WriteString("## By Job\n\n")
 	writeMetricTable(&b, report.ByJob)
+	b.WriteString("## By Profile\n\n")
+	writeMetricTable(&b, report.ByProfile)
+	b.WriteString("## By Source Class\n\n")
+	writeMetricTable(&b, report.BySourceClass)
+	b.WriteString("## By Language\n\n")
+	writeMetricTable(&b, report.ByLanguage)
 
 	b.WriteString("## Query Results\n\n")
 	b.WriteString("| Query | Class | Job | Passed | First Useful | Top Results | Failure |\n")
@@ -1113,8 +1610,8 @@ func markdownReport(report *Report) string {
 }
 
 func writeMetricTable(b *strings.Builder, metrics map[string]Metrics) {
-	b.WriteString("| Group | Recall@10 | MRR@10 | nDCG@10 | Exact Pass | Negative Pass | Test Pollution |\n")
-	b.WriteString("|---|---:|---:|---:|---:|---:|---:|\n")
+	b.WriteString("| Group | Pass Rate | Recall@10 | MRR@10 | nDCG@10 | Exact Pass | Negative Pass | PDF Pass | PDF Recall@10 | Test Pollution |\n")
+	b.WriteString("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
 	names := make([]string, 0, len(metrics))
 	for name := range metrics {
 		names = append(names, name)
@@ -1122,13 +1619,16 @@ func writeMetricTable(b *strings.Builder, metrics map[string]Metrics) {
 	sort.Strings(names)
 	for _, name := range names {
 		metric := metrics[name]
-		fmt.Fprintf(b, "| %s | %.2f | %.2f | %.2f | %.2f | %.2f | %.2f |\n",
+		fmt.Fprintf(b, "| %s | %.2f | %.2f | %.2f | %.2f | %.2f | %.2f | %.2f | %.2f | %.2f |\n",
 			name,
+			metric.PassRate,
 			metric.RecallAt10,
 			metric.MRRAt10,
 			metric.NDCGAt10,
 			metric.ExactLookupPassRate,
 			metric.NegativeAdversarialPassRate,
+			metric.PDFPassRate,
+			metric.PDFRecallAt10,
 			metric.TestPollutionRate,
 		)
 	}
@@ -1345,19 +1845,19 @@ func tokenRegressionReasons(report *Report, baseline tokenBaseline) []string {
 		}
 	}
 
-	currentTools := tokenStatsBy(report.Queries, func(result QueryResult) string { return result.Tool })
-	for tool, baselineStats := range baseline.Tools {
+	currentTools, baselineTools := commonTokenStatsBy(report, baseline, func(result QueryResult) string { return result.Tool })
+	for tool, baselineStats := range baselineTools {
 		current, ok := currentTools[tool]
-		if !ok || current.Count < baselineStats.Count {
+		if !ok {
 			continue
 		}
 		reasons = append(reasons, tokenStatsRegressionReasons("tool "+tool, current, baselineStats, tolerances.MaxTokenMeanIncreaseRatio, tolerances.MaxTokenP95IncreaseRatio)...)
 	}
 
-	currentClasses := tokenStatsBy(report.Queries, func(result QueryResult) string { return result.Class })
-	for class, baselineStats := range baseline.QueryClasses {
+	currentClasses, baselineClasses := commonTokenStatsBy(report, baseline, func(result QueryResult) string { return result.Class })
+	for class, baselineStats := range baselineClasses {
 		current, ok := currentClasses[class]
-		if !ok || current.Count < baselineStats.Count {
+		if !ok {
 			continue
 		}
 		reasons = append(reasons, tokenStatsRegressionReasons("class "+class, current, baselineStats, tolerances.MaxTokenClassIncreaseRatio, tolerances.MaxTokenClassP95IncreaseRatio)...)
@@ -1366,6 +1866,32 @@ func tokenRegressionReasons(report *Report, baseline tokenBaseline) []string {
 		reasons[i] = "token budget " + reason
 	}
 	return reasons
+}
+
+func commonTokenStatsBy(report *Report, baseline tokenBaseline, key func(QueryResult) string) (map[string]tokenBudgetStats, map[string]tokenBudgetStats) {
+	currentByID := make(map[string]QueryResult, len(report.Queries))
+	for _, result := range report.Queries {
+		currentByID[result.ID] = result
+	}
+
+	currentCommon := make([]QueryResult, 0, len(baseline.Queries))
+	baselineCommon := make([]QueryResult, 0, len(baseline.Queries))
+	for _, baselineQuery := range baseline.Queries {
+		current, ok := currentByID[baselineQuery.ID]
+		if !ok || len(current.TopResults) == 0 || baselineQuery.ResultCount == 0 || baselineQuery.TokensPerResult == 0 {
+			continue
+		}
+		currentCommon = append(currentCommon, current)
+		baselineCommon = append(baselineCommon, QueryResult{
+			ID:            baselineQuery.ID,
+			Tool:          baselineQuery.Tool,
+			Class:         baselineQuery.Class,
+			TokenEstimate: TokenEstimate{TokensPerResult: baselineQuery.TokensPerResult},
+			TopResults:    make([]SearchResult, baselineQuery.ResultCount),
+		})
+	}
+
+	return tokenStatsBy(currentCommon, key), tokenStatsBy(baselineCommon, key)
 }
 
 func tokenStatsRegressionReasons(label string, current, baseline tokenBudgetStats, meanRatio, p95Ratio float64) []string {

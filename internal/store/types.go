@@ -14,6 +14,7 @@ type ContentType string
 const (
 	ContentTypeCode     ContentType = "code"
 	ContentTypeMarkdown ContentType = "markdown"
+	ContentTypePDF      ContentType = "pdf"
 	ContentTypeText     ContentType = "text"
 )
 
@@ -145,6 +146,7 @@ type MetadataStore interface {
 	GetChunk(ctx context.Context, id string) (*Chunk, error)
 	GetChunks(ctx context.Context, ids []string) ([]*Chunk, error) // Batch retrieval for performance
 	GetChunksByFile(ctx context.Context, fileID string) ([]*Chunk, error)
+	GetChunksByPath(ctx context.Context, path string, limit int) ([]*Chunk, error)
 	GetChunksBySymbol(ctx context.Context, name string, limit int) ([]*Chunk, error)
 	DeleteChunks(ctx context.Context, ids []string) error // Delete chunks by ID
 	DeleteChunksByFile(ctx context.Context, fileID string) error

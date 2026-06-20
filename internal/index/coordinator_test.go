@@ -2,9 +2,11 @@ package index
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 
 	"github.com/Aman-CERP/amanmcp/internal/chunk"
 	"github.com/Aman-CERP/amanmcp/internal/embed"
+	"github.com/Aman-CERP/amanmcp/internal/graph"
 	"github.com/Aman-CERP/amanmcp/internal/language"
 	"github.com/Aman-CERP/amanmcp/internal/scanner"
 	"github.com/Aman-CERP/amanmcp/internal/search"
@@ -86,6 +89,73 @@ func setupTestCoordinator(t *testing.T) (*Coordinator, string, func()) {
 	return coord, tempDir, cleanup
 }
 
+func setupTestCoordinatorWithGraph(t *testing.T) (*Coordinator, string, *graph.SQLiteRepository, func()) {
+	t.Helper()
+
+	coord, tempDir, cleanup := setupTestCoordinator(t)
+	repo, err := graph.OpenSQLiteRepository(filepath.Join(tempDir, ".amanmcp", "graph.db"))
+	require.NoError(t, err)
+	coord.config.GraphRepository = repo
+
+	return coord, tempDir, repo, func() {
+		require.NoError(t, repo.Close())
+		cleanup()
+	}
+}
+
+func assertGraphHasEdgeKind(t *testing.T, edges []graph.Edge, kind graph.EdgeKind) {
+	t.Helper()
+
+	for _, edge := range edges {
+		if edge.Kind == kind {
+			return
+		}
+	}
+	t.Fatalf("expected graph edge kind %q in %#v", kind, edges)
+}
+
+func requireGraphEdgeToImport(t *testing.T, edges []graph.Edge, importName string) {
+	t.Helper()
+
+	for _, edge := range edges {
+		if edge.Kind == graph.EdgeKindFileImports && strings.HasSuffix(edge.ToNodeID, ":"+importName) {
+			return
+		}
+	}
+	t.Fatalf("expected file import edge to %q in %#v", importName, edges)
+}
+
+func assertGraphLacksEdgeToImport(t *testing.T, edges []graph.Edge, importName string) {
+	t.Helper()
+
+	for _, edge := range edges {
+		if edge.Kind == graph.EdgeKindFileImports && strings.HasSuffix(edge.ToNodeID, ":"+importName) {
+			t.Fatalf("did not expect file import edge to %q in %#v", importName, edges)
+		}
+	}
+}
+
+type countingMetadataStore struct {
+	store.MetadataStore
+	listFilesCalls int
+}
+
+func (m *countingMetadataStore) ListFiles(ctx context.Context, projectID string, cursor string, limit int) ([]*store.File, string, error) {
+	m.listFilesCalls++
+	return m.MetadataStore.ListFiles(ctx, projectID, cursor, limit)
+}
+
+func requireGraphEdgeToFile(t *testing.T, edges []graph.Edge, kind graph.EdgeKind, filePath string) {
+	t.Helper()
+
+	for _, edge := range edges {
+		if edge.Kind == kind && strings.HasSuffix(edge.ToNodeID, ":"+filePath) {
+			return
+		}
+	}
+	t.Fatalf("expected %s edge to file %q in %#v", kind, filePath, edges)
+}
+
 func TestCoordinator_HandleEvents_Create(t *testing.T) {
 	coord, tempDir, cleanup := setupTestCoordinator(t)
 	defer cleanup()
@@ -119,6 +189,40 @@ func hello() {
 	results, err := coord.config.Engine.Search(ctx, "hello", search.SearchOptions{Limit: 10})
 	require.NoError(t, err)
 	assert.NotEmpty(t, results, "expected search results for indexed file")
+}
+
+func TestCoordinator_HandleEvents_CreateUpdatesGraph(t *testing.T) {
+	coord, tempDir, repo, cleanup := setupTestCoordinatorWithGraph(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "main.go"), []byte(`package main
+
+import "fmt"
+
+func hello() {
+	fmt.Println("hello")
+}
+`), 0o644))
+
+	err := coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "main.go", Operation: watcher.OpCreate, IsDir: false, Timestamp: time.Now()},
+	})
+	require.NoError(t, err)
+
+	edges, err := repo.ListEdges(ctx, graph.EdgeQuery{
+		ProjectID:  "test-project",
+		Extractor:  graph.ExtractorCheap,
+		SourcePath: "main.go",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, edges, "create events should populate graph edges for the indexed file")
+	assertGraphHasEdgeKind(t, edges, graph.EdgeKindFileDeclaresPackage)
+
+	snapshot, err := repo.Snapshot(ctx, graph.StatusOptions{ProjectID: "test-project", Now: time.Now()})
+	require.NoError(t, err)
+	assert.Equal(t, graph.GraphStatusFresh, snapshot.Status)
+	assert.Greater(t, snapshot.Edges.Total, 0)
 }
 
 func TestCoordinator_HandleEvents_UsesConfiguredLanguageRegistry(t *testing.T) {
@@ -240,6 +344,325 @@ func newFunction() {
 	assert.NotEmpty(t, results, "expected new content to be searchable")
 }
 
+func TestCoordinator_HandleEvents_ModifyReplacesGraphEdgesForSource(t *testing.T) {
+	coord, tempDir, repo, cleanup := setupTestCoordinatorWithGraph(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	testFile := filepath.Join(tempDir, "main.go")
+	require.NoError(t, os.WriteFile(testFile, []byte(`package main
+
+import "fmt"
+
+func oldFunction() {}
+`), 0o644))
+
+	require.NoError(t, coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "main.go", Operation: watcher.OpCreate, IsDir: false, Timestamp: time.Now()},
+	}))
+
+	initialEdges, err := repo.ListEdges(ctx, graph.EdgeQuery{ProjectID: "test-project", SourcePath: "main.go"})
+	require.NoError(t, err)
+	requireGraphEdgeToImport(t, initialEdges, "fmt")
+
+	require.NoError(t, os.WriteFile(testFile, []byte(`package main
+
+import "errors"
+
+func newFunction() error {
+	return errors.New("new")
+}
+`), 0o644))
+	require.NoError(t, coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "main.go", Operation: watcher.OpModify, IsDir: false, Timestamp: time.Now()},
+	}))
+
+	updatedEdges, err := repo.ListEdges(ctx, graph.EdgeQuery{ProjectID: "test-project", SourcePath: "main.go"})
+	require.NoError(t, err)
+	requireGraphEdgeToImport(t, updatedEdges, "errors")
+	assertGraphLacksEdgeToImport(t, updatedEdges, "fmt")
+}
+
+func TestCoordinator_HandleEvents_CreateMarkdownUsesKnownGraphPaths(t *testing.T) {
+	coord, tempDir, repo, cleanup := setupTestCoordinatorWithGraph(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "impl.go"), []byte("package main\nfunc impl() {}\n"), 0o644))
+	require.NoError(t, coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "impl.go", Operation: watcher.OpCreate, IsDir: false, Timestamp: time.Now()},
+	}))
+
+	require.NoError(t, os.MkdirAll(filepath.Join(tempDir, "docs"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "docs", "design.md"), []byte("This design is implemented in `impl.go`.\n"), 0o644))
+	require.NoError(t, coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "docs/design.md", Operation: watcher.OpCreate, IsDir: false, Timestamp: time.Now()},
+	}))
+
+	docEdges, err := repo.ListEdges(ctx, graph.EdgeQuery{ProjectID: "test-project", SourcePath: "docs/design.md"})
+	require.NoError(t, err)
+	requireGraphEdgeToFile(t, docEdges, graph.EdgeKindDocMentionsFile, "impl.go")
+}
+
+func TestCoordinator_HandleEvents_CreateMarkdownUsesKnownGraphSymbolsAndConfigKeys(t *testing.T) {
+	coord, tempDir, repo, cleanup := setupTestCoordinatorWithGraph(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "cmd.go"), []byte("package main\nfunc Execute() {}\n"), 0o644))
+	require.NoError(t, coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "cmd.go", Operation: watcher.OpCreate, IsDir: false, Timestamp: time.Now()},
+	}))
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "config.yaml"), []byte("aman:\n  provider: static\n"), 0o644))
+	require.NoError(t, coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "config.yaml", Operation: watcher.OpCreate, IsDir: false, Timestamp: time.Now()},
+	}))
+
+	require.NoError(t, os.MkdirAll(filepath.Join(tempDir, "docs"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "docs", "operator.md"), []byte("Run `Execute` with `aman.provider`.\n"), 0o644))
+	require.NoError(t, coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "docs/operator.md", Operation: watcher.OpCreate, IsDir: false, Timestamp: time.Now()},
+	}))
+
+	docEdges, err := repo.ListEdges(ctx, graph.EdgeQuery{ProjectID: "test-project", SourcePath: "docs/operator.md"})
+	require.NoError(t, err)
+	assertGraphHasEdgeKind(t, docEdges, graph.EdgeKindDocMentionsSymbol)
+	assertGraphHasEdgeKind(t, docEdges, graph.EdgeKindDocMentionsConfigKey)
+}
+
+func TestCoordinator_HandleEvents_ConfigFileUpdatesGraphWithoutSearchChunks(t *testing.T) {
+	coord, tempDir, repo, cleanup := setupTestCoordinatorWithGraph(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "config.yaml"), []byte("server:\n  port: 8080\n"), 0o644))
+	require.NoError(t, coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "config.yaml", Operation: watcher.OpCreate, IsDir: false, Timestamp: time.Now()},
+	}))
+
+	fileID := generateFileID(coord.config.ProjectID, "config.yaml")
+	chunks, err := coord.config.Metadata.GetChunksByFile(ctx, fileID)
+	require.NoError(t, err)
+	assert.Empty(t, chunks, "config sources should feed graph metadata without search chunks")
+
+	results, err := coord.config.Engine.Search(ctx, "server port 8080", search.SearchOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, results, "config sources should not be searchable without chunks")
+
+	edges, err := repo.ListEdges(ctx, graph.EdgeQuery{ProjectID: "test-project", SourcePath: "config.yaml"})
+	require.NoError(t, err)
+	requireGraphEdgeToFile(t, edges, graph.EdgeKindFileDefinesConfigKey, "config.yaml#server.port")
+
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "config.yaml"), []byte("server:\n  host: localhost\n"), 0o644))
+	require.NoError(t, coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "config.yaml", Operation: watcher.OpModify, IsDir: false, Timestamp: time.Now()},
+	}))
+
+	updatedEdges, err := repo.ListEdges(ctx, graph.EdgeQuery{ProjectID: "test-project", SourcePath: "config.yaml"})
+	require.NoError(t, err)
+	requireGraphEdgeToFile(t, updatedEdges, graph.EdgeKindFileDefinesConfigKey, "config.yaml#server.host")
+	for _, edge := range updatedEdges {
+		assert.False(t, strings.HasSuffix(edge.ToNodeID, ":config.yaml#server.port"))
+	}
+}
+
+func TestCoordinator_RefreshGraph_PurgesStaleEdgesWithoutRebuildWhenGraphIsFresh(t *testing.T) {
+	coord, _, cleanup := setupTestCoordinator(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	repo := &MockGraphRepository{
+		SnapshotResult: &graph.StatusSnapshot{
+			Available: true,
+			Status:    graph.GraphStatusFresh,
+			Nodes:     graph.CountSummary{Total: 1},
+			Edges:     graph.CountSummary{Total: 1},
+		},
+	}
+	coord.config.GraphRepository = repo
+	coord.config.GraphStalePurgeAfter = time.Hour
+
+	require.NoError(t, coord.RefreshGraph(ctx))
+
+	assert.True(t, repo.PurgeStaleEdgesCalled)
+	assert.False(t, repo.ResetCalled, "fresh populated graph should not rebuild only to purge stale edges")
+}
+
+func TestCoordinator_HandleEvents_GraphFailureDoesNotFailSearchIndex(t *testing.T) {
+	coord, tempDir, cleanup := setupTestCoordinator(t)
+	defer cleanup()
+	coord.config.GraphRepository = &MockGraphRepository{ReplaceEdgesError: errors.New("graph unavailable")}
+
+	ctx := context.Background()
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "main.go"), []byte("package main\nfunc searchable() {}\n"), 0o644))
+
+	require.NoError(t, coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "main.go", Operation: watcher.OpCreate, IsDir: false, Timestamp: time.Now()},
+	}))
+
+	results, err := coord.config.Engine.Search(ctx, "searchable", search.SearchOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.NotEmpty(t, results, "graph failures should not prevent search indexing")
+}
+
+func TestCoordinator_HandleEvents_ChunkFailureDoesNotPruneExistingGraph(t *testing.T) {
+	coord, tempDir, repo, cleanup := setupTestCoordinatorWithGraph(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	testFile := filepath.Join(tempDir, "main.go")
+	require.NoError(t, os.WriteFile(testFile, []byte("package main\nfunc stable() {}\n"), 0o644))
+	require.NoError(t, coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "main.go", Operation: watcher.OpCreate, IsDir: false, Timestamp: time.Now()},
+	}))
+
+	before, err := repo.ListEdges(ctx, graph.EdgeQuery{ProjectID: "test-project", SourcePath: "main.go"})
+	require.NoError(t, err)
+	require.NotEmpty(t, before)
+
+	coord.config.CodeChunker = &MockChunker{ChunkError: errors.New("chunker unavailable")}
+	require.NoError(t, os.WriteFile(testFile, []byte("package main\nfunc changed() {}\n"), 0o644))
+	require.NoError(t, coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "main.go", Operation: watcher.OpModify, IsDir: false, Timestamp: time.Now()},
+	}))
+
+	after, err := repo.ListEdges(ctx, graph.EdgeQuery{ProjectID: "test-project", SourcePath: "main.go"})
+	require.NoError(t, err)
+	require.NotEmpty(t, after, "chunk failures should leave the prior graph edges intact")
+}
+
+func TestCoordinator_GraphKnownSources_CachesMetadataListingAcrossEvents(t *testing.T) {
+	coord, tempDir, repo, cleanup := setupTestCoordinatorWithGraph(t)
+	defer cleanup()
+	countingMetadata := &countingMetadataStore{MetadataStore: coord.config.Metadata}
+	coord.config.Metadata = countingMetadata
+
+	ctx := context.Background()
+	testFile := filepath.Join(tempDir, "main.go")
+	require.NoError(t, os.WriteFile(testFile, []byte("package main\nfunc first() {}\n"), 0o644))
+	require.NoError(t, coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "main.go", Operation: watcher.OpCreate, IsDir: false, Timestamp: time.Now()},
+	}))
+	require.Equal(t, 1, countingMetadata.listFilesCalls)
+
+	require.NoError(t, os.WriteFile(testFile, []byte("package main\nfunc second() {}\n"), 0o644))
+	require.NoError(t, coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "main.go", Operation: watcher.OpModify, IsDir: false, Timestamp: time.Now()},
+	}))
+	require.Equal(t, 1, countingMetadata.listFilesCalls, "known graph sources should be cached across incremental updates")
+
+	edges, err := repo.ListEdges(ctx, graph.EdgeQuery{ProjectID: "test-project", SourcePath: "main.go"})
+	require.NoError(t, err)
+	require.NotEmpty(t, edges)
+}
+
+func TestCoordinator_UpdateGraphSource_RecordsPartialOnExtractorErrors(t *testing.T) {
+	coord, _, repo, cleanup := setupTestCoordinatorWithGraph(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	err := coord.updateGraphSource(ctx, "bad.yaml", "yaml", scanner.ContentTypeMarkdown, []byte(":\n"), []*chunk.Chunk{{
+		ID:          "bad-yaml-chunk",
+		FilePath:    "bad.yaml",
+		Content:     ":\n",
+		ContentType: chunk.ContentTypeMarkdown,
+		Language:    "yaml",
+		StartLine:   1,
+		EndLine:     1,
+	}})
+	require.NoError(t, err)
+
+	snapshot, err := repo.Snapshot(ctx, graph.StatusOptions{ProjectID: "test-project", Now: time.Now()})
+	require.NoError(t, err)
+	assert.Equal(t, graph.GraphStatusPartial, snapshot.Status)
+}
+
+func TestCoordinator_HandleEvents_IndexesModifiedPDF(t *testing.T) {
+	coord, tempDir, cleanup := setupTestCoordinator(t)
+	defer cleanup()
+	coord.config.PDFChunker = &MockChunker{
+		Chunks: []*chunk.Chunk{
+			{
+				ID:          "pdf-event-chunk",
+				FilePath:    "docs/spec.pdf",
+				Content:     "PDF incremental refresh marker",
+				RawContent:  "PDF incremental refresh marker",
+				ContentType: chunk.ContentTypePDF,
+				Language:    "pdf",
+				Metadata:    map[string]string{"content_type": "pdf", "chunker": "pdf", "page_start": "1", "page_end": "1"},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	require.NoError(t, os.MkdirAll(filepath.Join(tempDir, "docs"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "docs", "spec.pdf"), []byte("%PDF-1.7\x00binary-marker\n%%EOF"), 0o644))
+
+	err := coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "docs/spec.pdf", Operation: watcher.OpModify, IsDir: false, Timestamp: time.Now()},
+	})
+	require.NoError(t, err)
+
+	fileID := generateFileID(coord.config.ProjectID, "docs/spec.pdf")
+	chunks, err := coord.config.Metadata.GetChunksByFile(ctx, fileID)
+	require.NoError(t, err)
+	require.Len(t, chunks, 1)
+	assert.Equal(t, store.ContentTypePDF, chunks[0].ContentType)
+	assert.Equal(t, "pdf", chunks[0].Metadata["content_type"])
+
+	results, err := coord.config.Engine.Search(ctx, "incremental refresh marker", search.SearchOptions{Limit: 10, Filter: "docs"})
+	require.NoError(t, err)
+	assert.NotEmpty(t, results)
+}
+
+func TestCoordinator_HandleEvents_DoesNotRedactPDFBytesBeforeChunking(t *testing.T) {
+	coord, tempDir, cleanup := setupTestCoordinator(t)
+	defer cleanup()
+
+	rawSecret := "0123456789abcdefghijklmnopqrstuvwxyzABCDEF"
+	pdfBytes := []byte("%PDF-1.7\nxref\ntoken = \"" + rawSecret + "\"\n%%EOF")
+	pdfChunker := &MockChunker{
+		Chunks: []*chunk.Chunk{
+			{
+				ID:          "pdf-secret-event-chunk",
+				FilePath:    "docs/secret.pdf",
+				Content:     "Extracted PDF text token = \"" + rawSecret + "\"",
+				RawContent:  "Extracted PDF text token = \"" + rawSecret + "\"",
+				ContentType: chunk.ContentTypePDF,
+				Language:    "pdf",
+				Metadata: map[string]string{
+					"content_type": "pdf",
+					"chunker":      "pdf",
+					"page_number":  "1",
+					"page_start":   "1",
+					"page_end":     "1",
+				},
+			},
+		},
+	}
+	coord.config.PDFChunker = pdfChunker
+
+	ctx := context.Background()
+	require.NoError(t, os.MkdirAll(filepath.Join(tempDir, "docs"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "docs", "secret.pdf"), pdfBytes, 0o644))
+
+	err := coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "docs/secret.pdf", Operation: watcher.OpModify, IsDir: false, Timestamp: time.Now()},
+	})
+	require.NoError(t, err)
+
+	require.Len(t, pdfChunker.Inputs, 1)
+	assert.Equal(t, pdfBytes, pdfChunker.Inputs[0].Content, "PDF parser input must not be redacted before extraction")
+
+	fileID := generateFileID(coord.config.ProjectID, "docs/secret.pdf")
+	chunks, err := coord.config.Metadata.GetChunksByFile(ctx, fileID)
+	require.NoError(t, err)
+	require.Len(t, chunks, 1)
+	assert.NotContains(t, chunks[0].Content, rawSecret)
+	assert.Contains(t, chunks[0].Content, "[REDACTED:generic-secret-assignment]")
+	assert.Equal(t, "redact", chunks[0].Metadata["secret_scan_action"])
+}
+
 func TestCoordinator_HandleEvents_Delete(t *testing.T) {
 	coord, tempDir, cleanup := setupTestCoordinator(t)
 	defer cleanup()
@@ -278,6 +701,121 @@ func deleteMe() {
 	// Verify it's no longer searchable
 	results, _ = coord.config.Engine.Search(ctx, "deleteMe", search.SearchOptions{Limit: 10})
 	assert.Empty(t, results, "expected file to be removed from index")
+}
+
+func TestCoordinator_HandleEvents_DeleteRemovesSourceEdgesAndMarksInboundEdgesStale(t *testing.T) {
+	coord, tempDir, repo, cleanup := setupTestCoordinatorWithGraph(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	testFile := filepath.Join(tempDir, "impl.go")
+	require.NoError(t, os.WriteFile(testFile, []byte("package main\nfunc impl() {}\n"), 0o644))
+	require.NoError(t, coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "impl.go", Operation: watcher.OpCreate, IsDir: false, Timestamp: time.Now()},
+	}))
+
+	docNode, err := repo.UpsertNode(ctx, graph.Node{
+		ProjectID:  "test-project",
+		Kind:       graph.NodeKindFile,
+		Key:        "docs/design.md",
+		SourcePath: "docs/design.md",
+		Name:       "design.md",
+	})
+	require.NoError(t, err)
+	implNode, err := repo.UpsertNode(ctx, graph.Node{
+		ProjectID:  "test-project",
+		Kind:       graph.NodeKindFile,
+		Key:        "impl.go",
+		SourcePath: "impl.go",
+		Name:       "impl.go",
+	})
+	require.NoError(t, err)
+	_, err = repo.UpsertEdge(ctx, graph.Edge{
+		ProjectID:  "test-project",
+		Kind:       graph.EdgeKindDocMentionsPath,
+		FromNodeID: docNode.ID,
+		ToNodeID:   implNode.ID,
+		Extractor:  graph.ExtractorCheap,
+		SourcePath: "docs/design.md",
+		Evidence:   graph.Evidence{Method: "test"},
+		Confidence: 0.7,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, os.Remove(testFile))
+	require.NoError(t, coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "impl.go", Operation: watcher.OpDelete, IsDir: false, Timestamp: time.Now()},
+	}))
+
+	sourceEdges, err := repo.ListEdges(ctx, graph.EdgeQuery{ProjectID: "test-project", SourcePath: "impl.go"})
+	require.NoError(t, err)
+	assert.Empty(t, sourceEdges, "delete events should remove graph edges originating from the deleted file")
+
+	docEdges, err := repo.ListEdges(ctx, graph.EdgeQuery{ProjectID: "test-project", SourcePath: "docs/design.md"})
+	require.NoError(t, err)
+	require.Len(t, docEdges, 1)
+	assert.True(t, docEdges[0].Stale, "edges pointing to the deleted file should be marked stale")
+}
+
+func TestCoordinator_HandleEvents_RenameUpdatesGraphFromOldPathToNewPath(t *testing.T) {
+	coord, tempDir, repo, cleanup := setupTestCoordinatorWithGraph(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	oldPath := filepath.Join(tempDir, "old.go")
+	newPath := filepath.Join(tempDir, "new.go")
+	require.NoError(t, os.WriteFile(oldPath, []byte("package main\nfunc oldName() {}\n"), 0o644))
+	require.NoError(t, coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "old.go", Operation: watcher.OpCreate, IsDir: false, Timestamp: time.Now()},
+	}))
+	docNode, err := repo.UpsertNode(ctx, graph.Node{
+		ProjectID:  "test-project",
+		Kind:       graph.NodeKindFile,
+		Key:        "docs/design.md",
+		SourcePath: "docs/design.md",
+		Name:       "design.md",
+	})
+	require.NoError(t, err)
+	oldNode, err := repo.UpsertNode(ctx, graph.Node{
+		ProjectID:  "test-project",
+		Kind:       graph.NodeKindFile,
+		Key:        "old.go",
+		SourcePath: "old.go",
+		Name:       "old.go",
+	})
+	require.NoError(t, err)
+	_, err = repo.UpsertEdge(ctx, graph.Edge{
+		ProjectID:  "test-project",
+		Kind:       graph.EdgeKindDocMentionsPath,
+		FromNodeID: docNode.ID,
+		ToNodeID:   oldNode.ID,
+		Extractor:  graph.ExtractorCheap,
+		SourcePath: "docs/design.md",
+		Evidence:   graph.Evidence{Method: "test"},
+		Confidence: 0.7,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, os.Rename(oldPath, newPath))
+	require.NoError(t, os.WriteFile(newPath, []byte("package main\nfunc newName() {}\n"), 0o644))
+	require.NoError(t, coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "old.go", Operation: watcher.OpRename, IsDir: false, Timestamp: time.Now()},
+		{Path: "new.go", Operation: watcher.OpCreate, IsDir: false, Timestamp: time.Now()},
+	}))
+
+	oldEdges, err := repo.ListEdges(ctx, graph.EdgeQuery{ProjectID: "test-project", SourcePath: "old.go"})
+	require.NoError(t, err)
+	assert.Empty(t, oldEdges)
+
+	newEdges, err := repo.ListEdges(ctx, graph.EdgeQuery{ProjectID: "test-project", SourcePath: "new.go"})
+	require.NoError(t, err)
+	require.NotEmpty(t, newEdges)
+	assertGraphHasEdgeKind(t, newEdges, graph.EdgeKindFileDeclaresPackage)
+
+	docEdges, err := repo.ListEdges(ctx, graph.EdgeQuery{ProjectID: "test-project", SourcePath: "docs/design.md"})
+	require.NoError(t, err)
+	require.Len(t, docEdges, 1)
+	assert.True(t, docEdges[0].Stale, "fsnotify-shape rename should mark inbound edges to the old path stale")
 }
 
 func TestCoordinator_HandleEvents_SkipsBinaryFiles(t *testing.T) {
@@ -671,6 +1209,99 @@ func TestCoordinator_HandleEvents_ConfigChange_RespectsExcludePatterns(t *testin
 	assert.Len(t, paths, 2, "expected 2 files after config change - exclude patterns should be respected")
 	assert.Contains(t, paths, "keep.go")
 	assert.Contains(t, paths, "also_keep.go")
+}
+
+func TestCoordinator_ReconcileGraphOnStartup_BuildsEmptyGraphFromMetadata(t *testing.T) {
+	coord, tempDir, repo, cleanup := setupTestCoordinatorWithGraph(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	coord.config.GraphRepository = nil
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "offline.go"), []byte("package main\nfunc offline() {}\n"), 0o644))
+	require.NoError(t, coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "offline.go", Operation: watcher.OpCreate, IsDir: false, Timestamp: time.Now()},
+	}))
+
+	before, err := repo.Snapshot(ctx, graph.StatusOptions{ProjectID: "test-project", Now: time.Now()})
+	require.NoError(t, err)
+	require.Equal(t, graph.GraphStatusEmpty, before.Status)
+
+	coord.config.GraphRepository = repo
+	require.NoError(t, coord.ReconcileGraphOnStartup(ctx))
+
+	after, err := repo.Snapshot(ctx, graph.StatusOptions{ProjectID: "test-project", Now: time.Now()})
+	require.NoError(t, err)
+	assert.Equal(t, graph.GraphStatusFresh, after.Status)
+	assert.Greater(t, after.Edges.Total, 0)
+}
+
+func TestCoordinator_RefreshGraph_RebuildsFromMetadataEvenWhenStatusIsFresh(t *testing.T) {
+	coord, tempDir, repo, cleanup := setupTestCoordinatorWithGraph(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "refresh.go"), []byte("package main\nfunc refresh() {}\n"), 0o644))
+	require.NoError(t, coord.HandleEvents(ctx, []watcher.FileEvent{
+		{Path: "refresh.go", Operation: watcher.OpCreate, IsDir: false, Timestamp: time.Now()},
+	}))
+
+	require.NoError(t, repo.Reset(ctx))
+	require.NoError(t, repo.RecordBuild(ctx, graph.BuildMetadata{
+		ProjectID:   "test-project",
+		Status:      graph.GraphStatusFresh,
+		StartedAt:   time.Now().Add(-time.Second),
+		CompletedAt: time.Now(),
+		Message:     "stale fresh marker for refresh test",
+	}))
+
+	before, err := repo.Snapshot(ctx, graph.StatusOptions{ProjectID: "test-project", Now: time.Now()})
+	require.NoError(t, err)
+	require.Equal(t, graph.GraphStatusFresh, before.Status)
+	require.Zero(t, before.Edges.Total)
+
+	require.NoError(t, coord.RefreshGraph(ctx))
+
+	after, err := repo.Snapshot(ctx, graph.StatusOptions{ProjectID: "test-project", Now: time.Now()})
+	require.NoError(t, err)
+	assert.Equal(t, graph.GraphStatusFresh, after.Status)
+	assert.Greater(t, after.Edges.Total, 0)
+}
+
+func TestCoordinator_HandleEvents_ConcurrentGraphUpdatesAreConsistent(t *testing.T) {
+	coord, tempDir, repo, cleanup := setupTestCoordinatorWithGraph(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	const fileCount = 8
+	for i := 0; i < fileCount; i++ {
+		rel := fmt.Sprintf("file%d.go", i)
+		require.NoError(t, os.WriteFile(filepath.Join(tempDir, rel), []byte(fmt.Sprintf("package main\nfunc f%d() {}\n", i)), 0o644))
+	}
+
+	errCh := make(chan error, fileCount)
+	for i := 0; i < fileCount; i++ {
+		i := i
+		go func() {
+			rel := fmt.Sprintf("file%d.go", i)
+			errCh <- coord.HandleEvents(ctx, []watcher.FileEvent{
+				{Path: rel, Operation: watcher.OpCreate, IsDir: false, Timestamp: time.Now()},
+			})
+		}()
+	}
+	for i := 0; i < fileCount; i++ {
+		require.NoError(t, <-errCh)
+	}
+
+	edges, err := repo.ListEdges(ctx, graph.EdgeQuery{ProjectID: "test-project", Extractor: graph.ExtractorCheap})
+	require.NoError(t, err)
+	require.NotEmpty(t, edges)
+	sources := map[string]bool{}
+	for _, edge := range edges {
+		sources[edge.SourcePath] = true
+	}
+	for i := 0; i < fileCount; i++ {
+		assert.True(t, sources[fmt.Sprintf("file%d.go", i)], "graph should contain edges for file%d.go", i)
+	}
 }
 
 // =============================================================================

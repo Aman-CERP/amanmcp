@@ -35,6 +35,14 @@ const (
 
 	// ExactQuotedContentBoost lifts chunks containing the exact quoted phrase.
 	ExactQuotedContentBoost = 1.2
+
+	// PDFContentBoost lifts PDF chunks when the user explicitly asks about PDF
+	// content inside a broader docs search.
+	PDFContentBoost = 3.0
+
+	// DeclarationSymbolTypeMismatchPenalty demotes methods/functions with the
+	// requested name when the user asked for a type declaration.
+	DeclarationSymbolTypeMismatchPenalty = 0.2
 )
 
 // FilterFunc checks if a search result matches filter criteria.
@@ -126,6 +134,7 @@ func contentTypeFilter(filter string) FilterFunc {
 			return r.Chunk.ContentType == store.ContentTypeCode
 		case "docs":
 			return r.Chunk.ContentType == store.ContentTypeMarkdown ||
+				r.Chunk.ContentType == store.ContentTypePDF ||
 				r.Chunk.ContentType == store.ContentTypeText
 		default:
 			return true
@@ -324,6 +333,7 @@ func ApplyExactMatchBoost(results []*SearchResult, query string) []*SearchResult
 	if needle == "" {
 		return results
 	}
+	declarationTypes := declarationSymbolTypes(query)
 
 	for _, r := range results {
 		if r == nil || r.Chunk == nil {
@@ -333,7 +343,11 @@ func ApplyExactMatchBoost(results []*SearchResult, query string) []*SearchResult
 		switch {
 		case r.Chunk.FilePath == needle:
 			r.Score *= ExactPathBoost
-		case hasExactSymbol(r.Chunk, needle):
+		case len(declarationTypes) > 0 && hasExactSymbolOfType(r.Chunk, needle, declarationTypes):
+			r.Score *= ExactSymbolBoost
+		case len(declarationTypes) > 0 && hasExactSymbol(r.Chunk, needle):
+			r.Score *= DeclarationSymbolTypeMismatchPenalty
+		case len(declarationTypes) == 0 && hasExactSymbol(r.Chunk, needle):
 			r.Score *= ExactSymbolBoost
 		case quoted && strings.Contains(r.Chunk.Content, needle):
 			r.Score *= ExactQuotedContentBoost
@@ -347,8 +361,32 @@ func ApplyExactMatchBoost(results []*SearchResult, query string) []*SearchResult
 	return results
 }
 
+func ApplyPDFContentBoost(results []*SearchResult, query string) []*SearchResult {
+	if len(results) == 0 || !shouldBoostPDFContent(query) {
+		return results
+	}
+
+	for _, r := range results {
+		if r == nil || r.Chunk == nil {
+			continue
+		}
+		if r.Chunk.ContentType == store.ContentTypePDF {
+			r.Score *= PDFContentBoost
+		}
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
+	})
+
+	return results
+}
+
 func exactMatchNeedle(query string) (string, bool) {
 	query = strings.TrimSpace(query)
+	if needle := declarationSymbolNeedle(query); needle != "" {
+		return needle, false
+	}
 	if !shouldPreserveExactLexicalQuery(query) {
 		return "", false
 	}
@@ -360,10 +398,39 @@ func exactMatchNeedle(query string) (string, bool) {
 	return query, false
 }
 
+func declarationSymbolTypes(query string) []store.SymbolType {
+	fields := strings.Fields(strings.TrimSpace(query))
+	if len(fields) != 3 || !strings.EqualFold(fields[0], "type") || !isASCIIGoIdentifier(fields[1]) {
+		return nil
+	}
+	switch strings.ToLower(fields[2]) {
+	case "struct":
+		return []store.SymbolType{store.SymbolTypeType, store.SymbolTypeClass}
+	case "interface":
+		return []store.SymbolType{store.SymbolTypeInterface, store.SymbolTypeType}
+	default:
+		return nil
+	}
+}
+
 func hasExactSymbol(chunk *store.Chunk, name string) bool {
 	for _, symbol := range chunk.Symbols {
 		if symbol != nil && symbol.Name == name {
 			return true
+		}
+	}
+	return false
+}
+
+func hasExactSymbolOfType(chunk *store.Chunk, name string, symbolTypes []store.SymbolType) bool {
+	for _, symbol := range chunk.Symbols {
+		if symbol == nil || symbol.Name != name {
+			continue
+		}
+		for _, symbolType := range symbolTypes {
+			if symbol.Type == symbolType {
+				return true
+			}
 		}
 	}
 	return false

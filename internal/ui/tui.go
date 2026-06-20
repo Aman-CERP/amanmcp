@@ -16,15 +16,15 @@ import (
 
 // TUIRenderer provides rich terminal UI using bubbletea.
 type TUIRenderer struct {
-	mu       sync.Mutex
-	cfg      Config
-	program  *tea.Program
-	model    *indexingModel
-	tracker  *ProgressTracker
-	ctx      context.Context
-	cancel   context.CancelFunc
-	started  bool
-	done     chan struct{}
+	mu      sync.Mutex
+	cfg     Config
+	program *tea.Program
+	model   *indexingModel
+	tracker *ProgressTracker
+	ctx     context.Context
+	cancel  context.CancelFunc
+	started bool
+	done    chan struct{}
 }
 
 // NewTUIRenderer creates a TUI renderer.
@@ -319,6 +319,7 @@ func (m *indexingModel) renderStages() string {
 	}{
 		{StageScanning, "Scan"},
 		{StageChunking, "Chunk"},
+		{StageGraph, "Graph"},
 		{StageEmbedding, "Embed"},
 		{StageIndexing, "Index"},
 	}
@@ -487,7 +488,6 @@ func formatDuration(d time.Duration) string {
 	m := int(d.Minutes()) % 60
 	return fmt.Sprintf("%dh %dm", h, m)
 }
-
 
 // renderComplete renders the completion summary with polished box layout.
 func (m *indexingModel) renderComplete() string {

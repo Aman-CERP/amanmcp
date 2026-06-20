@@ -26,7 +26,7 @@ amanmcp doctor
 
 | Software | Version | Required | Notes |
 |----------|---------|----------|-------|
-| **Go** | 1.25.9+ | Build only | Not needed at runtime |
+| **Go** | 1.26.4+ | Build only | Not needed at runtime |
 | **CGO Toolchain** | Any | Build only | For tree-sitter only |
 
 **Note:** AmanMCP uses Ollama for embeddings by default. Static embeddings are available for offline use.

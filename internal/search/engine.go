@@ -224,10 +224,19 @@ func (e *Engine) Search(ctx context.Context, query string, opts SearchOptions) (
 		if err != nil {
 			return nil, err
 		}
+		enriched, err = e.addADRReferenceCandidates(ctx, enriched, query, opts)
+		if err != nil {
+			return nil, err
+		}
+		enriched, err = e.addPDFContentCandidates(ctx, enriched, query, opts)
+		if err != nil {
+			return nil, err
+		}
 		// FEAT-QI5: Enrich with adjacent context if requested
 		e.enrichResultsWithAdjacent(ctx, enriched, opts.AdjacentChunks, 5)
 		// TASK-SYN42: Exact lexical lookups should rank definitions above references.
 		enriched = ApplyExactMatchBoost(enriched, query)
+		enriched = ApplyPDFContentBoost(enriched, query)
 		// FEAT-QI4: Apply test file penalty to prioritize real implementations
 		enriched = ApplyTestFilePenalty(enriched)
 		// BUG-066: Apply path boost to prioritize internal/ over cmd/
@@ -270,10 +279,19 @@ func (e *Engine) Search(ctx context.Context, query string, opts SearchOptions) (
 		if err != nil {
 			return nil, err
 		}
+		enriched, err = e.addADRReferenceCandidates(ctx, enriched, query, opts)
+		if err != nil {
+			return nil, err
+		}
+		enriched, err = e.addPDFContentCandidates(ctx, enriched, query, opts)
+		if err != nil {
+			return nil, err
+		}
 		// FEAT-QI5: Enrich with adjacent context if requested
 		e.enrichResultsWithAdjacent(ctx, enriched, opts.AdjacentChunks, 5)
 		// TASK-SYN42: Exact lexical lookups should rank definitions above references.
 		enriched = ApplyExactMatchBoost(enriched, query)
+		enriched = ApplyPDFContentBoost(enriched, query)
 		// FEAT-QI4: Apply test file penalty to prioritize real implementations
 		enriched = ApplyTestFilePenalty(enriched)
 		// BUG-066: Apply path boost to prioritize internal/ over cmd/
@@ -319,12 +337,21 @@ func (e *Engine) Search(ctx context.Context, query string, opts SearchOptions) (
 	if err != nil {
 		return nil, err
 	}
+	enriched, err = e.addADRReferenceCandidates(ctx, enriched, query, opts)
+	if err != nil {
+		return nil, err
+	}
+	enriched, err = e.addPDFContentCandidates(ctx, enriched, query, opts)
+	if err != nil {
+		return nil, err
+	}
 
 	// FEAT-QI5: Enrich with adjacent context if requested
 	e.enrichResultsWithAdjacent(ctx, enriched, opts.AdjacentChunks, 5)
 
 	// TASK-SYN42: Exact lexical lookups should rank definitions above references.
 	enriched = ApplyExactMatchBoost(enriched, query)
+	enriched = ApplyPDFContentBoost(enriched, query)
 	// FEAT-QI4: Apply test file penalty to prioritize real implementations
 	enriched = ApplyTestFilePenalty(enriched)
 	// BUG-066: Apply path boost to prioritize internal/ over cmd/
@@ -362,6 +389,9 @@ func candidateLimitForOptions(query string, opts SearchOptions) int {
 	if !shouldBroadenCandidatePool(query, opts) {
 		return baseLimit
 	}
+	if shouldUseBaseLimitForExpandedContentFilter(query, opts, resultLimit) {
+		return baseLimit
+	}
 
 	exactLimit := resultLimit * 10
 	if exactLimit < 50 {
@@ -370,12 +400,41 @@ func candidateLimitForOptions(query string, opts SearchOptions) int {
 	return exactLimit
 }
 
+func shouldUseBaseLimitForExpandedContentFilter(query string, opts SearchOptions, resultLimit int) bool {
+	if resultLimit < 50 {
+		return false
+	}
+	if !hasPostRetrievalContentFilter(opts) {
+		return false
+	}
+	if shouldPreserveExactLexicalQuery(query) || adrRefPattern.MatchString(query) {
+		return false
+	}
+	return true
+}
+
 func shouldBroadenCandidatePool(query string, opts SearchOptions) bool {
 	switch opts.Mode {
 	case SearchModeDecisions, SearchModeDecisionHistory:
 		return true
+	}
+
+	if shouldPreserveExactLexicalQuery(query) {
+		return true
+	}
+
+	// Content-type filters are applied after enrichment, so unfiltered retrieval
+	// can spend the whole candidate window on another content class before the
+	// requested class is filtered in.
+	return hasPostRetrievalContentFilter(opts)
+}
+
+func hasPostRetrievalContentFilter(opts SearchOptions) bool {
+	switch strings.ToLower(strings.TrimSpace(opts.Filter)) {
+	case "code", "docs":
+		return true
 	default:
-		return shouldPreserveExactLexicalQuery(query)
+		return false
 	}
 }
 
@@ -452,7 +511,7 @@ func (e *Engine) Index(ctx context.Context, chunks []*store.Chunk) error {
 	for i, c := range chunks {
 		docs[i] = &store.Document{
 			ID:      c.ID,
-			Content: c.Content,
+			Content: store.BM25DocumentContent(c.FilePath, c.Content),
 		}
 	}
 
@@ -920,6 +979,386 @@ func (e *Engine) addExactSymbolCandidates(ctx context.Context, results []*Search
 	return results, nil
 }
 
+const (
+	adrReferenceDocCandidateLimit = 20
+	adrReferencePathLimit         = 12
+	adrReferenceChunksPerPath     = 2
+)
+
+// addADRReferenceCandidates supplements ADR-to-code searches with implementation
+// paths mentioned by indexed ADR documents. This bridges decision identifiers
+// such as "ADR-004" to the files named in the decision record without hardcoding
+// any ADR-specific mapping.
+func (e *Engine) addADRReferenceCandidates(ctx context.Context, results []*SearchResult, query string, opts SearchOptions) ([]*SearchResult, error) {
+	if !shouldAddADRReferenceCandidates(query, opts) {
+		return results, nil
+	}
+
+	refs := uniqueADRRefs(query)
+	if len(refs) == 0 {
+		return results, nil
+	}
+
+	paths, err := e.implementationPathsForADRRefs(ctx, refs)
+	if err != nil {
+		return nil, err
+	}
+	if len(paths) == 0 {
+		return results, nil
+	}
+
+	seen := make(map[string]struct{}, len(results))
+	maxScore := 0.0
+	for _, result := range results {
+		if result == nil || result.Chunk == nil {
+			continue
+		}
+		seen[result.Chunk.ID] = struct{}{}
+		if result.Score > maxScore {
+			maxScore = result.Score
+		}
+	}
+	if maxScore <= 0 {
+		maxScore = 1
+	}
+
+	terms := store.TokenizeCode(query)
+	addedPaths := 0
+	for _, filePath := range paths {
+		if addedPaths >= adrReferencePathLimit {
+			break
+		}
+		chunks, err := e.metadata.GetChunksByPath(ctx, filePath, adrReferenceChunksPerPath)
+		if err != nil {
+			return nil, fmt.Errorf("load ADR implementation path candidates for %s: %w", filePath, err)
+		}
+		if len(chunks) == 0 {
+			continue
+		}
+		addedForPath := false
+		for _, chunk := range chunks {
+			if chunk == nil {
+				continue
+			}
+			if _, ok := seen[chunk.ID]; ok {
+				continue
+			}
+			results = append(results, &SearchResult{
+				Chunk:          chunk,
+				Score:          maxScore,
+				Highlights:     e.calculateHighlights(chunk.Content, terms),
+				MatchedTerms:   terms,
+				SourceMetadata: SourceMetadataFromChunkWithRules(chunk, e.config.MetadataRules),
+			})
+			seen[chunk.ID] = struct{}{}
+			addedForPath = true
+		}
+		if addedForPath {
+			addedPaths++
+		}
+	}
+
+	return results, nil
+}
+
+func shouldAddADRReferenceCandidates(query string, opts SearchOptions) bool {
+	if !adrRefPattern.MatchString(query) {
+		return false
+	}
+	filter := strings.ToLower(strings.TrimSpace(opts.Filter))
+	return filter == "code"
+}
+
+func (e *Engine) implementationPathsForADRRefs(ctx context.Context, refs []string) ([]string, error) {
+	seenFiles := make(map[string]struct{})
+	seenPaths := make(map[string]struct{})
+	var paths []string
+
+	for _, ref := range refs {
+		bm25Results, err := e.bm25.Search(ctx, ref, adrReferenceDocCandidateLimit)
+		if err != nil {
+			return nil, fmt.Errorf("search ADR reference %s: %w", ref, err)
+		}
+		chunkIDs := make([]string, 0, len(bm25Results))
+		for _, result := range bm25Results {
+			if result != nil && result.DocID != "" {
+				chunkIDs = append(chunkIDs, result.DocID)
+			}
+		}
+		chunks, err := e.metadata.GetChunks(ctx, chunkIDs)
+		if err != nil {
+			return nil, fmt.Errorf("load ADR reference chunks for %s: %w", ref, err)
+		}
+		for _, chunk := range chunks {
+			if chunk == nil || chunk.FileID == "" {
+				continue
+			}
+			meta := SourceMetadataFromChunkWithRules(chunk, e.config.MetadataRules)
+			if meta.SourceClass != SourceClassADR {
+				continue
+			}
+			if !strings.Contains(strings.ToUpper(chunk.FilePath+"\n"+chunk.Content), strings.ToUpper(ref)) {
+				continue
+			}
+			if _, ok := seenFiles[chunk.FileID]; ok {
+				continue
+			}
+			seenFiles[chunk.FileID] = struct{}{}
+
+			adrChunks, err := e.metadata.GetChunksByFile(ctx, chunk.FileID)
+			if err != nil {
+				return nil, fmt.Errorf("load ADR document chunks for %s: %w", chunk.FilePath, err)
+			}
+			for _, adrChunk := range adrChunks {
+				if adrChunk == nil {
+					continue
+				}
+				for _, filePath := range extractIndexedPathReferences(adrChunk.Content) {
+					if _, ok := seenPaths[filePath]; ok {
+						continue
+					}
+					seenPaths[filePath] = struct{}{}
+					paths = append(paths, filePath)
+				}
+			}
+		}
+	}
+
+	return paths, nil
+}
+
+type chunksByContentTypeStore interface {
+	GetChunksByContentType(ctx context.Context, contentType store.ContentType, limit int) ([]*store.Chunk, error)
+}
+
+const (
+	pdfContentCandidateLimit = 48
+	pdfContentCandidateTopN  = 8
+)
+
+func (e *Engine) addPDFContentCandidates(ctx context.Context, results []*SearchResult, query string, opts SearchOptions) ([]*SearchResult, error) {
+	if !shouldAddPDFContentCandidates(query, opts) {
+		return results, nil
+	}
+	loader, ok := e.metadata.(chunksByContentTypeStore)
+	if !ok {
+		return results, nil
+	}
+
+	chunks, err := loader.GetChunksByContentType(ctx, store.ContentTypePDF, pdfContentCandidateLimit)
+	if err != nil {
+		return nil, fmt.Errorf("load PDF content candidates: %w", err)
+	}
+	if len(chunks) == 0 {
+		return results, nil
+	}
+
+	queryTerms := meaningfulPDFQueryTerms(query)
+	if len(queryTerms) == 0 {
+		return results, nil
+	}
+
+	seen := make(map[string]struct{}, len(results))
+	maxScore := 0.0
+	for _, result := range results {
+		if result == nil || result.Chunk == nil {
+			continue
+		}
+		seen[result.Chunk.ID] = struct{}{}
+		if result.Score > maxScore {
+			maxScore = result.Score
+		}
+	}
+	if maxScore <= 0 {
+		maxScore = 1
+	}
+
+	type scoredChunk struct {
+		chunk *store.Chunk
+		score int
+	}
+	scored := make([]scoredChunk, 0, len(chunks))
+	for _, chunk := range chunks {
+		if chunk == nil {
+			continue
+		}
+		if _, ok := seen[chunk.ID]; ok {
+			continue
+		}
+		score := pdfQueryOverlapScore(queryTerms, chunk)
+		if score == 0 {
+			continue
+		}
+		scored = append(scored, scoredChunk{chunk: chunk, score: score})
+	}
+	if len(scored) == 0 {
+		return results, nil
+	}
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].score != scored[j].score {
+			return scored[i].score > scored[j].score
+		}
+		if scored[i].chunk.FilePath != scored[j].chunk.FilePath {
+			return scored[i].chunk.FilePath < scored[j].chunk.FilePath
+		}
+		return scored[i].chunk.StartLine < scored[j].chunk.StartLine
+	})
+	if len(scored) > pdfContentCandidateTopN {
+		scored = scored[:pdfContentCandidateTopN]
+	}
+
+	terms := store.TokenizeCode(query)
+	for _, candidate := range scored {
+		results = append(results, &SearchResult{
+			Chunk:          candidate.chunk,
+			Score:          maxScore * (1 + 0.05*float64(candidate.score)),
+			Highlights:     e.calculateHighlights(candidate.chunk.Content, terms),
+			MatchedTerms:   terms,
+			SourceMetadata: SourceMetadataFromChunkWithRules(candidate.chunk, e.config.MetadataRules),
+		})
+		seen[candidate.chunk.ID] = struct{}{}
+	}
+
+	return results, nil
+}
+
+func shouldAddPDFContentCandidates(query string, opts SearchOptions) bool {
+	if !shouldBoostPDFContent(query) {
+		return false
+	}
+	filter := strings.ToLower(strings.TrimSpace(opts.Filter))
+	return filter == "" || filter == "all" || filter == "docs"
+}
+
+func shouldBoostPDFContent(query string) bool {
+	query = strings.TrimSpace(query)
+	if !strings.Contains(strings.ToLower(query), "pdf") {
+		return false
+	}
+	if !naturalLanguagePattern.MatchString(query) {
+		return false
+	}
+	if strings.ContainsAny(query, `/\`) {
+		return false
+	}
+	return !containsTechnicalLookupToken(query)
+}
+
+func containsTechnicalLookupToken(query string) bool {
+	for _, token := range strings.Fields(query) {
+		token = strings.Trim(token, `"'.,:;()[]{}<>`)
+		if token == "" || strings.EqualFold(token, "pdf") {
+			continue
+		}
+		if camelCasePattern.MatchString(token) ||
+			pascalCasePattern.MatchString(token) ||
+			exportedIdentifierPattern.MatchString(token) ||
+			snakeCasePattern.MatchString(token) ||
+			screamingSnakePattern.MatchString(token) {
+			return true
+		}
+	}
+	return false
+}
+
+func meaningfulPDFQueryTerms(query string) []string {
+	fields := strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+	})
+	seen := make(map[string]struct{}, len(fields))
+	terms := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if len(field) < 3 || isStopWord(field) {
+			continue
+		}
+		if _, ok := seen[field]; ok {
+			continue
+		}
+		seen[field] = struct{}{}
+		terms = append(terms, field)
+	}
+	return terms
+}
+
+func pdfQueryOverlapScore(queryTerms []string, chunk *store.Chunk) int {
+	text := strings.ToLower(chunk.FilePath + "\n" + chunk.Content)
+	score := 0
+	for _, term := range queryTerms {
+		if strings.Contains(text, term) {
+			score++
+		}
+	}
+	return score
+}
+
+func uniqueADRRefs(query string) []string {
+	matches := adrRefPattern.FindAllString(query, -1)
+	seen := make(map[string]struct{}, len(matches))
+	refs := make([]string, 0, len(matches))
+	for _, match := range matches {
+		ref := strings.ToUpper(match)
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		seen[ref] = struct{}{}
+		refs = append(refs, ref)
+	}
+	return refs
+}
+
+func extractIndexedPathReferences(text string) []string {
+	fields := strings.FieldsFunc(text, func(r rune) bool {
+		switch r {
+		case ' ', '\n', '\t', '\r', '`', '"', '\'', '(', ')', '[', ']', '{', '}', '<', '>', ',', ';':
+			return true
+		default:
+			return false
+		}
+	})
+
+	seen := make(map[string]struct{}, len(fields))
+	paths := make([]string, 0, len(fields))
+	for _, field := range fields {
+		filePath := normalizeIndexedPathReference(field)
+		if filePath == "" {
+			continue
+		}
+		if _, ok := seen[filePath]; ok {
+			continue
+		}
+		seen[filePath] = struct{}{}
+		paths = append(paths, filePath)
+	}
+	return paths
+}
+
+func normalizeIndexedPathReference(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, ":.!?")
+	value = strings.TrimPrefix(value, "./")
+	if value == "" || strings.Contains(value, "://") || strings.HasPrefix(value, "../") {
+		return ""
+	}
+
+	switch {
+	case value == ".amanmcp.yaml", value == ".gitignore", value == "go.mod", value == "Makefile":
+		return value
+	case strings.HasPrefix(value, "cmd/"),
+		strings.HasPrefix(value, "internal/"),
+		strings.HasPrefix(value, "pkg/"),
+		strings.HasPrefix(value, "configs/"),
+		strings.HasPrefix(value, "docs/"),
+		strings.HasPrefix(value, "scripts/"),
+		strings.HasPrefix(value, "mlx-server/"),
+		strings.HasPrefix(value, ".aman-pm/"):
+		if strings.Contains(value, "/") && strings.Contains(value, ".") {
+			return value
+		}
+	}
+
+	return ""
+}
+
 // enrichResultsWithAdjacent fetches adjacent chunks for context continuity.
 // FEAT-QI5: For each top-N result, retrieves chunks before/after from the same file.
 // This improves "How does X work" queries by providing surrounding context.
@@ -1223,10 +1662,11 @@ func (e *Engine) multiQuerySearch(ctx context.Context, query string, opts Search
 	// Apply defaults for consistent options across sub-queries
 	opts = e.applyDefaults(opts)
 
+	subQueries := e.multiQuery.decomposer.Decompose(query)
+
 	// FEAT-UNIX3: Get sub-queries for explain output
 	var subQueryStrings []string
 	if opts.Explain {
-		subQueries := e.multiQuery.decomposer.Decompose(query)
 		subQueryStrings = make([]string, len(subQueries))
 		for i, sq := range subQueries {
 			subQueryStrings[i] = sq.Query
@@ -1263,12 +1703,25 @@ func (e *Engine) multiQuerySearch(ctx context.Context, query string, opts Search
 	if err != nil {
 		return nil, err
 	}
+	enriched, err = e.addADRReferenceCandidates(ctx, enriched, query, opts)
+	if err != nil {
+		return nil, err
+	}
+	enriched, err = e.addSubQueryPathCandidates(ctx, enriched, subQueries, opts)
+	if err != nil {
+		return nil, err
+	}
+	enriched, err = e.addPDFContentCandidates(ctx, enriched, query, opts)
+	if err != nil {
+		return nil, err
+	}
 
 	// FEAT-QI5: Enrich with adjacent context if requested
 	e.enrichResultsWithAdjacent(ctx, enriched, opts.AdjacentChunks, 5)
 
 	// TASK-SYN42: Exact lexical lookups should rank definitions above references.
 	enriched = ApplyExactMatchBoost(enriched, query)
+	enriched = ApplyPDFContentBoost(enriched, query)
 	// FEAT-QI4: Apply test file penalty to prioritize real implementations
 	enriched = ApplyTestFilePenalty(enriched)
 	// BUG-066: Apply path boost to prioritize internal/ over cmd/
@@ -1292,6 +1745,90 @@ func (e *Engine) multiQuerySearch(ctx context.Context, query string, opts Search
 		slog.Duration("duration", time.Since(start)))
 
 	return filtered, nil
+}
+
+const (
+	subQueryPathCandidatePathLimit = 8
+	subQueryPathChunksPerPath      = 3
+)
+
+func (e *Engine) addSubQueryPathCandidates(ctx context.Context, results []*SearchResult, subQueries []SubQuery, opts SearchOptions) ([]*SearchResult, error) {
+	if len(subQueries) == 0 || !hasPostRetrievalContentFilter(opts) {
+		return results, nil
+	}
+
+	seenChunks := make(map[string]struct{}, len(results))
+	maxScore := 0.0
+	for _, result := range results {
+		if result == nil || result.Chunk == nil {
+			continue
+		}
+		seenChunks[result.Chunk.ID] = struct{}{}
+		if result.Score > maxScore {
+			maxScore = result.Score
+		}
+	}
+	if maxScore <= 0 {
+		maxScore = 1
+	}
+
+	seenPaths := make(map[string]struct{}, len(subQueries))
+	addedPaths := 0
+	for _, subQuery := range subQueries {
+		filePath := strings.TrimSpace(subQuery.Query)
+		if !isSafeSubQueryPathHint(filePath) {
+			continue
+		}
+		if _, ok := seenPaths[filePath]; ok {
+			continue
+		}
+		seenPaths[filePath] = struct{}{}
+		if addedPaths >= subQueryPathCandidatePathLimit {
+			break
+		}
+
+		chunks, err := e.metadata.GetChunksByPath(ctx, filePath, subQueryPathChunksPerPath)
+		if err != nil {
+			return nil, fmt.Errorf("load sub-query path candidates for %s: %w", filePath, err)
+		}
+		if len(chunks) == 0 {
+			continue
+		}
+		terms := store.TokenizeCode(filePath)
+		addedForPath := false
+		for _, chunk := range chunks {
+			if chunk == nil {
+				continue
+			}
+			if _, ok := seenChunks[chunk.ID]; ok {
+				continue
+			}
+			results = append(results, &SearchResult{
+				Chunk:          chunk,
+				Score:          maxScore,
+				Highlights:     e.calculateHighlights(chunk.Content, terms),
+				MatchedTerms:   terms,
+				SourceMetadata: SourceMetadataFromChunkWithRules(chunk, e.config.MetadataRules),
+			})
+			seenChunks[chunk.ID] = struct{}{}
+			addedForPath = true
+		}
+		if addedForPath {
+			addedPaths++
+		}
+	}
+
+	return results, nil
+}
+
+func isSafeSubQueryPathHint(filePath string) bool {
+	if filePath == "" || strings.HasPrefix(filePath, "/") {
+		return false
+	}
+	if strings.Contains(filePath, "..") {
+		return false
+	}
+	return filePathPattern.MatchString(filePath)
 }
 
 // singleSearch executes a single hybrid search without multi-query decomposition.
@@ -1357,6 +1894,11 @@ func (e *Engine) singleSearch(ctx context.Context, query string, opts SearchOpti
 		if err != nil {
 			return e.convertToFusedResult(fused), nil // Fall back to unfiltered
 		}
+		enriched = ApplyExactMatchBoost(enriched, query)
+		enriched = ApplyPDFContentBoost(enriched, query)
+		enriched = ApplyTestFilePenalty(enriched)
+		enriched = ApplyPathBoost(enriched)
+		enriched = ApplyAuthorityBoost(enriched)
 		// Apply filter
 		filtered := ApplyFilters(enriched, opts)
 		// Convert back to FusedResult

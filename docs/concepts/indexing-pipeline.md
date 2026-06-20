@@ -15,6 +15,7 @@ How code goes from files on disk to a searchable index.
 - **Chunking** creates searchable units (functions, types)
 - **Embedding** converts chunks to vectors (Ollama/MLX)
 - **Storing** saves to BM25 + HNSW indexes
+- **Graph build** writes local file, symbol, import, config, and doc-reference edges
 
 ---
 
@@ -32,18 +33,22 @@ flowchart TB
         Chunk["3. Chunk<br/>Extract functions, types"]
         Embed["4. Embed<br/>Generate vectors"]
         Store["5. Store<br/>BM25 + HNSW"]
+        Graph["6. Graph<br/>Build AmanGraph overlay"]
     end
 
     subgraph Output["Search Indexes"]
         BM25["BM25 Index<br/>(keywords)"]
         HNSW["HNSW Index<br/>(vectors)"]
         Meta["Metadata<br/>(file paths, lines)"]
+        GraphDB["AmanGraph<br/>(relationships)"]
     end
 
-    Files --> Scan --> Parse --> Chunk --> Embed --> Store
+    Files --> Scan --> Parse --> Chunk
+    Chunk --> Embed --> Store --> Graph
     Store --> BM25
     Store --> HNSW
     Store --> Meta
+    Graph --> GraphDB
 
     style Input fill:#e3f2fd,stroke:#1565c0
     style Pipeline fill:#fff8e1,stroke:#ff8f00
@@ -153,8 +158,22 @@ flowchart LR
 | Rust | `.rs` | tree-sitter-rust |
 | Java | `.java` | tree-sitter-java |
 | Markdown | `.md` | tree-sitter-markdown |
+| PDF | `.pdf` | text extraction with `ledongthuc/pdf` |
 
 Unsupported files fall back to line-based chunking.
+
+### Content Support Tiers
+
+| Tier | Content | Chunking Strategy | Result Metadata |
+|------|---------|-------------------|-----------------|
+| Tier 1 | Code | Parser-backed AST chunks for functions, types, methods, and related semantic units | Symbols, line ranges, parser-backed content type |
+| Tier 2 | Markdown | Heading-aware and paragraph-aware document chunks with frontmatter lifted into metadata | Heading path, section title, `fm.<key>` frontmatter fields |
+| Tier 2 | PDF | Page-aware text chunks extracted from in-memory PDF bytes | `content_type: "pdf"`, `chunker: "pdf"`, `page_number`, `page_start`, `page_end` |
+
+PDF support is text-extraction only. OCR, scanned/image-only PDFs, encrypted
+PDFs, form fields, and table-structure reconstruction are out of scope; when a
+PDF produces no extractable text, indexing records a warning and does not create
+empty search chunks for that file.
 
 ---
 
@@ -335,8 +354,48 @@ flowchart TB
 ├── bm25.db         # SQLite FTS5 index
 ├── vectors.hnsw    # HNSW vector index
 ├── metadata.db     # Chunk metadata
+├── graph.db        # AmanGraph relationship overlay
 └── config.yaml     # Index configuration
 ```
+
+---
+
+## Stage 6: Graph Build
+
+### What Happens
+
+After search metadata, embeddings, BM25, and vector artifacts are committed, the
+indexer converts scanned files and chunk symbols into the local AmanGraph
+relationship overlay stored at `.amanmcp/graph.db`.
+
+```mermaid
+flowchart LR
+    Files["Indexed files"]
+    Chunks["Chunks + symbols"]
+    Search["Committed search artifacts"]
+    Extract["Cheap graph extractors"]
+    GraphDB["graph.db"]
+
+    Files --> Extract
+    Chunks --> Extract
+    Search --> Extract
+    Extract --> GraphDB
+```
+
+The default graph build records deterministic local relationships such as
+projects containing files, files declaring packages, files importing modules,
+files defining symbols, symbols belonging to chunks, config files defining
+config keys, conservative test-to-implementation matches, and Markdown
+references to known files, symbols, or config keys. User-visible graph queries
+exclude stale edges by default; stale edge counts remain visible through the
+read-only `amanmcp://graph_status` MCP resource. Graph freshness defaults to 24
+hours, and stale-edge purge retention defaults to 7 days; both are named graph
+defaults rather than hidden per-call magic numbers. The status resource exposes
+the last full rebuild separately from the last incremental watcher update so
+operators can tell whether a fresh graph came from a complete rebuild or a
+single-file change. Use `amanmcp index --skip-graph` for a search-only index
+run that leaves existing graph state untouched, or `amanmcp index --graph-only`
+to rebuild the graph from an existing index without re-embedding.
 
 ---
 
@@ -444,6 +503,7 @@ flowchart LR
 | Chunking | ~1ms per file | CPU |
 | Embedding | ~20ms per chunk | GPU/CPU |
 | Storage | ~1ms per chunk | Disk I/O |
+| Graph build | ~1ms per indexed source | CPU + SQLite |
 
 **Embedding is the slowest stage** - this is why batching and caching matter.
 
@@ -481,6 +541,7 @@ amanmcp index --verbose
 # Output:
 # Scanning... 1,234 files found
 # Parsing... 500/1,234 (40%)
+# Graph... relationship overlay built
 # Embedding... 2,500/5,678 chunks (44%)
 # Storing... done
 # Index complete in 2m 15s

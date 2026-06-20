@@ -19,6 +19,7 @@ type ContentType string
 const (
 	ContentTypeCode     ContentType = "code"
 	ContentTypeMarkdown ContentType = "markdown"
+	ContentTypePDF      ContentType = "pdf"
 	ContentTypeText     ContentType = "text"
 )
 

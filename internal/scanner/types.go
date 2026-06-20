@@ -18,6 +18,8 @@ const (
 	ContentTypeCode ContentType = "code"
 	// ContentTypeMarkdown represents markdown documentation files.
 	ContentTypeMarkdown ContentType = "markdown"
+	// ContentTypePDF represents PDF document files.
+	ContentTypePDF ContentType = "pdf"
 	// ContentTypeText represents plain text files.
 	ContentTypeText ContentType = "text"
 	// ContentTypeConfig represents configuration files.
@@ -107,6 +109,8 @@ func DetectContentTypeWithRegistry(languageName string, registry *language.Regis
 		return ContentTypeCode
 	case language.ContentTypeMarkdown:
 		return ContentTypeMarkdown
+	case language.ContentTypePDF:
+		return ContentTypePDF
 	case language.ContentTypeConfig:
 		return ContentTypeConfig
 	default:

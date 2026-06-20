@@ -166,6 +166,12 @@ func baseBuiltinDefinitions() []Definition {
 			Parser:      ParserLineFallback,
 		}, SourceBuiltin),
 		normalizeDefinition(Definition{
+			Name:        "pdf",
+			Extensions:  []string{".pdf"},
+			ContentType: ContentTypePDF,
+			Parser:      ParserLineFallback,
+		}, SourceBuiltin),
+		normalizeDefinition(Definition{
 			Name:        "text",
 			Extensions:  []string{".txt"},
 			ContentType: ContentTypeText,

@@ -378,8 +378,11 @@ graded:
     expected_results:
       - path: internal/store/hnsw.go
         symbol: HNSWStore
+        page: 2
         grade: 3
         rationale: "Canonical vector store implementation."
+    metadata:
+      content_type: pdf
     holdout: true
     source: manual
     notes: "F37 graded evidence"
@@ -402,6 +405,8 @@ graded:
 	assert.True(t, cfg.Graded[0].Holdout)
 	assert.Equal(t, "natural_language_intent", cfg.Graded[0].Class)
 	assert.Equal(t, "code", cfg.Graded[0].Job)
+	assert.Equal(t, "pdf", cfg.Graded[0].Metadata["content_type"])
+	assert.Equal(t, 2, cfg.Graded[0].ExpectedResults[0].Page)
 }
 
 func TestParseQueryConfig_RejectsMalformedCorpus(t *testing.T) {
@@ -596,9 +601,10 @@ func TestLoadQueries_CurrentCorpusHasF37Coverage(t *testing.T) {
 	require.NoError(t, err)
 
 	all := allQuerySpecs(cfg)
-	assert.Len(t, all, 69)
+	assert.GreaterOrEqual(t, len(all), 77)
 
 	holdout := 0
+	pdfQueries := 0
 	nonHoldoutByClass := make(map[string]int)
 	byJob := make(map[string]int)
 	for _, spec := range all {
@@ -607,6 +613,9 @@ func TestLoadQueries_CurrentCorpusHasF37Coverage(t *testing.T) {
 		} else {
 			nonHoldoutByClass[spec.Class]++
 		}
+		if spec.Metadata["content_type"] == "pdf" {
+			pdfQueries++
+		}
 		byJob[spec.Job]++
 		if spec.Class != "negative_adversarial" {
 			assert.NotEmpty(t, spec.ExpectedResults, "query %s must have expected evidence", spec.ID)
@@ -614,6 +623,7 @@ func TestLoadQueries_CurrentCorpusHasF37Coverage(t *testing.T) {
 	}
 
 	assert.GreaterOrEqual(t, holdout, 12)
+	assert.GreaterOrEqual(t, pdfQueries, 8)
 	for class := range allowedQueryClasses {
 		assert.GreaterOrEqual(t, nonHoldoutByClass[class], 3, "class %s should have at least 3 non-holdout queries", class)
 	}

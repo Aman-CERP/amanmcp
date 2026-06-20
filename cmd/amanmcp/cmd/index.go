@@ -14,18 +14,29 @@ import (
 
 	"github.com/Aman-CERP/amanmcp/internal/config"
 	"github.com/Aman-CERP/amanmcp/internal/embed"
+	"github.com/Aman-CERP/amanmcp/internal/graph"
 	"github.com/Aman-CERP/amanmcp/internal/index"
 	"github.com/Aman-CERP/amanmcp/internal/logging"
+	"github.com/Aman-CERP/amanmcp/internal/secrets"
 	"github.com/Aman-CERP/amanmcp/internal/store"
 	"github.com/Aman-CERP/amanmcp/internal/ui"
 )
 
+type graphBuildOptions struct {
+	skipGraph         bool
+	graphOnly         bool
+	forceGraphRebuild bool
+}
+
 func newIndexCmd() *cobra.Command {
 	var (
-		noTUI   bool
-		resume  bool
-		force   bool
-		backend string
+		noTUI             bool
+		resume            bool
+		force             bool
+		backend           string
+		skipGraph         bool
+		graphOnly         bool
+		forceGraphRebuild bool
 	)
 
 	cmd := &cobra.Command{
@@ -42,7 +53,9 @@ Backend Selection:
   --backend=ollama   Use Ollama (cross-platform)
 
 Use --resume to continue from a previous interrupted indexing operation.
-Use --force to clear existing index data and rebuild from scratch.`,
+Use --force to clear existing index data and rebuild from scratch.
+Use --skip-graph to opt out of AmanGraph extraction, or --graph-only
+to rebuild the graph overlay from an existing index without re-embedding.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Set up signal handling for Ctrl+C - this ensures context cancellation
@@ -55,9 +68,13 @@ Use --force to clear existing index data and rebuild from scratch.`,
 				path = args[0]
 			}
 
-			// --force and --resume are mutually exclusive
-			if force && resume {
-				return fmt.Errorf("--force and --resume are mutually exclusive")
+			graphOpts := graphBuildOptions{
+				skipGraph:         skipGraph,
+				graphOnly:         graphOnly,
+				forceGraphRebuild: forceGraphRebuild,
+			}
+			if err := validateIndexFlagCombinations(force, resume, graphOpts); err != nil {
+				return err
 			}
 
 			// Set backend via environment variable if flag provided
@@ -66,7 +83,7 @@ Use --force to clear existing index data and rebuild from scratch.`,
 				os.Setenv("AMANMCP_EMBEDDER", backend)
 			}
 
-			return runIndexWithResume(ctx, cmd, path, false, noTUI, resume, force)
+			return runIndexWithResume(ctx, cmd, path, false, noTUI, resume, force, graphOpts)
 		},
 	}
 
@@ -74,6 +91,9 @@ Use --force to clear existing index data and rebuild from scratch.`,
 	cmd.Flags().BoolVar(&resume, "resume", false, "Resume from previous checkpoint if available")
 	cmd.Flags().BoolVar(&force, "force", false, "Clear existing index and rebuild from scratch")
 	cmd.Flags().StringVar(&backend, "backend", "", "Embedding backend: auto-detect (default), mlx, ollama, or static")
+	cmd.Flags().BoolVar(&skipGraph, "skip-graph", false, "Skip AmanGraph overlay extraction during indexing")
+	cmd.Flags().BoolVar(&graphOnly, "graph-only", false, "Rebuild only AmanGraph from an existing index without re-chunking or re-embedding")
+	cmd.Flags().BoolVar(&forceGraphRebuild, "force-graph-rebuild", false, "Clear and rebuild only the AmanGraph overlay")
 
 	// Add subcommands
 	cmd.AddCommand(newIndexInfoCmd())
@@ -81,7 +101,26 @@ Use --force to clear existing index data and rebuild from scratch.`,
 	return cmd
 }
 
-func runIndexWithResume(ctx context.Context, cmd *cobra.Command, path string, offline bool, noTUI bool, resume bool, force bool) error {
+func validateIndexFlagCombinations(force bool, resume bool, graphOpts graphBuildOptions) error {
+	if force && resume {
+		return fmt.Errorf("--force and --resume are mutually exclusive")
+	}
+	if graphOpts.skipGraph && graphOpts.graphOnly {
+		return fmt.Errorf("--skip-graph and --graph-only are mutually exclusive")
+	}
+	if graphOpts.skipGraph && graphOpts.forceGraphRebuild {
+		return fmt.Errorf("--skip-graph and --force-graph-rebuild are mutually exclusive")
+	}
+	if force && graphOpts.graphOnly {
+		return fmt.Errorf("--force and --graph-only are mutually exclusive")
+	}
+	if resume && graphOpts.graphOnly {
+		return fmt.Errorf("--resume and --graph-only are mutually exclusive")
+	}
+	return nil
+}
+
+func runIndexWithResume(ctx context.Context, cmd *cobra.Command, path string, offline bool, noTUI bool, resume bool, force bool, graphOpts graphBuildOptions) error {
 	// Check for existing checkpoint before starting
 	absPath, err := filepath.Abs(path)
 	if err != nil {
@@ -96,6 +135,10 @@ func runIndexWithResume(ctx context.Context, cmd *cobra.Command, path string, of
 	dataDir := filepath.Join(root, ".amanmcp")
 	metadataPath := filepath.Join(dataDir, "metadata.db")
 
+	if graphOpts.graphOnly {
+		return runGraphOnly(ctx, cmd, root, dataDir, graphOpts.forceGraphRebuild, noTUI)
+	}
+
 	// Handle --force: clear all index data before proceeding
 	if force {
 		if err := clearIndexData(dataDir); err != nil {
@@ -103,7 +146,7 @@ func runIndexWithResume(ctx context.Context, cmd *cobra.Command, path string, of
 		}
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Cleared existing index data, starting fresh...\n")
 		slog.Info("index_force_clear", slog.String("data_dir", dataDir))
-		return runIndexWithOptions(ctx, cmd, path, offline, noTUI, 0, "")
+		return runIndexWithOptions(ctx, cmd, path, offline, noTUI, 0, "", graphOpts)
 	}
 
 	// resumeFromChunk tracks how many chunks to skip when resuming
@@ -187,7 +230,7 @@ func runIndexWithResume(ctx context.Context, cmd *cobra.Command, path string, of
 		}
 	}
 
-	return runIndexWithOptions(ctx, cmd, path, offline, noTUI, resumeFromChunk, checkpointEmbedderModel)
+	return runIndexWithOptions(ctx, cmd, path, offline, noTUI, resumeFromChunk, checkpointEmbedderModel, graphOpts)
 }
 
 // clearIndexData removes all index-related files from the data directory.
@@ -196,13 +239,16 @@ func clearIndexData(dataDir string) error {
 	// Files/directories to remove
 	indexFiles := []string{
 		filepath.Join(dataDir, "metadata.db"),
-		filepath.Join(dataDir, "metadata.db-shm"),  // SQLite WAL shared memory
-		filepath.Join(dataDir, "metadata.db-wal"),  // SQLite WAL journal
-		filepath.Join(dataDir, "bm25.bleve"),       // BM25 index directory (legacy Bleve)
-		filepath.Join(dataDir, "bm25.db"),          // BM25 index file (SQLite FTS5)
-		filepath.Join(dataDir, "bm25.db-wal"),      // SQLite WAL journal
-		filepath.Join(dataDir, "bm25.db-shm"),      // SQLite shared memory
-		filepath.Join(dataDir, "vectors.hnsw"),     // HNSW vector store
+		filepath.Join(dataDir, "metadata.db-shm"), // SQLite WAL shared memory
+		filepath.Join(dataDir, "metadata.db-wal"), // SQLite WAL journal
+		filepath.Join(dataDir, "bm25.bleve"),      // BM25 index directory (legacy Bleve)
+		filepath.Join(dataDir, "bm25.db"),         // BM25 index file (SQLite FTS5)
+		filepath.Join(dataDir, "bm25.db-wal"),     // SQLite WAL journal
+		filepath.Join(dataDir, "bm25.db-shm"),     // SQLite shared memory
+		filepath.Join(dataDir, "vectors.hnsw"),    // HNSW vector store
+		filepath.Join(dataDir, "graph.db"),        // AmanGraph overlay
+		filepath.Join(dataDir, "graph.db-wal"),    // SQLite WAL journal
+		filepath.Join(dataDir, "graph.db-shm"),    // SQLite shared memory
 	}
 
 	for _, path := range indexFiles {
@@ -214,7 +260,7 @@ func clearIndexData(dataDir string) error {
 	return nil
 }
 
-func runIndexWithOptions(ctx context.Context, cmd *cobra.Command, path string, offline bool, noTUI bool, resumeFromCheckpoint int, checkpointEmbedderModel string) error {
+func runIndexWithOptions(ctx context.Context, cmd *cobra.Command, path string, offline bool, noTUI bool, resumeFromCheckpoint int, checkpointEmbedderModel string, graphOpts graphBuildOptions) error {
 	// Initialize logging for CLI observability (BUG-039)
 	// Use file-only logging to avoid interfering with user-facing output
 	logCfg := logging.DefaultConfig()
@@ -267,6 +313,15 @@ func runIndexWithOptions(ctx context.Context, cmd *cobra.Command, path string, o
 	dataDir := filepath.Join(root, ".amanmcp")
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return fmt.Errorf("failed to create data directory: %w", err)
+	}
+	var graphRepo graph.Repository
+	if !graphOpts.skipGraph {
+		repo, err := openGraphRepository(dataDir, graphOpts.forceGraphRebuild)
+		if err != nil {
+			return fmt.Errorf("failed to initialize graph schema: %w", err)
+		}
+		defer func() { _ = repo.Close() }()
+		graphRepo = repo
 	}
 
 	// BUG-040: Clean up stale serve.pid if process no longer exists
@@ -369,12 +424,13 @@ func runIndexWithOptions(ctx context.Context, cmd *cobra.Command, path string, o
 
 	// Create Runner with injected dependencies
 	runner, err := index.NewRunner(index.RunnerDependencies{
-		Renderer: renderer,
-		Config:   cfg,
-		Metadata: metadata,
-		BM25:     bm25,
-		Vector:   vector,
-		Embedder: embedder,
+		Renderer:        renderer,
+		Config:          cfg,
+		Metadata:        metadata,
+		BM25:            bm25,
+		Vector:          vector,
+		Embedder:        embedder,
+		GraphRepository: graphRepo,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create index runner: %w", err)
@@ -392,4 +448,106 @@ func runIndexWithOptions(ctx context.Context, cmd *cobra.Command, path string, o
 	})
 
 	return err
+}
+
+func runGraphOnly(ctx context.Context, cmd *cobra.Command, root string, dataDir string, forceGraphRebuild bool, noTUI bool) error {
+	metadataPath := filepath.Join(dataDir, "metadata.db")
+	if _, err := os.Stat(metadataPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("--graph-only requires an existing index at %s; run 'amanmcp index' first", metadataPath)
+		}
+		return fmt.Errorf("inspect existing index for --graph-only: %w", err)
+	}
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return fmt.Errorf("failed to create data directory: %w", err)
+	}
+
+	uiCfg := ui.NewConfig(cmd.OutOrStdout(), ui.WithForcePlain(noTUI), ui.WithProjectDir(root))
+	renderer := ui.NewRenderer(uiCfg)
+	if err := renderer.Start(ctx); err != nil {
+		slog.Warn("failed to start progress renderer", slog.String("error", err.Error()))
+	}
+	defer func() { _ = renderer.Stop() }()
+
+	metadata, err := store.NewSQLiteStore(metadataPath)
+	if err != nil {
+		return fmt.Errorf("failed to open metadata store for --graph-only: %w", err)
+	}
+	defer func() { _ = metadata.Close() }()
+
+	repo, err := openGraphRepository(dataDir, forceGraphRebuild)
+	if err != nil {
+		return fmt.Errorf("failed to initialize graph schema: %w", err)
+	}
+	defer func() { _ = repo.Close() }()
+
+	projectID := hashString(root)
+	sources, err := index.BuildGraphSourcesFromMetadata(ctx, index.MetadataGraphSourceConfig{
+		RootDir:       root,
+		ProjectID:     projectID,
+		Metadata:      metadata,
+		SecretScanner: secrets.NewScanner(secrets.DefaultPolicy()),
+	})
+	if err != nil {
+		return err
+	}
+
+	renderer.UpdateProgress(ui.ProgressEvent{
+		Stage:   ui.StageGraph,
+		Total:   len(sources),
+		Message: "Building AmanGraph overlay...",
+	})
+	started := time.Now().UTC()
+	if err := repo.Reset(ctx); err != nil {
+		return fmt.Errorf("graph build failed: reset graph overlay: %w", err)
+	}
+	if err := graph.IndexCheapEdges(ctx, repo, projectID, sources, graph.CheapExtractorOptions{}); err != nil {
+		message := fmt.Sprintf("graph build failed: %v", err)
+		if recordErr := repo.RecordBuild(ctx, graph.BuildMetadata{
+			ProjectID:   projectID,
+			Kind:        graph.BuildKindFull,
+			Status:      graph.GraphStatusPartial,
+			StartedAt:   started,
+			CompletedAt: time.Now().UTC(),
+			Message:     message,
+		}); recordErr != nil {
+			message = fmt.Sprintf("%s; failed to record partial graph state: %v", message, recordErr)
+		}
+		return fmt.Errorf("%s", message)
+	}
+	renderer.UpdateProgress(ui.ProgressEvent{
+		Stage:   ui.StageGraph,
+		Current: len(sources),
+		Total:   len(sources),
+		Message: "AmanGraph overlay built",
+	})
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Graph build complete: %d files processed\n", len(sources))
+	return nil
+}
+
+func openGraphRepository(dataDir string, forceGraphRebuild bool) (*graph.SQLiteRepository, error) {
+	if forceGraphRebuild {
+		if err := clearGraphData(dataDir); err != nil {
+			return nil, err
+		}
+	}
+	repo, err := graph.OpenSQLiteRepository(filepath.Join(dataDir, "graph.db"))
+	if err != nil {
+		return nil, err
+	}
+	return repo, nil
+}
+
+func clearGraphData(dataDir string) error {
+	graphFiles := []string{
+		filepath.Join(dataDir, "graph.db"),
+		filepath.Join(dataDir, "graph.db-wal"),
+		filepath.Join(dataDir, "graph.db-shm"),
+	}
+	for _, path := range graphFiles {
+		if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to remove %s: %w", filepath.Base(path), err)
+		}
+	}
+	return nil
 }

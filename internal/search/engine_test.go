@@ -173,6 +173,7 @@ func (m *MockEmbedder) SetFinalBatch(_ bool)             {}
 // MockMetadataStore implements store.MetadataStore for testing
 type MockMetadataStore struct {
 	GetChunkFn          func(ctx context.Context, id string) (*store.Chunk, error)
+	GetChunksByPathFn   func(ctx context.Context, path string, limit int) ([]*store.Chunk, error)
 	GetChunksBySymbolFn func(ctx context.Context, name string, limit int) ([]*store.Chunk, error)
 	DeleteChunksFn      func(ctx context.Context, ids []string) error
 	GetStateFn          func(ctx context.Context, key string) (string, error)
@@ -238,6 +239,36 @@ func (m *MockMetadataStore) GetChunksByFile(_ context.Context, fileID string) ([
 	for _, c := range m.chunks {
 		if c.FileID == fileID {
 			result = append(result, c)
+		}
+	}
+	return result, nil
+}
+func (m *MockMetadataStore) GetChunksByPath(ctx context.Context, path string, limit int) ([]*store.Chunk, error) {
+	if m.GetChunksByPathFn != nil {
+		return m.GetChunksByPathFn(ctx, path, limit)
+	}
+	result := make([]*store.Chunk, 0, limit)
+	for _, c := range m.chunks {
+		if c.FilePath == path {
+			result = append(result, c)
+			if limit > 0 && len(result) >= limit {
+				break
+			}
+		}
+	}
+	return result, nil
+}
+func (m *MockMetadataStore) GetChunksByContentType(_ context.Context, contentType store.ContentType, limit int) ([]*store.Chunk, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	result := make([]*store.Chunk, 0, limit)
+	for _, c := range m.chunks {
+		if c.ContentType == contentType {
+			result = append(result, c)
+			if len(result) >= limit {
+				break
+			}
 		}
 	}
 	return result, nil
@@ -585,6 +616,46 @@ func TestEngine_Search_ExactIdentifierSupplementsSymbolCandidate(t *testing.T) {
 	assert.Equal(t, "internal/embed/ollama.go", results[0].Chunk.FilePath)
 }
 
+func TestEngine_Search_DeclarationQuerySupplementsSymbolCandidate(t *testing.T) {
+	// Given: BM25 returns a dense reference chunk but misses the declared type owner.
+	engine, bm25, vector, embedder, metadata := setupTestEngine(t)
+	reference := &store.Chunk{
+		ID:          "reference",
+		FilePath:    "internal/async/indexer.go",
+		Content:     "type IndexerConfig struct { Config Config }",
+		ContentType: store.ContentTypeCode,
+	}
+	definition := &store.Chunk{
+		ID:          "definition",
+		FilePath:    "internal/config/config.go",
+		Content:     "type Config struct {}",
+		ContentType: store.ContentTypeCode,
+		Symbols: []*store.Symbol{
+			{Name: "Config", Type: store.SymbolTypeType},
+		},
+	}
+	metadata.chunks[reference.ID] = reference
+	metadata.chunks[definition.ID] = definition
+
+	bm25.SearchFn = func(ctx context.Context, query string, limit int) ([]*store.BM25Result, error) {
+		return []*store.BM25Result{{DocID: reference.ID, Score: 10, MatchedTerms: []string{"type", "config", "struct"}}}, nil
+	}
+	vector.SearchFn = func(ctx context.Context, query []float32, k int) ([]*store.VectorResult, error) {
+		return nil, nil
+	}
+	embedder.EmbedFn = func(ctx context.Context, text string) ([]float32, error) {
+		return make([]float32, 768), nil
+	}
+
+	// When: the user asks for a Go declaration phrase.
+	results, err := engine.Search(context.Background(), "type Config struct", SearchOptions{BM25Only: true, Limit: 5})
+
+	// Then: the declared symbol owner is injected and ranked first.
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+	assert.Equal(t, "internal/config/config.go", results[0].Chunk.FilePath)
+}
+
 func TestEngine_Index(t *testing.T) {
 	// Given: an engine
 	engine, bm25, vector, embedder, metadata := setupTestEngine(t)
@@ -615,6 +686,7 @@ func TestEngine_Index(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, indexedDocs, len(chunks))
 	assert.Len(t, indexedVectors, len(chunks))
+	assert.Contains(t, indexedDocs[0].Content, chunks[0].FilePath)
 
 	// And: saves to metadata store
 	for _, c := range chunks {
@@ -2175,6 +2247,224 @@ func TestCandidateLimitForQuery_BroadensExactLexicalPool(t *testing.T) {
 		Limit: 10,
 		Mode:  SearchModeDecisions,
 	}))
+	assert.Equal(t, 100, candidateLimitForOptions("ADR-004 hybrid search RRF implementation", SearchOptions{
+		Limit:   10,
+		Filter:  "code",
+		Profile: ProfileCode,
+	}))
+	assert.Equal(t, 100, candidateLimitForOptions("error handling retry", SearchOptions{
+		Limit:   10,
+		Filter:  "code",
+		Profile: ProfileCode,
+	}))
+	assert.Equal(t, 100, candidateLimitForOptions("error handling retry", SearchOptions{
+		Limit:   50,
+		Filter:  "code",
+		Profile: ProfileCode,
+	}))
+	assert.Equal(t, 20, candidateLimitForOptions("hybrid search RRF implementation", SearchOptions{
+		Limit: 10,
+	}))
+}
+
+func TestAddADRReferenceCandidates_UsesIndexedImplementationPaths(t *testing.T) {
+	ctx := context.Background()
+	metadata := NewMockMetadataStore()
+	metadata.chunks["adr-1"] = &store.Chunk{
+		ID:          "adr-1",
+		FileID:      "adr-file",
+		FilePath:    ".aman-pm/decisions/ADR-999-example.md",
+		Content:     "## Implementation\nUses `internal/search/fusion.go` and `internal/search/engine.go`.",
+		ContentType: store.ContentTypeMarkdown,
+	}
+	metadata.chunks["fusion-1"] = &store.Chunk{
+		ID:          "fusion-1",
+		FileID:      "fusion-file",
+		FilePath:    "internal/search/fusion.go",
+		Content:     "func NewRRFFusion() {}",
+		ContentType: store.ContentTypeCode,
+		Language:    "go",
+	}
+	metadata.chunks["engine-1"] = &store.Chunk{
+		ID:          "engine-1",
+		FileID:      "engine-file",
+		FilePath:    "internal/search/engine.go",
+		Content:     "func (e *Engine) Search() {}",
+		ContentType: store.ContentTypeCode,
+		Language:    "go",
+	}
+	metadata.chunks["existing"] = &store.Chunk{
+		ID:          "existing",
+		FileID:      "patterns-file",
+		FilePath:    "internal/search/patterns.go",
+		Content:     "func classifyQuery() {}",
+		ContentType: store.ContentTypeCode,
+		Language:    "go",
+	}
+
+	bm25 := &MockBM25Index{
+		SearchFn: func(_ context.Context, query string, limit int) ([]*store.BM25Result, error) {
+			assert.Equal(t, "ADR-999", query)
+			assert.GreaterOrEqual(t, limit, 10)
+			return []*store.BM25Result{{DocID: "adr-1", Score: 1}}, nil
+		},
+	}
+
+	engine := New(bm25, &MockVectorStore{}, &MockEmbedder{}, metadata, DefaultConfig())
+	results, err := engine.addADRReferenceCandidates(ctx, []*SearchResult{{
+		Chunk: metadata.chunks["existing"],
+		Score: 0.4,
+	}}, "ADR-999 hybrid search implementation", SearchOptions{
+		Limit:   10,
+		Filter:  "code",
+		Profile: ProfileCode,
+	})
+	require.NoError(t, err)
+
+	paths := make([]string, 0, len(results))
+	for _, result := range results {
+		require.NotNil(t, result.Chunk)
+		paths = append(paths, result.Chunk.FilePath)
+	}
+	assert.Contains(t, paths, "internal/search/fusion.go")
+	assert.Contains(t, paths, "internal/search/engine.go")
+}
+
+func TestAddSubQueryPathCandidates_UsesIndexedPathHints(t *testing.T) {
+	ctx := context.Background()
+	metadata := NewMockMetadataStore()
+	metadata.chunks["existing"] = &store.Chunk{
+		ID:          "existing",
+		FileID:      "existing-file",
+		FilePath:    "internal/search/options.go",
+		Content:     "func exactMatchNeedle() {}",
+		ContentType: store.ContentTypeCode,
+		Language:    "go",
+	}
+	metadata.chunks["fusion"] = &store.Chunk{
+		ID:          "fusion",
+		FileID:      "fusion-file",
+		FilePath:    "internal/search/fusion.go",
+		Content:     "func (f *RRFFusion) Fuse() {}",
+		ContentType: store.ContentTypeCode,
+		Language:    "go",
+	}
+
+	engine := New(&MockBM25Index{}, &MockVectorStore{}, &MockEmbedder{}, metadata, DefaultConfig())
+	results, err := engine.addSubQueryPathCandidates(ctx, []*SearchResult{{
+		Chunk: metadata.chunks["existing"],
+		Score: 0.4,
+	}}, []SubQuery{
+		{Query: "internal/search/fusion.go", Weight: 6.0, Hint: "code"},
+	}, SearchOptions{
+		Limit:   10,
+		Filter:  "code",
+		Profile: ProfileCode,
+	})
+	require.NoError(t, err)
+
+	paths := make([]string, 0, len(results))
+	for _, result := range results {
+		require.NotNil(t, result.Chunk)
+		paths = append(paths, result.Chunk.FilePath)
+	}
+	assert.Contains(t, paths, "internal/search/fusion.go")
+}
+
+func TestAddPDFContentCandidates_UsesIndexedPDFChunks(t *testing.T) {
+	ctx := context.Background()
+	metadata := NewMockMetadataStore()
+	metadata.chunks["markdown"] = &store.Chunk{
+		ID:          "markdown",
+		FileID:      "markdown-file",
+		FilePath:    "docs/research/contextual-retrieval.md",
+		Content:     "query instruction metadata",
+		ContentType: store.ContentTypeMarkdown,
+	}
+	metadata.chunks["pdf"] = &store.Chunk{
+		ID:          "pdf",
+		FileID:      "pdf-file",
+		FilePath:    "internal/validation/testdata/eval-pdfs/technical-spec.pdf",
+		Content:     "PDF chunking preserves page aware metadata",
+		ContentType: store.ContentTypePDF,
+		Language:    "pdf",
+	}
+
+	engine := New(&MockBM25Index{}, &MockVectorStore{}, &MockEmbedder{}, metadata, DefaultConfig())
+	results, err := engine.addPDFContentCandidates(ctx, []*SearchResult{{
+		Chunk: metadata.chunks["markdown"],
+		Score: 0.4,
+	}}, "how does PDF chunking preserve page aware metadata", SearchOptions{
+		Limit:   10,
+		Filter:  "docs",
+		Profile: ProfileProjectMemory,
+	})
+	require.NoError(t, err)
+
+	paths := make([]string, 0, len(results))
+	for _, result := range results {
+		require.NotNil(t, result.Chunk)
+		paths = append(paths, result.Chunk.FilePath)
+	}
+	assert.Contains(t, paths, "internal/validation/testdata/eval-pdfs/technical-spec.pdf")
+}
+
+func TestShouldAddPDFContentCandidates_OnlyForNaturalLanguageDocsSearches(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		opts  SearchOptions
+		want  bool
+	}{
+		{
+			name:  "natural language docs question",
+			query: "how does PDF chunking preserve page aware metadata",
+			opts:  SearchOptions{Filter: "docs"},
+			want:  true,
+		},
+		{
+			name:  "exact PDF identifier",
+			query: "PDF_SPEC_API",
+			opts:  SearchOptions{Filter: "docs"},
+			want:  false,
+		},
+		{
+			name:  "exact RFC identifier",
+			query: "RFC-PDF-017",
+			opts:  SearchOptions{Filter: "docs"},
+			want:  false,
+		},
+		{
+			name:  "exact PDF file path",
+			query: "internal/validation/testdata/eval-pdfs/technical-spec.pdf",
+			opts:  SearchOptions{Filter: "docs"},
+			want:  false,
+		},
+		{
+			name:  "code-like PDF query",
+			query: "PDFChunker NewPDFChunker page aware chunking metadata",
+			opts:  SearchOptions{Filter: "docs"},
+			want:  false,
+		},
+		{
+			name:  "natural language command with code identifiers",
+			query: "find PDFChunker NewPDFChunker page aware chunking metadata",
+			opts:  SearchOptions{Filter: "docs"},
+			want:  false,
+		},
+		{
+			name:  "code filter",
+			query: "how does PDF chunking preserve page aware metadata",
+			opts:  SearchOptions{Filter: "code"},
+			want:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, shouldAddPDFContentCandidates(tt.query, tt.opts))
+		})
+	}
 }
 
 // =============================================================================
@@ -3219,6 +3509,45 @@ func TestSingleSearch_WithFilter(t *testing.T) {
 		// the filtering happens based on content type
 		assert.NotEmpty(t, r.ChunkID)
 	}
+}
+
+func TestSingleSearch_WithFilterAppliesExactPathBoost(t *testing.T) {
+	engine, bm25, vector, embedder, metadata := setupTestEngine(t)
+
+	bm25.SearchFn = func(ctx context.Context, query string, limit int) ([]*store.BM25Result, error) {
+		return []*store.BM25Result{
+			{DocID: "noisy", Score: 10.0},
+			{DocID: "exact", Score: 1.0},
+		}, nil
+	}
+	vector.SearchFn = func(ctx context.Context, query []float32, k int) ([]*store.VectorResult, error) {
+		return nil, nil
+	}
+	embedder.EmbedFn = func(ctx context.Context, text string) ([]float32, error) {
+		return make([]float32, 768), nil
+	}
+
+	metadata.chunks["noisy"] = &store.Chunk{
+		ID:          "noisy",
+		FilePath:    "internal/chunk/parser_test.go",
+		Content:     "test content",
+		ContentType: store.ContentTypeCode,
+	}
+	metadata.chunks["exact"] = &store.Chunk{
+		ID:          "exact",
+		FilePath:    "internal/chunk/extractor.go",
+		Content:     "implementation content",
+		ContentType: store.ContentTypeCode,
+	}
+
+	results, err := engine.singleSearch(context.Background(), "internal/chunk/extractor.go", SearchOptions{
+		Limit:  10,
+		Filter: "code",
+	})
+
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+	assert.Equal(t, "exact", results[0].ChunkID)
 }
 
 // =============================================================================

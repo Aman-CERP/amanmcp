@@ -70,6 +70,7 @@ func TestPatternClassifier_ErrorCodes(t *testing.T) {
 		{"E##### code", "E12345", QueryTypeLexical},
 		{"ERRXXX pattern", "ERR123", QueryTypeLexical},
 		{"exception keyword", "NullPointerException", QueryTypeLexical},
+		{"ADR reference with descriptive terms", "ADR-004 hybrid search RRF implementation", QueryTypeLexical},
 	}
 
 	classifier := NewPatternClassifier()
@@ -119,6 +120,7 @@ func TestPatternClassifier_FilePaths(t *testing.T) {
 		{"JSON file", "package.json", QueryTypeLexical},
 		{"YAML file", "config.yaml", QueryTypeLexical},
 		{"Markdown file", "README.md", QueryTypeLexical},
+		{"PDF file", "internal/validation/testdata/eval-pdfs/technical-spec.pdf", QueryTypeLexical},
 	}
 
 	classifier := NewPatternClassifier()

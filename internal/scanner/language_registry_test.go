@@ -29,6 +29,13 @@ func TestDetectLanguageWithRegistry_PreservesCurrentAliases(t *testing.T) {
 	}
 }
 
+func TestDetectLanguageWithRegistry_DetectsPDFAsFirstClassContent(t *testing.T) {
+	registry := language.DefaultRegistry()
+
+	assert.Equal(t, "pdf", DetectLanguageWithRegistry("docs/spec.pdf", registry))
+	assert.Equal(t, ContentTypePDF, DetectContentTypeWithRegistry("pdf", registry))
+}
+
 func TestDetectLanguageWithRegistry_ConfigAddedLineFallbackLanguage(t *testing.T) {
 	registry, err := language.NewRegistry([]language.Definition{{
 		Name:        "elixir_custom",

@@ -170,6 +170,7 @@ func (s *SQLiteStore) initSchema() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_id);
+	CREATE INDEX IF NOT EXISTS idx_chunks_file_path ON chunks(file_path);
 
 	-- Symbols in chunks
 	CREATE TABLE IF NOT EXISTS symbols (
@@ -419,6 +420,12 @@ func (s *SQLiteStore) SaveFiles(ctx context.Context, files []*File) error {
 	defer func() { _ = stmt.Close() }()
 
 	for _, f := range files {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM files
+			WHERE project_id = ? AND path = ? AND id <> ?
+		`, f.ProjectID, f.Path, f.ID); err != nil {
+			return fmt.Errorf("failed to replace stale file metadata for %s: %w", f.Path, err)
+		}
 		_, err := stmt.ExecContext(ctx, f.ID, f.ProjectID, f.Path, f.Size, f.ModTime, f.ContentHash, f.Language, f.ContentType, f.IndexedAt)
 		if err != nil {
 			return fmt.Errorf("failed to save file %s: %w", f.Path, err)
@@ -1019,6 +1026,42 @@ func (s *SQLiteStore) GetChunks(ctx context.Context, ids []string) ([]*Chunk, er
 	return result, nil
 }
 
+// GetChunksByContentType returns chunks for a content type in deterministic file order.
+func (s *SQLiteStore) GetChunksByContentType(ctx context.Context, contentType ContentType, limit int) ([]*Chunk, error) {
+	if contentType == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id
+		FROM chunks
+		WHERE content_type = ?
+		ORDER BY file_path, start_line
+		LIMIT ?
+	`, string(contentType), limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query chunks by content type: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	ids := make([]string, 0, limit)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("failed to scan content-type chunk id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate content-type chunk ids: %w", err)
+	}
+
+	return s.GetChunks(ctx, ids)
+}
+
 // GetChunksBySymbol returns chunks that own an exact symbol name.
 func (s *SQLiteStore) GetChunksBySymbol(ctx context.Context, name string, limit int) ([]*Chunk, error) {
 	name = strings.TrimSpace(name)
@@ -1177,6 +1220,82 @@ func (s *SQLiteStore) GetChunksByFile(ctx context.Context, fileID string) ([]*Ch
 	}
 
 	return chunks, rows.Err()
+}
+
+// GetChunksByPath retrieves chunks for an indexed file path in source order.
+func (s *SQLiteStore) GetChunksByPath(ctx context.Context, filePath string, limit int) ([]*Chunk, error) {
+	filePath = strings.TrimSpace(filePath)
+	if filePath == "" {
+		return nil, nil
+	}
+
+	query := `
+		SELECT id, file_id, file_path, content, raw_content, context, content_type, language, start_line, end_line, metadata, created_at, updated_at
+		FROM chunks WHERE file_path = ?
+		ORDER BY start_line ASC
+	`
+	args := []any{filePath}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query chunks by path: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var chunks []*Chunk
+	for rows.Next() {
+		var c Chunk
+		var rawContent, chunkContext, contentType, language, metadataJSON sql.NullString
+		var createdAt, updatedAt sql.NullTime
+
+		err := rows.Scan(&c.ID, &c.FileID, &c.FilePath, &c.Content, &rawContent, &chunkContext, &contentType, &language, &c.StartLine, &c.EndLine, &metadataJSON, &createdAt, &updatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan chunk: %w", err)
+		}
+
+		if rawContent.Valid {
+			c.RawContent = rawContent.String
+		}
+		if chunkContext.Valid {
+			c.Context = chunkContext.String
+		}
+		if contentType.Valid {
+			c.ContentType = ContentType(contentType.String)
+		}
+		if language.Valid {
+			c.Language = language.String
+		}
+		if createdAt.Valid {
+			c.CreatedAt = createdAt.Time
+		}
+		if updatedAt.Valid {
+			c.UpdatedAt = updatedAt.Time
+		}
+		if metadataJSON.Valid && metadataJSON.String != "" {
+			_ = json.Unmarshal([]byte(metadataJSON.String), &c.Metadata)
+		}
+
+		chunks = append(chunks, &c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate chunks: %w", err)
+	}
+
+	// Load symbols for each chunk. Path candidate lookups are intentionally
+	// bounded, so the simple per-chunk load keeps this path easy to reason about.
+	for _, c := range chunks {
+		symbols, err := s.getSymbolsForChunk(ctx, c.ID)
+		if err != nil {
+			return nil, err
+		}
+		c.Symbols = symbols
+	}
+
+	return chunks, nil
 }
 
 // DeleteChunks deletes chunks by their IDs.

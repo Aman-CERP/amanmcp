@@ -12,6 +12,7 @@ import (
 const (
 	ContentTypeCode     = "code"
 	ContentTypeMarkdown = "markdown"
+	ContentTypePDF      = "pdf"
 	ContentTypeText     = "text"
 	ContentTypeConfig   = "config"
 
@@ -292,7 +293,7 @@ func isKnownParser(parser string) bool {
 
 func isValidContentType(contentType string) bool {
 	switch contentType {
-	case ContentTypeCode, ContentTypeMarkdown, ContentTypeText, ContentTypeConfig:
+	case ContentTypeCode, ContentTypeMarkdown, ContentTypePDF, ContentTypeText, ContentTypeConfig:
 		return true
 	default:
 		return false

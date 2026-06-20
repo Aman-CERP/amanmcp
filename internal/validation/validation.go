@@ -29,29 +29,35 @@ import (
 
 // ExpectedResult defines graded evidence for a query result.
 type ExpectedResult struct {
-	Path      string `yaml:"path"`                // Indexed file path or prefix
-	Symbol    string `yaml:"symbol,omitempty"`    // Optional symbol expected within the path
-	Grade     int    `yaml:"grade"`               // Relevance grade: 0, 1, 2, or 3
-	Rationale string `yaml:"rationale,omitempty"` // Why this result earns the grade
+	Path      string `yaml:"path"`                 // Indexed file path or prefix
+	Symbol    string `yaml:"symbol,omitempty"`     // Optional symbol expected within the path
+	StartLine int    `yaml:"start_line,omitempty"` // Optional source line expectation
+	EndLine   int    `yaml:"end_line,omitempty"`   // Optional source line expectation
+	Page      int    `yaml:"page,omitempty"`       // Optional exact PDF page expectation
+	PageStart int    `yaml:"page_start,omitempty"` // Optional PDF page range start
+	PageEnd   int    `yaml:"page_end,omitempty"`   // Optional PDF page range end
+	Grade     int    `yaml:"grade"`                // Relevance grade: 0, 1, 2, or 3
+	Rationale string `yaml:"rationale,omitempty"`  // Why this result earns the grade
 }
 
 // QuerySpec defines a test query with expected results.
 type QuerySpec struct {
-	ID              string           `yaml:"id"`                // e.g., "T1-Q7"
-	Name            string           `yaml:"name"`              // Human-readable name
-	Query           string           `yaml:"query"`             // The search query
-	Tool            string           `yaml:"tool"`              // "search", "search_code", or "search_docs"
-	Profile         string           `yaml:"profile,omitempty"` // Optional retrieval profile override
-	Scope           []string         `yaml:"scope,omitempty"`   // Optional path scope prefixes
-	Mode            string           `yaml:"mode,omitempty"`    // Optional search mode, e.g. decisions
-	Class           string           `yaml:"class"`             // F37 query class
-	Job             string           `yaml:"job"`               // Product job this query validates
-	Expected        []string         `yaml:"expected"`          // Legacy path/prefix compatibility, mapped to grade-3 evidence
-	ExpectedResults []ExpectedResult `yaml:"expected_results"`  // F37 graded expected evidence
-	Holdout         bool             `yaml:"holdout"`           // Excluded from normal tuning when true
-	Source          string           `yaml:"source"`            // Query provenance
-	Notes           string           `yaml:"notes"`             // Optional explanation for maintainers
-	Tier            int              `yaml:"-"`                 // Set programmatically based on section
+	ID              string            `yaml:"id"`                 // e.g., "T1-Q7"
+	Name            string            `yaml:"name"`               // Human-readable name
+	Query           string            `yaml:"query"`              // The search query
+	Tool            string            `yaml:"tool"`               // "search", "search_code", or "search_docs"
+	Profile         string            `yaml:"profile,omitempty"`  // Optional retrieval profile override
+	Scope           []string          `yaml:"scope,omitempty"`    // Optional path scope prefixes
+	Mode            string            `yaml:"mode,omitempty"`     // Optional search mode, e.g. decisions
+	Class           string            `yaml:"class"`              // F37 query class
+	Job             string            `yaml:"job"`                // Product job this query validates
+	Expected        []string          `yaml:"expected"`           // Legacy path/prefix compatibility, mapped to grade-3 evidence
+	ExpectedResults []ExpectedResult  `yaml:"expected_results"`   // F37 graded expected evidence
+	Metadata        map[string]string `yaml:"metadata,omitempty"` // Query metadata, e.g. content_type: pdf
+	Holdout         bool              `yaml:"holdout"`            // Excluded from normal tuning when true
+	Source          string            `yaml:"source"`             // Query provenance
+	Notes           string            `yaml:"notes"`              // Optional explanation for maintainers
+	Tier            int               `yaml:"-"`                  // Set programmatically based on section
 }
 
 // QueryConfig holds all validation queries loaded from YAML.
@@ -298,6 +304,12 @@ func validateQueryConfig(cfg *QueryConfig) error {
 			}
 			if strings.TrimSpace(expected.Path) == "" {
 				return fmt.Errorf("%s: expected result path is required", spec.ID)
+			}
+			if expected.Page < 0 || expected.PageStart < 0 || expected.PageEnd < 0 {
+				return fmt.Errorf("%s: expected result page values must be non-negative", spec.ID)
+			}
+			if expected.PageStart > 0 && expected.PageEnd > 0 && expected.PageEnd < expected.PageStart {
+				return fmt.Errorf("%s: expected result page_end must be greater than or equal to page_start", spec.ID)
 			}
 		}
 

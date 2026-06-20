@@ -2,10 +2,14 @@ package chunk
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // MarkdownChunkerOptions configures the markdown chunker behavior
@@ -76,11 +80,16 @@ func (c *MarkdownChunker) Chunk(ctx context.Context, file *FileInput) ([]*Chunk,
 	var chunks []*Chunk
 	now := time.Now()
 	remainingContent := content
+	var frontmatterMetadata map[string]string
 
 	// Extract frontmatter if present
 	if frontmatterMatch := frontmatterPattern.FindStringSubmatch(remainingContent); frontmatterMatch != nil {
 		frontmatter := frontmatterMatch[0]
-		chunk := c.createFrontmatterChunk(file, frontmatter, now)
+		parsedMetadata, parsed := parseFrontmatterMetadata(frontmatterMatch[1])
+		if parsed {
+			frontmatterMetadata = parsedMetadata
+		}
+		chunk := c.createFrontmatterChunk(file, frontmatter, frontmatterMetadata, parsed, now)
 		chunks = append(chunks, chunk)
 		remainingContent = remainingContent[len(frontmatter):]
 	}
@@ -90,7 +99,7 @@ func (c *MarkdownChunker) Chunk(ctx context.Context, file *FileInput) ([]*Chunk,
 
 	if len(sections) == 0 {
 		// No headers - chunk by paragraphs
-		paragraphChunks := c.chunkByParagraphs(file, remainingContent, "", 1, now)
+		paragraphChunks := c.chunkByParagraphs(file, remainingContent, "", 1, frontmatterMetadata, now)
 		chunks = append(chunks, paragraphChunks...)
 		return chunks, nil
 	}
@@ -104,7 +113,7 @@ func (c *MarkdownChunker) Chunk(ctx context.Context, file *FileInput) ([]*Chunk,
 
 	// Create chunks from sections
 	for _, section := range sections {
-		sectionChunks := c.createSectionChunks(file, section, baseLineOffset, now)
+		sectionChunks := c.createSectionChunks(file, section, baseLineOffset, frontmatterMetadata, now)
 		chunks = append(chunks, sectionChunks...)
 	}
 
@@ -183,35 +192,42 @@ func (c *MarkdownChunker) parseSections(content string) []*section {
 	return sections
 }
 
-// createFrontmatterChunk creates a chunk for YAML frontmatter
-func (c *MarkdownChunker) createFrontmatterChunk(file *FileInput, content string, now time.Time) *Chunk {
+// createFrontmatterChunk creates a metadata carrier for YAML frontmatter.
+func (c *MarkdownChunker) createFrontmatterChunk(file *FileInput, content string, frontmatterMetadata map[string]string, parsed bool, now time.Time) *Chunk {
 	// Count lines in frontmatter
 	lineCount := strings.Count(content, "\n")
 	if lineCount == 0 {
 		lineCount = 1
 	}
 
+	chunkContent := content
+	if parsed {
+		chunkContent = ""
+	}
+	metadata := map[string]string{
+		"type":         "frontmatter",
+		"header_path":  "",
+		"header_level": "0",
+	}
+	copyMetadata(metadata, frontmatterMetadata)
+
 	return &Chunk{
 		ID:          generateChunkID(file.Path, content),
 		FilePath:    file.Path,
-		Content:     content,
-		RawContent:  content,
+		Content:     chunkContent,
+		RawContent:  chunkContent,
 		ContentType: ContentTypeMarkdown,
 		Language:    "markdown",
 		StartLine:   1,
 		EndLine:     lineCount,
-		Metadata: map[string]string{
-			"type":         "frontmatter",
-			"header_path":  "",
-			"header_level": "0",
-		},
-		CreatedAt: now,
-		UpdatedAt: now,
+		Metadata:    metadata,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 }
 
 // createSectionChunks creates one or more chunks from a section
-func (c *MarkdownChunker) createSectionChunks(file *FileInput, sec *section, baseLineOffset int, now time.Time) []*Chunk {
+func (c *MarkdownChunker) createSectionChunks(file *FileInput, sec *section, baseLineOffset int, frontmatterMetadata map[string]string, now time.Time) []*Chunk {
 	content := strings.TrimRight(sec.content, "\n")
 
 	// Skip empty sections (only header, no content)
@@ -231,7 +247,7 @@ func (c *MarkdownChunker) createSectionChunks(file *FileInput, sec *section, bas
 		endLine := startLine + strings.Count(content, "\n")
 
 		chunk := &Chunk{
-			ID:          generateChunkID(file.Path, content),
+			ID:          generateChunkIDWithDisambiguator(file.Path, content, sec.headerPath),
 			FilePath:    file.Path,
 			Content:     content,
 			RawContent:  content,
@@ -239,24 +255,20 @@ func (c *MarkdownChunker) createSectionChunks(file *FileInput, sec *section, bas
 			Language:    "markdown",
 			StartLine:   startLine,
 			EndLine:     endLine,
-			Metadata: map[string]string{
-				"header_path":   sec.headerPath,
-				"header_level":  strconv.Itoa(sec.headerLevel),
-				"section_title": sec.headerTitle,
-			},
-			CreatedAt: now,
-			UpdatedAt: now,
+			Metadata:    c.sectionMetadata(sec, frontmatterMetadata),
+			CreatedAt:   now,
+			UpdatedAt:   now,
 		}
 		return []*Chunk{chunk}
 	}
 
 	// Section too large - split by paragraphs
 	startLine := baseLineOffset + sec.startLine
-	return c.splitLargeSection(file, sec, content, startLine, now)
+	return c.splitLargeSection(file, sec, content, startLine, frontmatterMetadata, now)
 }
 
 // splitLargeSection splits a large section into multiple chunks
-func (c *MarkdownChunker) splitLargeSection(file *FileInput, sec *section, content string, startLine int, now time.Time) []*Chunk {
+func (c *MarkdownChunker) splitLargeSection(file *FileInput, sec *section, content string, startLine int, frontmatterMetadata map[string]string, now time.Time) []*Chunk {
 	// Find atomic blocks (code blocks, tables, MDX components)
 	atomicBlocks := c.findAtomicBlocks(content)
 
@@ -268,36 +280,45 @@ func (c *MarkdownChunker) splitLargeSection(file *FileInput, sec *section, conte
 	currentStartLine := startLine
 	lineCount := 0
 
-	for i, para := range paragraphs {
+	for _, para := range paragraphs {
 		paraLines := strings.Count(para, "\n") + 1
 		paraTokens := estimateTokens(para)
 		currentTokens := estimateTokens(currentContent.String())
 
 		// If adding this paragraph would exceed the limit, create a chunk
 		if currentContent.Len() > 0 && currentTokens+paraTokens > c.options.MaxChunkTokens {
-			chunk := c.createChunkFromContent(file, sec, currentContent.String(), currentStartLine, lineCount, now)
+			chunk := c.createChunkFromContent(file, sec, currentContent.String(), currentStartLine, lineCount, len(chunks), frontmatterMetadata, now)
 			chunks = append(chunks, chunk)
 
 			// Reset for next chunk (with some overlap context)
 			currentContent.Reset()
 			currentStartLine = startLine + lineCount
-
-			// Add section context to continuation chunks
-			if i > 0 {
-				currentContent.WriteString("<!-- Section: ")
-				currentContent.WriteString(sec.headerPath)
-				currentContent.WriteString(" -->\n\n")
-			}
 		}
 
-		currentContent.WriteString(para)
-		currentContent.WriteString("\n\n")
+		if paraTokens > c.options.MaxChunkTokens && !c.isAtomicParagraph(para) {
+			segments := c.splitOversizedParagraph(para)
+			for _, segment := range segments {
+				segmentTokens := estimateTokens(segment)
+				currentTokens = estimateTokens(currentContent.String())
+				if currentContent.Len() > 0 && currentTokens+segmentTokens > c.options.MaxChunkTokens {
+					chunk := c.createChunkFromContent(file, sec, currentContent.String(), currentStartLine, lineCount, len(chunks), frontmatterMetadata, now)
+					chunks = append(chunks, chunk)
+					currentContent.Reset()
+					currentStartLine = startLine + lineCount
+				}
+				currentContent.WriteString(segment)
+				currentContent.WriteString("\n\n")
+			}
+		} else {
+			currentContent.WriteString(para)
+			currentContent.WriteString("\n\n")
+		}
 		lineCount += paraLines + 1 // +1 for the blank line between paragraphs
 	}
 
 	// Create final chunk
 	if currentContent.Len() > 0 {
-		chunk := c.createChunkFromContent(file, sec, currentContent.String(), currentStartLine, lineCount, now)
+		chunk := c.createChunkFromContent(file, sec, currentContent.String(), currentStartLine, lineCount, len(chunks), frontmatterMetadata, now)
 		chunks = append(chunks, chunk)
 	}
 
@@ -410,12 +431,121 @@ func (c *MarkdownChunker) mergeAtomicBlocks(paragraphs []string) []string {
 	return result
 }
 
+func (c *MarkdownChunker) isAtomicParagraph(paragraph string) bool {
+	trimmed := strings.TrimSpace(paragraph)
+	return strings.HasPrefix(trimmed, "```") ||
+		strings.HasPrefix(trimmed, "|") ||
+		mdxSelfClosingPattern.MatchString(trimmed) ||
+		len(c.findMDXBlockComponents(trimmed)) > 0
+}
+
+func (c *MarkdownChunker) splitOversizedParagraph(paragraph string) []string {
+	sentences := splitBySentenceBoundary(paragraph)
+	if len(sentences) == 0 {
+		return nil
+	}
+
+	var segments []string
+	var current strings.Builder
+	for _, sentence := range sentences {
+		sentence = strings.TrimSpace(sentence)
+		if sentence == "" {
+			continue
+		}
+		if estimateTokens(sentence) > c.options.MaxChunkTokens {
+			if current.Len() > 0 {
+				segments = append(segments, strings.TrimSpace(current.String()))
+				current.Reset()
+			}
+			segments = append(segments, c.splitOversizedTextByWords(sentence)...)
+			continue
+		}
+		if current.Len() > 0 && estimateTokens(current.String()+" "+sentence) > c.options.MaxChunkTokens {
+			segments = append(segments, strings.TrimSpace(current.String()))
+			current.Reset()
+		}
+		if current.Len() > 0 {
+			current.WriteString(" ")
+		}
+		current.WriteString(sentence)
+	}
+	if current.Len() > 0 {
+		segments = append(segments, strings.TrimSpace(current.String()))
+	}
+	return segments
+}
+
+func (c *MarkdownChunker) splitOversizedTextByWords(text string) []string {
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return nil
+	}
+
+	maxChars := c.options.MaxChunkTokens * TokensPerChar
+	if maxChars <= 0 {
+		maxChars = DefaultMaxChunkTokens * TokensPerChar
+	}
+
+	var segments []string
+	var current strings.Builder
+	for _, word := range words {
+		if len(word) > maxChars {
+			if current.Len() > 0 {
+				segments = append(segments, strings.TrimSpace(current.String()))
+				current.Reset()
+			}
+			segments = append(segments, splitLongWord(word, maxChars)...)
+			continue
+		}
+
+		candidate := word
+		if current.Len() > 0 {
+			candidate = current.String() + " " + word
+		}
+		if current.Len() > 0 && estimateTokens(candidate) > c.options.MaxChunkTokens {
+			segments = append(segments, strings.TrimSpace(current.String()))
+			current.Reset()
+		}
+		if current.Len() > 0 {
+			current.WriteString(" ")
+		}
+		current.WriteString(word)
+	}
+	if current.Len() > 0 {
+		segments = append(segments, strings.TrimSpace(current.String()))
+	}
+	return segments
+}
+
+func splitBySentenceBoundary(text string) []string {
+	var sentences []string
+	start := 0
+	for i, r := range text {
+		if r != '.' && r != '!' && r != '?' {
+			continue
+		}
+		end := i + len(string(r))
+		if end < len(text) {
+			next := text[end]
+			if next != ' ' && next != '\n' && next != '\t' {
+				continue
+			}
+		}
+		sentences = append(sentences, strings.TrimSpace(text[start:end]))
+		start = end
+	}
+	if start < len(text) {
+		sentences = append(sentences, strings.TrimSpace(text[start:]))
+	}
+	return sentences
+}
+
 // createChunkFromContent creates a chunk from content string
-func (c *MarkdownChunker) createChunkFromContent(file *FileInput, sec *section, content string, startLine, lineCount int, now time.Time) *Chunk {
+func (c *MarkdownChunker) createChunkFromContent(file *FileInput, sec *section, content string, startLine, lineCount, ordinal int, frontmatterMetadata map[string]string, now time.Time) *Chunk {
 	content = strings.TrimRight(content, "\n ")
 
 	return &Chunk{
-		ID:          generateChunkID(file.Path, content),
+		ID:          generateChunkIDWithDisambiguator(file.Path, content, fmt.Sprintf("%s:%d", sec.headerPath, ordinal)),
 		FilePath:    file.Path,
 		Content:     content,
 		RawContent:  content,
@@ -423,18 +553,103 @@ func (c *MarkdownChunker) createChunkFromContent(file *FileInput, sec *section, 
 		Language:    "markdown",
 		StartLine:   startLine,
 		EndLine:     startLine + lineCount,
-		Metadata: map[string]string{
-			"header_path":   sec.headerPath,
-			"header_level":  strconv.Itoa(sec.headerLevel),
-			"section_title": sec.headerTitle,
-		},
-		CreatedAt: now,
-		UpdatedAt: now,
+		Metadata:    c.sectionMetadata(sec, frontmatterMetadata),
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+}
+
+func (c *MarkdownChunker) sectionMetadata(sec *section, frontmatterMetadata map[string]string) map[string]string {
+	metadata := map[string]string{
+		"header_path":   sec.headerPath,
+		"header_level":  strconv.Itoa(sec.headerLevel),
+		"section_title": sec.headerTitle,
+	}
+	copyMetadata(metadata, frontmatterMetadata)
+	return metadata
+}
+
+func copyMetadata(dst map[string]string, src map[string]string) {
+	for key, value := range src {
+		dst[key] = value
+	}
+}
+
+func parseFrontmatterMetadata(body string) (map[string]string, bool) {
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(body), &root); err != nil {
+		return nil, false
+	}
+	metadata := make(map[string]string)
+	if len(root.Content) == 0 {
+		return metadata, true
+	}
+	doc := root.Content[0]
+	if doc.Kind != yaml.MappingNode {
+		return metadata, true
+	}
+	for i := 0; i+1 < len(doc.Content); i += 2 {
+		key := strings.TrimSpace(doc.Content[i].Value)
+		if key == "" {
+			continue
+		}
+		value, ok := encodeFrontmatterValue(doc.Content[i+1])
+		if !ok {
+			return nil, false
+		}
+		metadata["fm."+key] = value
+	}
+	return metadata, true
+}
+
+func encodeFrontmatterValue(node *yaml.Node) (string, bool) {
+	if node == nil {
+		return "", true
+	}
+	if node.Kind == yaml.ScalarNode {
+		return node.Value, true
+	}
+	value := normalizeYAMLNode(node)
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "", false
+	}
+	return string(encoded), true
+}
+
+func normalizeYAMLNode(node *yaml.Node) any {
+	if node == nil {
+		return nil
+	}
+	switch node.Kind {
+	case yaml.DocumentNode:
+		if len(node.Content) == 0 {
+			return nil
+		}
+		return normalizeYAMLNode(node.Content[0])
+	case yaml.MappingNode:
+		values := make(map[string]any, len(node.Content)/2)
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			values[node.Content[i].Value] = normalizeYAMLNode(node.Content[i+1])
+		}
+		return values
+	case yaml.SequenceNode:
+		values := make([]any, 0, len(node.Content))
+		for _, child := range node.Content {
+			values = append(values, normalizeYAMLNode(child))
+		}
+		return values
+	case yaml.ScalarNode:
+		return node.Value
+	case yaml.AliasNode:
+		return normalizeYAMLNode(node.Alias)
+	default:
+		return node.Value
 	}
 }
 
 // chunkByParagraphs chunks content without headers by paragraphs
-func (c *MarkdownChunker) chunkByParagraphs(file *FileInput, content, headerPath string, startLine int, now time.Time) []*Chunk {
+func (c *MarkdownChunker) chunkByParagraphs(file *FileInput, content, headerPath string, startLine int, frontmatterMetadata map[string]string, now time.Time) []*Chunk {
 	// Split by blank lines
 	paragraphs := strings.Split(content, "\n\n")
 
@@ -456,6 +671,12 @@ func (c *MarkdownChunker) chunkByParagraphs(file *FileInput, content, headerPath
 		// If adding this paragraph would exceed the limit, create a chunk
 		if currentContent.Len() > 0 && currentTokens+paraTokens > c.options.MaxChunkTokens {
 			chunkContent := currentContent.String()
+			metadata := map[string]string{
+				"header_path":   headerPath,
+				"header_level":  "0",
+				"section_title": "",
+			}
+			copyMetadata(metadata, frontmatterMetadata)
 			chunk := &Chunk{
 				ID:          generateChunkID(file.Path, chunkContent),
 				FilePath:    file.Path,
@@ -465,13 +686,9 @@ func (c *MarkdownChunker) chunkByParagraphs(file *FileInput, content, headerPath
 				Language:    "markdown",
 				StartLine:   currentStartLine,
 				EndLine:     currentStartLine + lineCount,
-				Metadata: map[string]string{
-					"header_path":   headerPath,
-					"header_level":  "0",
-					"section_title": "",
-				},
-				CreatedAt: now,
-				UpdatedAt: now,
+				Metadata:    metadata,
+				CreatedAt:   now,
+				UpdatedAt:   now,
 			}
 			chunks = append(chunks, chunk)
 
@@ -489,6 +706,12 @@ func (c *MarkdownChunker) chunkByParagraphs(file *FileInput, content, headerPath
 	// Create final chunk
 	if currentContent.Len() > 0 {
 		finalContent := currentContent.String()
+		metadata := map[string]string{
+			"header_path":   headerPath,
+			"header_level":  "0",
+			"section_title": "",
+		}
+		copyMetadata(metadata, frontmatterMetadata)
 		chunk := &Chunk{
 			ID:          generateChunkID(file.Path, finalContent),
 			FilePath:    file.Path,
@@ -498,13 +721,9 @@ func (c *MarkdownChunker) chunkByParagraphs(file *FileInput, content, headerPath
 			Language:    "markdown",
 			StartLine:   currentStartLine,
 			EndLine:     currentStartLine + lineCount,
-			Metadata: map[string]string{
-				"header_path":   headerPath,
-				"header_level":  "0",
-				"section_title": "",
-			},
-			CreatedAt: now,
-			UpdatedAt: now,
+			Metadata:    metadata,
+			CreatedAt:   now,
+			UpdatedAt:   now,
 		}
 		chunks = append(chunks, chunk)
 	}

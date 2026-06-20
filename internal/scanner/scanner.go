@@ -666,6 +666,10 @@ func (s *Scanner) matchesAnyPattern(relPath string, patterns []string) bool {
 
 // isBinaryFile checks if a file is binary by looking for null bytes.
 func (s *Scanner) isBinaryFile(path string) bool {
+	if strings.EqualFold(filepath.Ext(path), ".pdf") {
+		return false
+	}
+
 	f, err := os.Open(path)
 	if err != nil {
 		return false

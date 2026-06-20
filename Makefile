@@ -11,7 +11,7 @@
 # Tool Versions (Single Source of Truth - ADR-011)
 # Last reviewed: 2026-05-01
 # ============================================================================
-GO_VERSION = 1.25.9
+GO_VERSION = 1.26.4
 GOLANGCI_LINT_VERSION = v2.7.2
 
 # Go tools (use go run for portability - no need to install locally)
@@ -203,7 +203,7 @@ eval-search-graph:
 ## Regenerate full search eval baseline and token-budget artifacts
 eval-search-baseline:
 	@echo "Regenerating full search eval baseline..."
-	@CGO_ENABLED=1 go run ./cmd/amanmcp eval search --subset full --include-holdout --output both --out-dir .aman-pm/validation/search-eval --save-baseline
+	@CGO_ENABLED=1 go run ./cmd/amanmcp eval search --subset full --include-holdout --output both --out-dir .aman-pm/validation/search-eval --save-baseline --force-overwrite-baseline
 
 # ============================================================================
 # Linting

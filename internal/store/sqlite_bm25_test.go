@@ -111,6 +111,56 @@ func TestSQLiteBM25Index_Search_MultiTermRanking(t *testing.T) {
 	assert.Equal(t, "1", results[0].DocID)
 }
 
+func TestSQLiteBM25Index_Search_BroadensNaturalLanguageWhenStrictMatchIsEmpty(t *testing.T) {
+	// Given: a document that contains the meaningful query terms, but not every
+	// filler/intent term from a natural-language question.
+	idx, err := NewSQLiteBM25Index("", DefaultBM25Config())
+	require.NoError(t, err)
+	defer func() { _ = idx.Close() }()
+
+	docs := []*Document{
+		{ID: "pdf", Content: "PDF chunking stores page aware metadata with page numbers and source paths"},
+		{ID: "distractor", Content: "preserve daemon startup logs during config reload"},
+	}
+	require.NoError(t, idx.Index(context.Background(), docs))
+
+	// When: a natural-language query contains an extra term ("preserve") that
+	// does not appear in the target document.
+	results, err := idx.Search(context.Background(), "how does PDF chunking preserve page aware metadata", 10)
+	require.NoError(t, err)
+
+	// Then: search falls back from zero-result strict AND matching and still
+	// returns the document with the strongest meaningful-term overlap.
+	require.NotEmpty(t, results)
+	assert.Equal(t, "pdf", results[0].DocID)
+	assert.Contains(t, results[0].MatchedTerms, "pdf")
+	assert.Contains(t, results[0].MatchedTerms, "chunking")
+	assert.Contains(t, results[0].MatchedTerms, "metadata")
+	assert.NotContains(t, results[0].MatchedTerms, "preserve")
+}
+
+func TestSQLiteBM25Index_Search_PrefersStrictMultiTermMatches(t *testing.T) {
+	// Given: one document that satisfies every query term and another that only
+	// partially overlaps.
+	idx, err := NewSQLiteBM25Index("", DefaultBM25Config())
+	require.NoError(t, err)
+	defer func() { _ = idx.Close() }()
+
+	docs := []*Document{
+		{ID: "strict", Content: "PDF chunking preserve page aware metadata"},
+		{ID: "partial", Content: "PDF page aware metadata without chunking details"},
+	}
+	require.NoError(t, idx.Index(context.Background(), docs))
+
+	// When: strict matching can satisfy the query.
+	results, err := idx.Search(context.Background(), "PDF chunking preserve page aware metadata", 10)
+	require.NoError(t, err)
+
+	// Then: the strict full-term match remains the top result.
+	require.NotEmpty(t, results)
+	assert.Equal(t, "strict", results[0].DocID)
+}
+
 // TS05: IDF Affects Ranking
 func TestSQLiteBM25Index_Search_IDFAffectsRanking(t *testing.T) {
 	// Given: index where some terms are rare

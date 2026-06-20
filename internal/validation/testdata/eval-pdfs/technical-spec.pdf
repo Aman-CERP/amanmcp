@@ -1,0 +1,63 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [ 4 0 R 6 0 R ] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
+endobj
+5 0 obj
+<< /Length 302 >>
+stream
+BT
+/F1 11 Tf
+72 720 Td
+14 TL
+(Technical Specification: PDF_SPEC_API) Tj
+T*
+(PDF_SPEC_API defines the text-only eval contract for PDF fixtures.) Tj
+T*
+(PDFChunker NewPDFChunker page aware chunking metadata is required.) Tj
+T*
+(Expected chunks expose content_type pdf with page_start and page_end.) Tj
+ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>
+endobj
+7 0 obj
+<< /Length 255 >>
+stream
+BT
+/F1 11 Tf
+72 720 Td
+14 TL
+(Search output contract for PDF_SPEC_API) Tj
+T*
+(search_docs content_type pdf page_start page_end output must remain visible.) Tj
+T*
+(Fixture pages stay tiny so github.com/ledongthuc/pdf extracts text deterministically.) Tj
+ET
+endstream
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000123 00000 n 
+0000000193 00000 n 
+0000000319 00000 n 
+0000000672 00000 n 
+0000000798 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+1104
+%%EOF

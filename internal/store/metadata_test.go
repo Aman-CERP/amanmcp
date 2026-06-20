@@ -222,6 +222,58 @@ func TestSQLiteStore_GetFileByPath(t *testing.T) {
 	assert.Equal(t, "internal/config/config.go", retrieved.Path)
 }
 
+func TestSQLiteStore_SaveFilesReplacesExistingProjectPathWhenIDChanges(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+
+	project := &Project{ID: "proj-path-replace", Name: "path-replace", RootPath: "/test"}
+	require.NoError(t, store.SaveProject(ctx, project))
+	original := &File{
+		ID:          "runner-id",
+		ProjectID:   project.ID,
+		Path:        "config.yaml",
+		Size:        10,
+		ContentHash: "old",
+		Language:    "yaml",
+		ContentType: "config",
+		IndexedAt:   time.Now(),
+	}
+	require.NoError(t, store.SaveFiles(ctx, []*File{original}))
+	require.NoError(t, store.SaveChunks(ctx, []*Chunk{{
+		ID:          "old-chunk",
+		FileID:      original.ID,
+		FilePath:    original.Path,
+		Content:     "old",
+		ContentType: ContentTypeCode,
+		StartLine:   1,
+		EndLine:     1,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+	}}))
+
+	replacement := &File{
+		ID:          "coordinator-id",
+		ProjectID:   project.ID,
+		Path:        "config.yaml",
+		Size:        20,
+		ContentHash: "new",
+		Language:    "yaml",
+		ContentType: "config",
+		IndexedAt:   time.Now(),
+	}
+	require.NoError(t, store.SaveFiles(ctx, []*File{replacement}))
+
+	files, _, err := store.ListFiles(ctx, project.ID, "", 10)
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+	assert.Equal(t, replacement.ID, files[0].ID)
+	assert.Equal(t, replacement.ContentHash, files[0].ContentHash)
+
+	oldChunks, err := store.GetChunksByFile(ctx, original.ID)
+	require.NoError(t, err)
+	assert.Empty(t, oldChunks, "replacing a path with a new file ID should cascade stale chunks")
+}
+
 // TS03: Batch Insert Performance
 func TestSQLiteStore_BatchInsertPerformance(t *testing.T) {
 	store, _ := newTestStore(t)
@@ -1383,6 +1435,30 @@ func TestSQLiteStore_GetChunks(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, retrieved)
 	})
+}
+
+func TestSQLiteStore_GetChunksByPath(t *testing.T) {
+	store, tmpDir := newTestStore(t)
+	ctx := context.Background()
+
+	project := &Project{ID: "proj-chunks-by-path", Name: "chunks-by-path-test", RootPath: tmpDir}
+	require.NoError(t, store.SaveProject(ctx, project))
+
+	file := &File{ID: "file-chunks-by-path", ProjectID: project.ID, Path: "internal/search/fusion.go"}
+	otherFile := &File{ID: "other-file", ProjectID: project.ID, Path: "internal/search/engine.go"}
+	require.NoError(t, store.SaveFiles(ctx, []*File{file, otherFile}))
+
+	chunks := []*Chunk{
+		{ID: "path-2", FileID: file.ID, FilePath: file.Path, Content: "func second()", StartLine: 20, EndLine: 30},
+		{ID: "path-1", FileID: file.ID, FilePath: file.Path, Content: "func first()", StartLine: 1, EndLine: 10},
+		{ID: "path-other", FileID: "other-file", FilePath: "internal/search/engine.go", Content: "func other()", StartLine: 1, EndLine: 10},
+	}
+	require.NoError(t, store.SaveChunks(ctx, chunks))
+
+	retrieved, err := store.GetChunksByPath(ctx, "internal/search/fusion.go", 1)
+	require.NoError(t, err)
+	require.Len(t, retrieved, 1)
+	assert.Equal(t, "path-1", retrieved[0].ID)
 }
 
 func TestSQLiteStore_DeleteChunks(t *testing.T) {

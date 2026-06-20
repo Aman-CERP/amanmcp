@@ -115,11 +115,15 @@ func ExtractDocumentContext(chunks []*store.Chunk) string {
 		}
 		return fmt.Sprintf("File: %s", filePath)
 
-	case store.ContentTypeMarkdown:
-		// For markdown, list section headers
+	case store.ContentTypeMarkdown, store.ContentTypePDF:
+		// For documents, list available section/page context.
 		var headers []string
 		headers = append(headers, fmt.Sprintf("Document: %s", filePath))
 		for _, c := range chunks {
+			if c.ContentType == store.ContentTypePDF && c.Metadata != nil && c.Metadata["page_start"] != "" {
+				headers = append(headers, "- Page "+c.Metadata["page_start"])
+				continue
+			}
 			if len(c.Symbols) > 0 && c.Symbols[0].Type == store.SymbolTypeFunction {
 				// Section headers are stored as "function" symbols in markdown
 				headers = append(headers, "- "+c.Symbols[0].Name)

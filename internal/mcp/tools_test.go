@@ -582,12 +582,12 @@ func TestSearchTool_LargeResults_FormatsAll(t *testing.T) {
 // ListTools Tests
 // ============================================================================
 
-func TestListTools_ReturnsAllCoreAndSprint14Tools(t *testing.T) {
+func TestListTools_ReturnsCoreToolsAfterPMSurfaceSunset(t *testing.T) {
 	srv := newTestServer(t)
 
 	tools := srv.ListTools()
 
-	assert.Len(t, tools, 6)
+	assert.Len(t, tools, 5)
 
 	// Find tool names
 	names := make(map[string]bool)
@@ -600,52 +600,35 @@ func TestListTools_ReturnsAllCoreAndSprint14Tools(t *testing.T) {
 	assert.True(t, names["search_docs"], "missing search_docs tool")
 	assert.True(t, names["index_status"], "missing index_status tool")
 	assert.True(t, names["graph.query"], "missing graph.query tool")
-	assert.True(t, names["pm.mutate"], "missing pm.mutate tool")
+
+	sunsetToolName := "pm" + "." + "mutate"
+	assert.False(t, names[sunsetToolName], "sunset PM mutation tool must not be listed after TASK-SUB08")
 }
 
-// TestListTools_PMMutateAdvertisesDeprecationInDescription pins the contract
-// that downstream MCP consumers can detect the pm.mutate deprecation by
-// reading the tool description text alone. The DEPRECATED prefix MUST stay
-// in the description until DEBT-031 ports the operations and DEBT-032 removes
-// the registration entirely. AmanPM and AmanMCP are separate products; this
-// test guards the architectural contract.
-func TestListTools_PMMutateAdvertisesDeprecationInDescription(t *testing.T) {
+func TestListTools_LegacyCallToolAdvertisesDeprecationMetadata(t *testing.T) {
 	srv := newTestServer(t)
 
 	tools := srv.ListTools()
 
 	for _, tool := range tools {
-		if tool.Name != "pm.mutate" {
-			continue
-		}
-		assert.Truef(t,
-			strings.HasPrefix(tool.Description, "DEPRECATED"),
-			"pm.mutate description must start with DEPRECATED (per DEBT-031); got %q", tool.Description)
-		assert.Contains(t, tool.Description, "DEBT-031",
-			"pm.mutate description must reference DEBT-031 so consumers can find the tracking item")
-		return
+		require.NotNil(t, tool.Meta, "legacy CallTool tool %q must expose deprecation metadata", tool.Name)
+		assert.True(t, tool.Meta["deprecated"].(bool))
+		assert.Contains(t, tool.Description, "DEPRECATED compatibility wrapper")
+		assert.Contains(t, tool.Meta["deprecation_notice"], "structured SDK")
+		assert.Equal(t, "post-v1.0.0", tool.Meta["removal_target"])
+		assert.Equal(t, "SDK registered tool "+tool.Name, tool.Meta["replacement"])
 	}
-	t.Fatal("pm.mutate tool not found")
 }
 
-// TestAmanPMDeprecationMeta_ContractFields pins the structured _meta payload
-// that AmanPM-substrate MCP tools/resources advertise. Programmatic MCP
-// consumers (other agents, registry tools) read these fields to detect the
-// deprecation without parsing free-text descriptions.
-func TestAmanPMDeprecationMeta_ContractFields(t *testing.T) {
-	meta := amanpmDeprecationMeta()
+func TestSDKRegisteredTools_DoNotAdvertiseDeprecation(t *testing.T) {
+	tools := sdkRegisteredTools()
 
-	assert.Equal(t, true, meta["deprecated"], "deprecated flag must be true")
-	assert.NotEmpty(t, meta["deprecation_notice"], "human-readable notice required")
-	assert.NotEmpty(t, meta["deprecation_date"], "RFC-style date required")
-	assert.NotEmpty(t, meta["removal_target"], "removal target required")
-	assert.NotEmpty(t, meta["replacement"], "replacement pointer required")
-	assert.NotEmpty(t, meta["feedback_doc"], "feedback doc pointer required")
-
-	tracking, ok := meta["tracking"].([]string)
-	require.True(t, ok, "tracking must be []string for machine consumption")
-	assert.Contains(t, tracking, "DEBT-031", "must reference port DEBT")
-	assert.Contains(t, tracking, "DEBT-032", "must reference sunset DEBT")
+	require.NotEmpty(t, tools)
+	for _, tool := range tools {
+		assert.False(t, strings.Contains(tool.Description, "DEPRECATED"), "SDK tool %q must remain canonical", tool.Name)
+		assert.NotContains(t, tool.Meta, "deprecated", "SDK tool %q must not carry deprecation metadata", tool.Name)
+		assert.NotContains(t, tool.Meta, "deprecation_notice", "SDK tool %q must not carry deprecation metadata", tool.Name)
+	}
 }
 
 // ============================================================================

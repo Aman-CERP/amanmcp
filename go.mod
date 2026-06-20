@@ -1,6 +1,6 @@
 module github.com/Aman-CERP/amanmcp
 
-go 1.25.9
+go 1.26.4
 
 require (
 	github.com/blevesearch/bleve/v2 v2.5.7
@@ -12,6 +12,7 @@ require (
 	github.com/fsnotify/fsnotify v1.8.0
 	github.com/gofrs/flock v0.13.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
+	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/mattn/go-isatty v0.0.20
 	github.com/mattn/go-sqlite3 v1.14.32
 	github.com/modelcontextprotocol/go-sdk v1.4.1

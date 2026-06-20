@@ -18,7 +18,6 @@ import (
 	"github.com/Aman-CERP/amanmcp/internal/config"
 	"github.com/Aman-CERP/amanmcp/internal/embed"
 	"github.com/Aman-CERP/amanmcp/internal/graph"
-	"github.com/Aman-CERP/amanmcp/internal/pmmutation"
 	"github.com/Aman-CERP/amanmcp/internal/search"
 	"github.com/Aman-CERP/amanmcp/internal/store"
 	"github.com/Aman-CERP/amanmcp/internal/telemetry"
@@ -51,9 +50,6 @@ type Server struct {
 	// Graph query service (optional, set via SetGraphRepository/SetGraphQueryService)
 	graphQuery *graph.QueryService
 
-	// PM mutator (optional; enabled automatically when rootPath is set)
-	pmMutator *pmmutation.Mutator
-
 	mu sync.RWMutex
 }
 
@@ -61,6 +57,7 @@ type Server struct {
 type ToolInfo struct {
 	Name        string
 	Description string
+	Meta        map[string]any
 }
 
 // ResourceInfo contains information about a resource.
@@ -99,18 +96,24 @@ type SearchOutput struct {
 // SearchResultOutput defines a single search result with context-rich metadata.
 // UX-1: Enhanced response format explaining WHY results matched.
 type SearchResultOutput struct {
-	ResultID     string                     `json:"result_id" jsonschema:"stable deterministic result identifier"`
-	FilePath     string                     `json:"file_path" jsonschema:"file path relative to project root"`
-	Content      string                     `json:"content" jsonschema:"matched content snippet"`
-	Score        float64                    `json:"score" jsonschema:"relevance score between 0 and 1"`
-	Language     string                     `json:"language,omitempty" jsonschema:"programming language of the file"`
-	MatchReason  string                     `json:"match_reason,omitempty" jsonschema:"human-readable explanation of why this result matched"`
-	Symbol       string                     `json:"symbol,omitempty" jsonschema:"primary symbol name (function, class, type)"`
-	SymbolType   string                     `json:"symbol_type,omitempty" jsonschema:"type of symbol: function, class, interface, type, method"`
-	Signature    string                     `json:"signature,omitempty" jsonschema:"full function/method signature"`
-	MatchedTerms []string                   `json:"matched_terms,omitempty" jsonschema:"query terms that matched this result"`
-	InBothLists  bool                       `json:"in_both_lists,omitempty" jsonschema:"true if result appeared in both keyword and semantic search"`
-	Explain      *SearchResultExplainOutput `json:"explain,omitempty" jsonschema:"per-result stage diagnostics; present only when explain is true"`
+	ResultID            string                     `json:"result_id" jsonschema:"stable deterministic result identifier"`
+	FilePath            string                     `json:"file_path" jsonschema:"file path relative to project root"`
+	Content             string                     `json:"content" jsonschema:"matched content snippet"`
+	Score               float64                    `json:"score" jsonschema:"relevance score between 0 and 1"`
+	Language            string                     `json:"language,omitempty" jsonschema:"programming language of the file"`
+	LanguageSupportTier string                     `json:"language_support_tier" jsonschema:"language support tier for this result: tier_1_parser_backed, tier_2_line_fallback, or tier_3_plain_text"`
+	ContentType         string                     `json:"content_type,omitempty" jsonschema:"content type of the indexed chunk, e.g. code, markdown, pdf"`
+	Chunker             string                     `json:"chunker,omitempty" jsonschema:"chunker that produced this result when available"`
+	PageNumber          string                     `json:"page_number,omitempty" jsonschema:"PDF page number when result comes from paged content"`
+	PageStart           string                     `json:"page_start,omitempty" jsonschema:"first PDF page covered by the result when available"`
+	PageEnd             string                     `json:"page_end,omitempty" jsonschema:"last PDF page covered by the result when available"`
+	MatchReason         string                     `json:"match_reason,omitempty" jsonschema:"human-readable explanation of why this result matched"`
+	Symbol              string                     `json:"symbol,omitempty" jsonschema:"primary symbol name (function, class, type)"`
+	SymbolType          string                     `json:"symbol_type,omitempty" jsonschema:"type of symbol: function, class, interface, type, method"`
+	Signature           string                     `json:"signature,omitempty" jsonschema:"full function/method signature"`
+	MatchedTerms        []string                   `json:"matched_terms,omitempty" jsonschema:"query terms that matched this result"`
+	InBothLists         bool                       `json:"in_both_lists,omitempty" jsonschema:"true if result appeared in both keyword and semantic search"`
+	Explain             *SearchResultExplainOutput `json:"explain,omitempty" jsonschema:"per-result stage diagnostics; present only when explain is true"`
 
 	SourceClass     string   `json:"source_class" jsonschema:"source artifact class, e.g. source_code, docs, adr, review_corpus"`
 	Authority       string   `json:"authority" jsonschema:"source authority level, e.g. authoritative, active, advisory"`
@@ -152,9 +155,6 @@ func NewServer(engine search.SearchEngine, metadata store.MetadataStore, embedde
 		rootPath:  rootPath,
 		logger:    slog.Default(),
 	}
-	if rootPath != "" {
-		s.pmMutator = pmmutation.New(rootPath)
-	}
 
 	// Create MCP server with implementation info
 	s.mcp = mcp.NewServer(
@@ -168,13 +168,6 @@ func NewServer(engine search.SearchEngine, metadata store.MetadataStore, embedde
 	// Register tools
 	s.registerTools()
 	s.registerGraphStatusResource()
-	if rootPath != "" {
-		if err := s.RegisterPMResources(); err != nil {
-			return nil, fmt.Errorf("failed to register PM resources: %w", err)
-		}
-	} else {
-		s.logger.Info("pm_resources_skipped", slog.String("reason", "rootPath empty"))
-	}
 
 	return s, nil
 }
@@ -216,13 +209,6 @@ func (s *Server) SetGraphQueryService(service *graph.QueryService) {
 	s.graphQuery = service
 }
 
-// SetPMMutator wires pm.mutate to a PM mutation core.
-func (s *Server) SetPMMutator(mutator *pmmutation.Mutator) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.pmMutator = mutator
-}
-
 // MCPServer returns the underlying MCP server instance.
 func (s *Server) MCPServer() *mcp.Server {
 	return s.mcp
@@ -241,34 +227,12 @@ func (s *Server) Capabilities() (hasTools, hasResources bool) {
 
 // ListTools returns all registered tools.
 func (s *Server) ListTools() []ToolInfo {
-	// Return the tools we register
-	// QW-3: Enhanced descriptions to explain WHY amanmcp > grep
-	return []ToolInfo{
-		{
-			Name:        "search",
-			Description: "Primary search tool. Instantly finds code and documentation using a full-codebase index. Use this for 95% of your search tasks - faster and smarter than grep. Understands code semantics, not just keywords.",
-		},
-		{
-			Name:        "search_code",
-			Description: "Code-specialized search. Finds functions, classes, and implementations by meaning, not just text matching. Use when you need to understand HOW something is implemented. Supports language and symbol type filtering.",
-		},
-		{
-			Name:        "search_docs",
-			Description: "Documentation search with context. Finds architecture decisions, design rationale, and guides. Preserves section hierarchy so you understand WHERE in the doc structure a match appears.",
-		},
-		{
-			Name:        "index_status",
-			Description: "Check if the codebase index is ready and which embedder is active. Use before searching to verify the index is complete.",
-		},
-		{
-			Name:        "graph.query",
-			Description: "Graph-native relationship query. Use typed modes find_references, explain_symbol, and impact_analysis for bounded role-labeled evidence when AmanGraph data is available.",
-		},
-		{
-			Name:        "pm.mutate",
-			Description: "DEPRECATED — moving to scripts/amanpm/ per DEBT-031 (AmanPM tooling does not belong in the AmanMCP product binary). Existing behavior preserved until the script port lands. Human-auditable AmanPM mutation gateway. Supports lock-token preview, append-only learning/changelog writes, item filing, status moves, ADR skeletons, and release preflight without bypassing validation.",
-		},
+	tools := sdkRegisteredTools()
+	legacyTools := make([]ToolInfo, 0, len(tools))
+	for _, tool := range tools {
+		legacyTools = append(legacyTools, legacyCallToolInfo(tool))
 	}
+	return legacyTools
 }
 
 // CallTool invokes a tool by name with the given arguments.
@@ -284,8 +248,6 @@ func (s *Server) CallTool(ctx context.Context, name string, args map[string]any)
 		return s.handleIndexStatusTool(ctx, args)
 	case "graph.query":
 		return s.handleGraphQueryArgs(ctx, args)
-	case "pm.mutate":
-		return s.handlePMMutateArgs(ctx, args)
 	default:
 		return nil, NewMethodNotFoundError(name)
 	}
@@ -675,73 +637,24 @@ func (s *Server) handleIndexStatusTool(ctx context.Context, _ map[string]any) (*
 func (s *Server) registerTools() {
 	s.logger.Debug("Registering MCP tools")
 
-	// Register search tool - generic hybrid search
-	// QW-3: Enhanced descriptions to explain WHY amanmcp > grep
-	mcp.AddTool(s.mcp, &mcp.Tool{
-		Name:        "search",
-		Description: "Primary search tool. Instantly finds code and documentation using a full-codebase index. Use this for 95% of your search tasks - faster and smarter than grep. Understands code semantics, not just keywords.",
-	}, s.mcpSearchHandler)
+	tools := sdkRegisteredTools()
+
+	mcp.AddTool(s.mcp, tools[0], s.mcpSearchHandler)
 	s.logger.Debug("Registered tool", slog.String("name", "search"))
 
-	// Register search_code tool - code-specific search
-	mcp.AddTool(s.mcp, &mcp.Tool{
-		Name:        "search_code",
-		Description: "Code-specialized search. Finds functions, classes, and implementations by meaning, not just text matching. Use when you need to understand HOW something is implemented. Supports language and symbol type filtering.",
-	}, s.mcpSearchCodeHandler)
+	mcp.AddTool(s.mcp, tools[1], s.mcpSearchCodeHandler)
 	s.logger.Debug("Registered tool", slog.String("name", "search_code"))
 
-	// Register search_docs tool - documentation search
-	mcp.AddTool(s.mcp, &mcp.Tool{
-		Name:        "search_docs",
-		Description: "Documentation search with context. Finds architecture decisions, design rationale, and guides. Preserves section hierarchy so you understand WHERE in the doc structure a match appears.",
-	}, s.mcpSearchDocsHandler)
+	mcp.AddTool(s.mcp, tools[2], s.mcpSearchDocsHandler)
 	s.logger.Debug("Registered tool", slog.String("name", "search_docs"))
 
-	// Register index_status tool - index diagnostics
-	mcp.AddTool(s.mcp, &mcp.Tool{
-		Name:        "index_status",
-		Description: "Check if the codebase index is ready and which embedder is active. Use before searching to verify the index is complete.",
-	}, s.mcpIndexStatusHandler)
+	mcp.AddTool(s.mcp, tools[3], s.mcpIndexStatusHandler)
 	s.logger.Debug("Registered tool", slog.String("name", "index_status"))
 
-	mcp.AddTool(s.mcp, &mcp.Tool{
-		Name:        "graph.query",
-		Description: "Graph-native relationship query with find_references, explain_symbol, and impact_analysis modes. Returns bounded role-labeled evidence, graph path hints, source paths, confidence labels, status, and warnings.",
-	}, s.mcpGraphQueryHandler)
+	mcp.AddTool(s.mcp, tools[4], s.mcpGraphQueryHandler)
 	s.logger.Debug("Registered tool", slog.String("name", "graph.query"))
 
-	mcp.AddTool(s.mcp, &mcp.Tool{
-		Name:        "pm.mutate",
-		Description: "DEPRECATED — moving to scripts/amanpm/ per DEBT-031 (AmanPM tooling does not belong in the AmanMCP product binary). Existing behavior preserved until the script port lands. AmanPM mutation gateway with file-scoped lock tokens, receipts, diagnostics, changed files, suggested commit messages, and hard-gated release preflight.",
-		Meta:        amanpmDeprecationMeta(),
-	}, s.mcpPMMutateHandler)
-	s.logger.Debug("Registered tool", slog.String("name", "pm.mutate"))
-
-	s.logger.Info("MCP tools registered", slog.Int("count", 6))
-}
-
-// amanpmDeprecationMeta returns the structured deprecation metadata attached
-// to every MCP tool/resource that exposes AmanPM substrate operations from
-// the AmanMCP binary. The MCP spec reserves the `_meta` field for
-// implementation-specific metadata; downstream MCP consumers can read these
-// fields programmatically to detect the deprecation, surface user-facing
-// warnings, or block calls.
-//
-// AmanPM and AmanMCP are separate products. AmanMCP indexes .aman-pm/* files
-// like any other repo content, but it should not embed AmanPM mutation or
-// inspection logic in its binary. The full architectural argument is in
-// vend_feedback/2026-05-02-amanmcp-pmmutation-architectural-feedback.md and
-// in DEBT-031 (port to scripts) plus DEBT-032 (sunset MCP tool family).
-func amanpmDeprecationMeta() mcp.Meta {
-	return mcp.Meta{
-		"deprecated":         true,
-		"deprecation_notice": "AmanPM mutation/resource primitives are moving from the AmanMCP product binary to language-neutral scripts in scripts/amanpm/, modeled on AmanERP's scripts/analytics/ pattern. AmanMCP and AmanPM are separate products; PM tooling does not belong in the product binary.",
-		"deprecation_date":   "2026-05-02",
-		"removal_target":     "Sprint 16+, after scripts/amanpm/ port lands",
-		"tracking":           []string{"DEBT-031", "DEBT-032"},
-		"replacement":        "scripts/amanpm/* (port pending) + Makefile amanpm-* targets",
-		"feedback_doc":       "vend_feedback/2026-05-02-amanmcp-pmmutation-architectural-feedback.md",
-	}
+	s.logger.Info("MCP tools registered", slog.Int("count", len(tools)))
 }
 
 // mcpSearchHandler is the MCP SDK handler for the search tool.

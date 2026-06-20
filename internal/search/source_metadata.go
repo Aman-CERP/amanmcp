@@ -294,6 +294,7 @@ func DeriveSourceMetadata(input SourceMetadataInput) SourceMetadata {
 	}
 	applyPathRules(&meta, rules, path)
 	applyContentFallbacks(&meta, input, path)
+	applyFrontmatterMetadata(&meta, input.Metadata)
 	applyDecisionMetadata(&meta, input.Content)
 	applyFreshnessDefaults(&meta)
 
@@ -474,10 +475,53 @@ func applyContentFallbacks(meta *SourceMetadata, input SourceMetadataInput, path
 		meta.SourceClass = SourceClassConfig
 		meta.Authority = AuthorityAuthoritative
 		meta.Profile = ProfileCode
-	case input.ContentType == store.ContentTypeMarkdown || input.ContentType == store.ContentTypeText || isDocPath(path):
+	case input.ContentType == store.ContentTypeMarkdown || input.ContentType == store.ContentTypePDF || input.ContentType == store.ContentTypeText || isDocPath(path):
 		meta.SourceClass = SourceClassDocs
 		meta.Authority = AuthorityActive
 		meta.Profile = ProfileProjectMemory
+	}
+}
+
+func applyFrontmatterMetadata(meta *SourceMetadata, metadata map[string]string) {
+	if len(metadata) == 0 {
+		return
+	}
+
+	itemType := strings.ToLower(strings.TrimSpace(metadata["fm.type"]))
+	status := strings.ToLower(strings.TrimSpace(metadata["fm.status"]))
+	priority := strings.ToUpper(strings.TrimSpace(metadata["fm.priority"]))
+
+	if isPMFrontmatterType(itemType) {
+		meta.SourceClass = SourceClassPMItem
+		meta.Authority = AuthorityActive
+		meta.Profile = ProfileProjectMemory
+	}
+
+	switch status {
+	case "resolved", "done", "closed", "cancelled", "canceled":
+		meta.SourceClass = SourceClassArchived
+		meta.Authority = AuthorityArchived
+		meta.Profile = ProfileArchive
+		meta.Stale = true
+		if meta.FreshnessReason == "" {
+			meta.FreshnessReason = "frontmatter status is " + status
+		}
+	case "active", "in_progress", "ready", "blocked":
+		if meta.Authority == AuthorityUnknown {
+			meta.Authority = AuthorityActive
+		}
+		if priority == "P0" && status == "active" {
+			meta.Authority = AuthorityAuthoritative
+		}
+	}
+}
+
+func isPMFrontmatterType(itemType string) bool {
+	switch itemType {
+	case "bug", "feature", "task", "debt", "epic", "spike":
+		return true
+	default:
+		return false
 	}
 }
 

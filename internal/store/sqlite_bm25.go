@@ -288,10 +288,23 @@ func (s *SQLiteBM25Index) Search(ctx context.Context, queryStr string, limit int
 	// FTS5 uses space-separated terms for AND matching by default
 	processedQuery := strings.Join(tokens, " ")
 
+	results, err := s.searchProcessedQuery(ctx, processedQuery, tokens, limit)
+	if err != nil {
+		return nil, err
+	}
+	if len(results) > 0 || len(tokens) == 1 {
+		return results, nil
+	}
+
+	fallbackQuery := buildFTS5ORQuery(tokens)
+	return s.searchProcessedQuery(ctx, fallbackQuery, tokens, limit)
+}
+
+func (s *SQLiteBM25Index) searchProcessedQuery(ctx context.Context, processedQuery string, queryTerms []string, limit int) ([]*BM25Result, error) {
 	// FTS5 bm25() returns negative values where lower = better match
 	// ORDER BY score puts best matches first (most negative)
 	query := `
-		SELECT doc_id, bm25(fts_content) as score
+		SELECT doc_id, content, bm25(fts_content) as score
 		FROM fts_content
 		WHERE content MATCH ?
 		ORDER BY score
@@ -311,8 +324,9 @@ func (s *SQLiteBM25Index) Search(ctx context.Context, queryStr string, limit int
 	var results []*BM25Result
 	for rows.Next() {
 		var docID string
+		var content string
 		var score float64
-		if err := rows.Scan(&docID, &score); err != nil {
+		if err := rows.Scan(&docID, &content, &score); err != nil {
 			return nil, fmt.Errorf("failed to scan result: %w", err)
 		}
 		// Negate score: FTS5 bm25() returns negative values
@@ -320,11 +334,51 @@ func (s *SQLiteBM25Index) Search(ctx context.Context, queryStr string, limit int
 		results = append(results, &BM25Result{
 			DocID:        docID,
 			Score:        -score,
-			MatchedTerms: tokens, // Return preprocessed query tokens
+			MatchedTerms: matchedTermsForIndexedContent(queryTerms, content),
 		})
 	}
 
 	return results, rows.Err()
+}
+
+func matchedTermsForIndexedContent(queryTerms []string, indexedContent string) []string {
+	if len(queryTerms) == 0 || indexedContent == "" {
+		return nil
+	}
+
+	contentTerms := make(map[string]struct{}, len(queryTerms))
+	for _, term := range strings.Fields(indexedContent) {
+		contentTerms[term] = struct{}{}
+	}
+
+	matched := make([]string, 0, len(queryTerms))
+	seen := make(map[string]struct{}, len(queryTerms))
+	for _, term := range queryTerms {
+		if _, ok := contentTerms[term]; !ok {
+			continue
+		}
+		if _, duplicate := seen[term]; duplicate {
+			continue
+		}
+		matched = append(matched, term)
+		seen[term] = struct{}{}
+	}
+	return matched
+}
+
+func buildFTS5ORQuery(tokens []string) string {
+	terms := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		if token == "" {
+			continue
+		}
+		terms = append(terms, quoteFTS5Term(token))
+	}
+	return strings.Join(terms, " OR ")
+}
+
+func quoteFTS5Term(term string) string {
+	return `"` + strings.ReplaceAll(term, `"`, `""`) + `"`
 }
 
 // Delete removes documents from the index.

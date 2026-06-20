@@ -34,6 +34,8 @@ import (
 	"github.com/Aman-CERP/amanmcp/pkg/version"
 )
 
+const defaultGraphRefreshInterval = 30 * time.Minute
+
 // verifyStdinForMCP checks if stdin is suitable for MCP stdio transport.
 // Returns nil if stdin is a pipe (usable for MCP), error if terminal or unavailable.
 // BUG-035: Helps diagnose "file already closed" connection issues.
@@ -463,6 +465,7 @@ func startFileWatcher(ctx context.Context, root, dataDir string, engine *search.
 	if err != nil {
 		return fmt.Errorf("failed to create language registry: %w", err)
 	}
+	graphRepo, closeGraphRepo := openWatcherGraphRepository(dataDir)
 
 	// Create coordinator (use same hash as index command)
 	h := sha256.Sum256([]byte(root))
@@ -477,6 +480,7 @@ func startFileWatcher(ctx context.Context, root, dataDir string, engine *search.
 		MDChunker:        mdChunker,
 		Scanner:          fileScanner,
 		LanguageRegistry: languageRegistry,
+		GraphRepository:  graphRepo,
 		SecretScanner:    secrets.NewScanner(secrets.DefaultPolicy()),
 		ExcludePatterns:  excludePatterns, // BUG-027: passed from caller
 	})
@@ -504,6 +508,11 @@ func startFileWatcher(ctx context.Context, root, dataDir string, engine *search.
 		// BUG-036: Reconcile file changes (new/modified/deleted) from while server was stopped
 		if err := coordinator.ReconcileFilesOnStartup(ctx); err != nil {
 			slog.Warn("Failed to reconcile files on startup", slog.String("error", err.Error()))
+			// Non-fatal - continue anyway
+		}
+
+		if err := coordinator.ReconcileGraphOnStartup(ctx); err != nil {
+			slog.Warn("Failed to reconcile graph on startup", slog.String("error", err.Error()))
 			// Non-fatal - continue anyway
 		}
 
@@ -567,6 +576,39 @@ func startFileWatcher(ctx context.Context, root, dataDir string, engine *search.
 		}
 	})
 
+	if graphRepo != nil && !skipReconciliation {
+		g.Go(func() error {
+			interval := getGraphRefreshInterval()
+			if interval <= 0 {
+				slog.Debug("graph_refresh_loop_disabled")
+				return nil
+			}
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			slog.Debug("graph_refresh_loop_started", slog.Duration("interval", interval))
+
+			for {
+				select {
+				case <-gctx.Done():
+					return gctx.Err()
+				case <-ticker.C:
+					if err := coordinator.RefreshGraph(gctx); err != nil {
+						slog.Warn("graph_refresh_failed", slog.String("error", err.Error()))
+					}
+				}
+			}
+		})
+	}
+
+	// Wait for goroutines in background (don't block the caller). This owns
+	// graph repository closure so refresh and event goroutines finish first.
+	go func() {
+		defer closeGraphRepo()
+		if err := g.Wait(); err != nil && err != context.Canceled {
+			slog.Error("File watcher stopped unexpectedly", slog.String("error", err.Error()))
+		}
+	}()
+
 	// Wait briefly to catch immediate startup failures (BUG-017 fix)
 	// If the watcher fails during initial directory scan, we want to know about it
 	// BUG-033: Increased default from 500ms to 2s for slow filesystems, configurable via env var
@@ -583,13 +625,6 @@ func startFileWatcher(ctx context.Context, root, dataDir string, engine *search.
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-
-	// Wait for goroutines in background (don't block the caller)
-	go func() {
-		if err := g.Wait(); err != nil && err != context.Canceled {
-			slog.Error("File watcher stopped unexpectedly", slog.String("error", err.Error()))
-		}
-	}()
 
 	return nil
 }
@@ -611,6 +646,22 @@ func attachGraphRepository(srv *mcp.Server, dataDir string) func() {
 	}
 }
 
+func openWatcherGraphRepository(dataDir string) (graph.Repository, func()) {
+	if dataDir == "" {
+		return nil, func() {}
+	}
+	repo, err := graph.OpenSQLiteRepository(filepath.Join(dataDir, "graph.db"))
+	if err != nil {
+		slog.Warn("graph_watcher_repository_unavailable", slog.String("error", err.Error()))
+		return nil, func() {}
+	}
+	return repo, func() {
+		if err := repo.Close(); err != nil {
+			slog.Warn("graph_watcher_repository_close_failed", slog.String("error", err.Error()))
+		}
+	}
+}
+
 // getWatcherStartupTimeout returns the watcher startup timeout from environment
 // or a default of 2 seconds (increased from 500ms for slow filesystems).
 // BUG-033: Configurable via AMANMCP_WATCHER_STARTUP_TIMEOUT environment variable.
@@ -624,6 +675,20 @@ func getWatcherStartupTimeout() time.Duration {
 			slog.Duration("default", 2*time.Second))
 	}
 	return 2 * time.Second
+}
+
+func getGraphRefreshInterval() time.Duration {
+	if v := os.Getenv("AMANMCP_GRAPH_REFRESH_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			slog.Warn("Invalid AMANMCP_GRAPH_REFRESH_INTERVAL, using default",
+				slog.String("value", v),
+				slog.Duration("default", defaultGraphRefreshInterval))
+			return defaultGraphRefreshInterval
+		}
+		return d
+	}
+	return defaultGraphRefreshInterval
 }
 
 // runServeWithSession runs the server with session management.

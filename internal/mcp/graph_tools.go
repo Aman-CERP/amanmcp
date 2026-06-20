@@ -9,10 +9,11 @@ import (
 )
 
 type GraphQueryInput struct {
-	ProjectID string `json:"project_id,omitempty" jsonschema:"AmanMCP project id; defaults to the server project when available"`
-	Mode      string `json:"mode,omitempty" jsonschema:"graph query mode: find_references, explain_symbol, or impact_analysis"`
-	Query     string `json:"query" jsonschema:"symbol, project-relative path, or stable graph/search identifier to query"`
-	Limit     int    `json:"limit,omitempty" jsonschema:"maximum number of graph evidence results, default 10, maximum 50"`
+	ProjectID    string `json:"project_id,omitempty" jsonschema:"AmanMCP project id; defaults to the server project when available"`
+	Mode         string `json:"mode,omitempty" jsonschema:"graph query mode: find_references, explain_symbol, or impact_analysis"`
+	Query        string `json:"query" jsonschema:"symbol, project-relative path, or stable graph/search identifier to query"`
+	Limit        int    `json:"limit,omitempty" jsonschema:"maximum number of graph evidence results, default 10, maximum 50"`
+	IncludeStale bool   `json:"include_stale,omitempty" jsonschema:"include stale graph edges that point at deleted or replaced sources"`
 }
 
 type GraphQueryOutput struct {
@@ -27,10 +28,11 @@ type GraphQueryOutput struct {
 
 func (s *Server) handleGraphQueryArgs(ctx context.Context, args map[string]any) (GraphQueryOutput, error) {
 	input := GraphQueryInput{
-		ProjectID: stringArg(args, "project_id"),
-		Mode:      stringArg(args, "mode"),
-		Query:     stringArg(args, "query"),
-		Limit:     intArg(args, "limit"),
+		ProjectID:    stringArg(args, "project_id"),
+		Mode:         stringArg(args, "mode"),
+		Query:        stringArg(args, "query"),
+		Limit:        intArg(args, "limit"),
+		IncludeStale: boolArg(args, "include_stale"),
 	}
 	return s.handleGraphQueryTool(ctx, input)
 }
@@ -62,10 +64,11 @@ func (s *Server) handleGraphQueryTool(ctx context.Context, input GraphQueryInput
 	}
 
 	response, err := service.Query(ctx, graph.QueryRequest{
-		ProjectID: input.ProjectID,
-		Mode:      input.Mode,
-		Query:     input.Query,
-		Limit:     input.Limit,
+		ProjectID:    input.ProjectID,
+		Mode:         input.Mode,
+		Query:        input.Query,
+		Limit:        input.Limit,
+		IncludeStale: input.IncludeStale,
 	})
 	if err != nil {
 		return GraphQueryOutput{}, NewInvalidParamsError(err.Error())
@@ -124,4 +127,12 @@ func intArg(args map[string]any, key string) int {
 	default:
 		return 0
 	}
+}
+
+func boolArg(args map[string]any, key string) bool {
+	if args == nil {
+		return false
+	}
+	value, ok := args[key].(bool)
+	return ok && value
 }

@@ -213,64 +213,17 @@ flowchart TB
 
 ## Language Support
 
-### Built-in Languages
+### Built-in Language Tiers
 
-Tree-sitter has parsers for 100+ languages. Key ones for AmanMCP:
+Tree-sitter has parsers for many languages, but AmanMCP only ships parser-backed
+chunking for the languages compiled into this binary. See
+[Language Support Tiers](language-tiers.md) for the user-facing contract.
 
-```mermaid
----
-config:
-  layout: elk
----
-flowchart TB
-    subgraph Excellent["Excellent Support"]
-        direction TB
-        Go["Go<br/>tree-sitter-go<br/>• Full syntax coverage<br/>• Methods, generics, interfaces<br/>• Fast incremental parsing"]
-        TS["TypeScript/JavaScript<br/>tree-sitter-typescript<br/>• JSX/TSX support<br/>• Decorators, async/await<br/>• Module systems"]
-        Python["Python<br/>tree-sitter-python<br/>• Python 3.x<br/>• Type hints, f-strings<br/>• Decorators, comprehensions"]
-        Rust["Rust<br/>tree-sitter-rust<br/>• Macros, traits, lifetimes<br/>• Pattern matching<br/>• Advanced types"]
-    end
-
-    subgraph Good["Good Support"]
-        direction TB
-        Java["Java<br/>tree-sitter-java<br/>• Classes, generics<br/>• Annotations<br/>• Lambda expressions"]
-        CPP["C/C++<br/>tree-sitter-cpp<br/>• Templates<br/>• Modern C++ features<br/>• Preprocessor support"]
-        Ruby["Ruby<br/>tree-sitter-ruby<br/>• Blocks, metaprogramming<br/>• String interpolation<br/>• Module/Class definitions"]
-        Markdown["Markdown<br/>tree-sitter-markdown<br/>• Code blocks<br/>• Headers, lists<br/>• Inline formatting"]
-    end
-
-    subgraph Detection["Language Detection Pipeline"]
-        direction LR
-        D1["1. File Extension<br/>.go .py .ts .rs"]
-        D2["2. Shebang<br/>#!/usr/bin/env python"]
-        D3["3. Content Heuristics<br/>Keyword detection"]
-        Fallback["Fallback: Plain text"]
-
-        D1 -->|Match| Parser["Select Parser"]
-        D1 -->|No match| D2
-        D2 -->|Match| Parser
-        D2 -->|No match| D3
-        D3 -->|Match| Parser
-        D3 -->|No match| Fallback
-    end
-
-    Excellent --> Detection
-    Good --> Detection
-
-    style Excellent fill:#c8e6c9
-    style Good fill:#90ee90
-    style Detection fill:#e1f5ff,stroke-width:2px,color:#ffffff
-    style Go fill:#00add8,stroke-width:2px,color:#ffffff
-    style TS fill:#3178c6,stroke-width:2px,color:#ffffff
-    style Python fill:#3776ab,stroke-width:2px,color:#ffffff
-    style Rust fill:#d84315,stroke-width:2px,color:#ffffff
-    style Java fill:#007396,stroke-width:2px,color:#ffffff
-    style CPP fill:#00599c,stroke-width:2px,color:#ffffff
-    style Ruby fill:#cc342d,stroke-width:2px,color:#ffffff
-    style Markdown fill:#083fa1,stroke-width:2px,color:#ffffff
-    style Parser fill:#27ae60,stroke-width:2px,color:#ffffff
-    style Fallback fill:#f39c12,stroke-width:2px,color:#ffffff
-```
+| Tier | AmanMCP behavior | Current examples |
+|------|------------------|------------------|
+| Tier 1 parser-backed | AST chunking and symbol extraction | Go, TypeScript, TSX, JavaScript, JSX, Python |
+| Tier 2 line fallback | Language detected, indexed with line fallback | Rust, Java, Ruby, C, C++, C#, Swift, PHP, Shell, HTML, CSS, SQL |
+| Tier 3 plain text | No programming-language semantics | Text, Markdown, PDFs, unknown extensions |
 
 ### Language Detection
 

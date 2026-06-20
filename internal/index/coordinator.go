@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -11,9 +12,11 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/Aman-CERP/amanmcp/internal/chunk"
 	"github.com/Aman-CERP/amanmcp/internal/gitignore"
+	"github.com/Aman-CERP/amanmcp/internal/graph"
 	"github.com/Aman-CERP/amanmcp/internal/language"
 	"github.com/Aman-CERP/amanmcp/internal/scanner"
 	"github.com/Aman-CERP/amanmcp/internal/search"
@@ -43,11 +46,18 @@ type CoordinatorConfig struct {
 	// Metadata is the metadata store for file/chunk tracking.
 	Metadata store.MetadataStore
 
+	// GraphRepository is the optional disposable graph overlay store. When set,
+	// coordinator updates keep graph edges aligned with successful index writes.
+	GraphRepository graph.Repository
+
 	// CodeChunker handles code files.
 	CodeChunker chunk.Chunker
 
 	// MDChunker handles markdown files.
 	MDChunker chunk.Chunker
+
+	// PDFChunker handles PDF document files.
+	PDFChunker chunk.Chunker
 
 	// Scanner is used for gitignore reconciliation (optional).
 	// When set, enables automatic index updates on .gitignore changes.
@@ -69,12 +79,19 @@ type CoordinatorConfig struct {
 	// Files larger than this are skipped with a warning.
 	// Defaults to DefaultMaxFileSize (100MB) if zero.
 	MaxFileSize int64
+
+	// GraphStalePurgeAfter controls stale-edge retention for refresh
+	// maintenance. Defaults to graph.DefaultStalePurgeAfter when zero.
+	GraphStalePurgeAfter time.Duration
 }
 
 // Coordinator handles incremental index updates based on file events.
 type Coordinator struct {
 	config CoordinatorConfig
 	mu     sync.Mutex
+
+	graphKnownSourcesLoaded bool
+	graphKnownSourcesCache  []graph.SourceFile
 }
 
 // NewCoordinator creates a new index coordinator.
@@ -84,6 +101,9 @@ func NewCoordinator(config CoordinatorConfig) *Coordinator {
 	}
 	if config.SecretScanner == nil {
 		config.SecretScanner = secrets.NewScanner(secrets.DefaultPolicy())
+	}
+	if config.PDFChunker == nil {
+		config.PDFChunker = chunk.NewPDFChunker()
 	}
 	return &Coordinator{
 		config: config,
@@ -144,8 +164,25 @@ func (c *Coordinator) handleEvent(ctx context.Context, event watcher.FileEvent) 
 	case watcher.OpDelete:
 		return c.removeFile(ctx, event.Path)
 	case watcher.OpRename:
-		// Rename is handled as delete + create by the watcher
-		return nil
+		if event.OldPath != "" {
+			if err := c.removeFile(ctx, event.OldPath); err != nil {
+				return fmt.Errorf("failed to remove renamed source %s: %w", event.OldPath, err)
+			}
+			if event.Path == "" {
+				return nil
+			}
+			return c.indexFile(ctx, event.Path)
+		}
+		if event.Path == "" {
+			return nil
+		}
+		if _, err := os.Lstat(filepath.Join(c.config.RootPath, event.Path)); err != nil {
+			if os.IsNotExist(err) {
+				return c.removeFile(ctx, event.Path)
+			}
+			return fmt.Errorf("failed to stat renamed file: %w", err)
+		}
+		return c.indexFile(ctx, event.Path)
 	case watcher.OpGitignoreChange:
 		return c.handleGitignoreChange(ctx, event.Path)
 	case watcher.OpConfigChange:
@@ -187,41 +224,38 @@ func (c *Coordinator) indexFile(ctx context.Context, relPath string) error {
 		return fmt.Errorf("failed to read file: %w", err)
 	}
 
-	// Skip binary files
-	if isBinaryContent(content) {
-		return nil
-	}
-
 	// Detect language and content type
 	detectedLanguage := scanner.DetectLanguageWithRegistry(relPath, c.config.LanguageRegistry)
 	contentType := scanner.DetectContentTypeWithRegistry(detectedLanguage, c.config.LanguageRegistry)
 
-	// Skip text and config files (only index code and markdown)
-	if contentType != scanner.ContentTypeCode && contentType != scanner.ContentTypeMarkdown {
+	// Skip binary files except first-class binary document types with chunkers.
+	if contentType != scanner.ContentTypePDF && isBinaryContent(content) {
 		return nil
 	}
 
-	secretResult := c.config.SecretScanner.GuardContent(secrets.ContentInput{
-		Path:    relPath,
-		Content: content,
-		Source:  secrets.SourceIndex,
-	})
-	for _, warning := range secretResult.Warnings {
-		slog.Warn("pre_index_secret_detected",
-			slog.String("file", warning.FilePath),
-			slog.String("detector_id", warning.DetectorID),
-			slog.String("confidence", string(warning.Confidence)),
-			slog.String("action", string(warning.Action)),
-			slog.String("location", warning.Location.String()))
-	}
-	if secretResult.Blocked {
+	// Skip plain text. Config files are recorded as graph-only metadata below;
+	// they do not produce BM25/vector chunks.
+	if !isIndexableContentType(contentType) {
 		return nil
 	}
-	content = secretResult.Content
 
-	// Remove existing chunks for this file (for modifications)
-	// Ignore error - file might not exist in index yet
-	_ = c.removeFile(ctx, relPath)
+	var secretResult secrets.Result
+	if contentType != scanner.ContentTypePDF {
+		secretResult = c.config.SecretScanner.GuardContent(secrets.ContentInput{
+			Path:    relPath,
+			Content: content,
+			Source:  secrets.SourceIndex,
+		})
+		logSecretWarnings(secretResult.Warnings)
+		if secretResult.Blocked {
+			return nil
+		}
+		content = secretResult.Content
+	}
+
+	if contentType == scanner.ContentTypeConfig {
+		return c.indexConfigFile(ctx, relPath, info, detectedLanguage, contentType, content)
+	}
 
 	// Select the appropriate chunker
 	var chunker chunk.Chunker
@@ -230,6 +264,8 @@ func (c *Coordinator) indexFile(ctx context.Context, relPath string) error {
 		chunker = c.config.CodeChunker
 	case scanner.ContentTypeMarkdown:
 		chunker = c.config.MDChunker
+	case scanner.ContentTypePDF:
+		chunker = c.config.PDFChunker
 	default:
 		// Skip files without a chunker
 		return nil
@@ -248,9 +284,37 @@ func (c *Coordinator) indexFile(ctx context.Context, relPath string) error {
 	}
 
 	if len(chunks) == 0 {
+		if contentType == scanner.ContentTypePDF {
+			slog.Warn("pdf_content_unindexable",
+				slog.String("file", relPath),
+				slog.String("reason", "ocr_scanned_encrypted_or_malformed_not_supported"))
+		}
+		if err := c.removeIndexedFile(ctx, relPath); err != nil {
+			return err
+		}
+		c.removeGraphKnownSource(relPath)
+		if err := c.replaceGraphSourceWithEmptyEdges(ctx, relPath, false); err != nil {
+			c.recordGraphUpdateFailure(ctx, "graph_incremental_source_prune_failed", relPath, err)
+		}
 		return nil
 	}
-	annotateSecretScan(chunks, secretResult)
+	if contentType == scanner.ContentTypePDF {
+		var warnings []secrets.Warning
+		chunks, warnings = guardExtractedPDFChunks(chunks, c.config.SecretScanner, relPath)
+		logSecretWarnings(warnings)
+		if len(chunks) == 0 {
+			if err := c.removeIndexedFile(ctx, relPath); err != nil {
+				return err
+			}
+			c.removeGraphKnownSource(relPath)
+			if err := c.replaceGraphSourceWithEmptyEdges(ctx, relPath, false); err != nil {
+				c.recordGraphUpdateFailure(ctx, "graph_incremental_source_prune_failed", relPath, err)
+			}
+			return nil
+		}
+	} else {
+		annotateSecretScan(chunks, secretResult)
+	}
 
 	fileID := generateFileID(c.config.ProjectID, relPath)
 
@@ -265,6 +329,12 @@ func (c *Coordinator) indexFile(ctx context.Context, relPath string) error {
 		ContentHash: hashContent(content),
 		Language:    detectedLanguage,
 		ContentType: string(contentType),
+	}
+
+	// Remove existing chunks only after the replacement content has successfully
+	// chunked. This preserves the last good graph/search state on chunker failure.
+	if err := c.removeIndexedFile(ctx, relPath); err != nil {
+		return err
 	}
 
 	if err := c.config.Metadata.SaveFiles(ctx, []*store.File{file}); err != nil {
@@ -305,12 +375,51 @@ func (c *Coordinator) indexFile(ctx context.Context, relPath string) error {
 	if err := c.config.Engine.Index(ctx, storeChunks); err != nil {
 		return fmt.Errorf("failed to index chunks: %w", err)
 	}
+	if err := c.updateGraphSource(ctx, relPath, detectedLanguage, contentType, content, chunks); err != nil {
+		c.recordGraphUpdateFailure(ctx, "graph_incremental_update_failed", relPath, err)
+	}
 
+	return nil
+}
+
+func (c *Coordinator) indexConfigFile(ctx context.Context, relPath string, info fs.FileInfo, language string, contentType scanner.ContentType, content []byte) error {
+	fileID := generateFileID(c.config.ProjectID, relPath)
+	file := &store.File{
+		ID:          fileID,
+		ProjectID:   c.config.ProjectID,
+		Path:        relPath,
+		Size:        info.Size(),
+		ModTime:     info.ModTime(),
+		ContentHash: hashContent(content),
+		Language:    language,
+		ContentType: string(contentType),
+	}
+
+	if err := c.removeIndexedFile(ctx, relPath); err != nil {
+		return err
+	}
+	if err := c.config.Metadata.SaveFiles(ctx, []*store.File{file}); err != nil {
+		return fmt.Errorf("failed to save config file record: %w", err)
+	}
+	if err := c.updateGraphSource(ctx, relPath, language, contentType, content, nil); err != nil {
+		c.recordGraphUpdateFailure(ctx, "graph_incremental_config_update_failed", relPath, err)
+	}
 	return nil
 }
 
 // removeFile removes a file's chunks from the index.
 func (c *Coordinator) removeFile(ctx context.Context, relPath string) error {
+	if err := c.removeIndexedFile(ctx, relPath); err != nil {
+		return err
+	}
+	c.removeGraphKnownSource(relPath)
+	if err := c.replaceGraphSourceWithEmptyEdges(ctx, relPath, true); err != nil {
+		c.recordGraphUpdateFailure(ctx, "graph_incremental_delete_failed", relPath, err)
+	}
+	return nil
+}
+
+func (c *Coordinator) removeIndexedFile(ctx context.Context, relPath string) error {
 	fileID := generateFileID(c.config.ProjectID, relPath)
 
 	// Get existing chunks for this file
@@ -349,6 +458,235 @@ func (c *Coordinator) removeFile(ctx context.Context, relPath string) error {
 	}
 
 	return nil
+}
+
+func (c *Coordinator) updateGraphSource(ctx context.Context, relPath, language string, contentType scanner.ContentType, content []byte, chunks []*chunk.Chunk) error {
+	if c.config.GraphRepository == nil {
+		return nil
+	}
+	source, ok := graphSourceFromChunkedFile(&scanner.FileInfo{
+		Path:        relPath,
+		Language:    language,
+		ContentType: contentType,
+	}, content, chunks)
+	if !ok {
+		return nil
+	}
+	knownSources, err := c.graphKnownSources(ctx)
+	if err != nil {
+		return err
+	}
+	c.upsertGraphKnownSource(source)
+	summary, err := graph.UpdateCheapEdgesWithSummary(ctx, c.config.GraphRepository, c.config.ProjectID, []graph.SourceFile{source}, graph.CheapExtractorOptions{
+		KnownSources: knownSources,
+	})
+	if err != nil {
+		return err
+	}
+	status := graph.GraphStatusFresh
+	message := "incremental graph update"
+	if summary.HadErrors || summary.HadWarnings {
+		status = graph.GraphStatusPartial
+		message = "incremental graph update completed with warnings or errors"
+	}
+	return c.recordGraphBuildWithSourceVersion(ctx, status, message, summary.SourceVersion)
+}
+
+func (c *Coordinator) graphKnownSources(ctx context.Context) ([]graph.SourceFile, error) {
+	if c.config.Metadata == nil {
+		return nil, nil
+	}
+	if c.graphKnownSourcesLoaded {
+		return cloneGraphSources(c.graphKnownSourcesCache), nil
+	}
+	sources, err := c.loadGraphKnownSources(ctx)
+	if err != nil {
+		return nil, err
+	}
+	c.setGraphKnownSourcesFromSources(sources)
+	return cloneGraphSources(c.graphKnownSourcesCache), nil
+}
+
+func (c *Coordinator) loadGraphKnownSources(ctx context.Context) ([]graph.SourceFile, error) {
+	var sources []graph.SourceFile
+	cursor := ""
+	for {
+		files, nextCursor, err := c.config.Metadata.ListFiles(ctx, c.config.ProjectID, cursor, 500)
+		if err != nil {
+			return nil, fmt.Errorf("list indexed files for graph path context: %w", err)
+		}
+		for _, file := range files {
+			if file == nil {
+				continue
+			}
+			contentType, ok := graphContentTypeFromString(file.ContentType)
+			if !ok {
+				continue
+			}
+			var content []byte
+			if contentType == graph.SourceContentTypeConfig {
+				content, err = readIndexedSourceFile(c.config.RootPath, file.Path)
+				if err != nil {
+					if errors.Is(err, os.ErrNotExist) {
+						slog.Warn("graph_known_source_missing",
+							slog.String("project_id", c.config.ProjectID),
+							slog.String("file", file.Path),
+							slog.String("action", "skip"))
+						continue
+					}
+					return nil, err
+				}
+				guarded, blocked := guardGraphSourceContent(c.config.SecretScanner, file.Path, store.ContentType(file.ContentType), content)
+				if blocked {
+					continue
+				}
+				content = guarded
+			}
+			chunks, err := c.config.Metadata.GetChunksByFile(ctx, file.ID)
+			if err != nil {
+				return nil, fmt.Errorf("load graph chunks for known source %s: %w", file.Path, err)
+			}
+			source, ok := graphSourceFromStoreFile(file, content, chunks)
+			if ok {
+				sources = append(sources, source)
+			}
+		}
+		if nextCursor == "" {
+			break
+		}
+		cursor = nextCursor
+	}
+	return sources, nil
+}
+
+func (c *Coordinator) setGraphKnownSourcesFromSources(sources []graph.SourceFile) {
+	c.graphKnownSourcesCache = cloneGraphSources(sources)
+	c.graphKnownSourcesLoaded = true
+}
+
+func (c *Coordinator) upsertGraphKnownSource(source graph.SourceFile) {
+	if !c.graphKnownSourcesLoaded || source.Path == "" {
+		return
+	}
+	normalized := normalizeGraphSourceForCache(source)
+	for i, cached := range c.graphKnownSourcesCache {
+		if cached.Path == normalized.Path {
+			c.graphKnownSourcesCache[i] = normalized
+			return
+		}
+	}
+	c.graphKnownSourcesCache = append(c.graphKnownSourcesCache, normalized)
+}
+
+func (c *Coordinator) removeGraphKnownSource(relPath string) {
+	if !c.graphKnownSourcesLoaded || relPath == "" {
+		return
+	}
+	normalized := filepath.ToSlash(relPath)
+	for i, source := range c.graphKnownSourcesCache {
+		if source.Path == normalized {
+			c.graphKnownSourcesCache = append(c.graphKnownSourcesCache[:i], c.graphKnownSourcesCache[i+1:]...)
+			return
+		}
+	}
+}
+
+func cloneGraphSources(sources []graph.SourceFile) []graph.SourceFile {
+	if len(sources) == 0 {
+		return nil
+	}
+	cloned := make([]graph.SourceFile, 0, len(sources))
+	for _, source := range sources {
+		cloned = append(cloned, normalizeGraphSourceForCache(source))
+	}
+	return cloned
+}
+
+func normalizeGraphSourceForCache(source graph.SourceFile) graph.SourceFile {
+	normalized := graph.SourceFile{
+		Path:        filepath.ToSlash(source.Path),
+		Language:    source.Language,
+		ContentType: source.ContentType,
+		Content:     append([]byte(nil), source.Content...),
+	}
+	if len(source.Chunks) > 0 {
+		normalized.Chunks = make([]graph.SourceChunk, 0, len(source.Chunks))
+		for _, chunk := range source.Chunks {
+			normalized.Chunks = append(normalized.Chunks, cloneGraphSourceChunk(chunk))
+		}
+	}
+	return normalized
+}
+
+func cloneGraphSourceChunk(chunk graph.SourceChunk) graph.SourceChunk {
+	cloned := chunk
+	cloned.FilePath = filepath.ToSlash(chunk.FilePath)
+	if len(chunk.Symbols) > 0 {
+		cloned.Symbols = append([]graph.SourceSymbol(nil), chunk.Symbols...)
+	}
+	return cloned
+}
+
+func (c *Coordinator) replaceGraphSourceWithEmptyEdges(ctx context.Context, relPath string, markInboundStale bool) error {
+	if c.config.GraphRepository == nil {
+		return nil
+	}
+	normalized := filepath.ToSlash(relPath)
+	now := time.Now().UTC()
+	if err := c.config.GraphRepository.ReplaceEdges(ctx, graph.EdgeReplacement{
+		ProjectID:  c.config.ProjectID,
+		Extractor:  graph.ExtractorCheap,
+		SourcePath: normalized,
+		Run: graph.ExtractorRun{
+			Status:      graph.ExtractorStatusSuccess,
+			StartedAt:   now,
+			CompletedAt: now,
+		},
+	}); err != nil {
+		return err
+	}
+	if markInboundStale {
+		if err := c.config.GraphRepository.MarkEdgesToSourceStale(ctx, c.config.ProjectID, normalized); err != nil {
+			return err
+		}
+		return c.recordGraphBuild(ctx, graph.GraphStatusFresh, "incremental graph delete")
+	}
+	return nil
+}
+
+func (c *Coordinator) recordGraphBuild(ctx context.Context, status graph.GraphStatus, message string) error {
+	return c.recordGraphBuildWithSourceVersion(ctx, status, message, "")
+}
+
+func (c *Coordinator) recordGraphBuildWithSourceVersion(ctx context.Context, status graph.GraphStatus, message, sourceVersion string) error {
+	if c.config.GraphRepository == nil {
+		return nil
+	}
+	now := time.Now().UTC()
+	if err := c.config.GraphRepository.RecordBuild(ctx, graph.BuildMetadata{
+		ProjectID:     c.config.ProjectID,
+		Kind:          graph.BuildKindIncremental,
+		Status:        status,
+		StartedAt:     now,
+		CompletedAt:   now,
+		SourceVersion: sourceVersion,
+		Message:       message,
+	}); err != nil {
+		return fmt.Errorf("record graph build metadata: %w", err)
+	}
+	return nil
+}
+
+func (c *Coordinator) recordGraphUpdateFailure(ctx context.Context, event, relPath string, err error) {
+	message := fmt.Sprintf("%s for %s: %v", event, relPath, err)
+	if recordErr := c.recordGraphBuild(ctx, graph.GraphStatusPartial, message); recordErr != nil {
+		message = fmt.Sprintf("%s; failed to record partial graph state: %v", message, recordErr)
+	}
+	slog.Warn(event,
+		slog.String("project_id", c.config.ProjectID),
+		slog.String("path", relPath),
+		slog.String("message", message),
+		slog.String("error", err.Error()))
 }
 
 // reconcileType represents the strategy for gitignore reconciliation.
@@ -571,7 +909,7 @@ func (c *Coordinator) reconcileGitignoreSubtree(ctx context.Context, subtreePath
 			continue
 		}
 		contentType := scanner.DetectContentTypeWithRegistry(result.File.Language, c.config.LanguageRegistry)
-		if contentType == scanner.ContentTypeCode || contentType == scanner.ContentTypeMarkdown {
+		if isIndexableContentType(contentType) {
 			shouldBeIndexed[result.File.Path] = true
 		}
 	}
@@ -669,6 +1007,13 @@ func isBinaryContent(content []byte) bool {
 	}
 
 	return false
+}
+
+func isIndexableContentType(contentType scanner.ContentType) bool {
+	return contentType == scanner.ContentTypeCode ||
+		contentType == scanner.ContentTypeMarkdown ||
+		contentType == scanner.ContentTypePDF ||
+		contentType == scanner.ContentTypeConfig
 }
 
 // GitignoreHashKey is the state key for storing the gitignore hash.
@@ -817,7 +1162,7 @@ func (c *Coordinator) reconcileGitignoreInternal(ctx context.Context) error {
 		}
 		// Only consider code and markdown files (matching indexFile logic)
 		contentType := scanner.DetectContentTypeWithRegistry(result.File.Language, c.config.LanguageRegistry)
-		if contentType == scanner.ContentTypeCode || contentType == scanner.ContentTypeMarkdown {
+		if isIndexableContentType(contentType) {
 			shouldBeIndexed[result.File.Path] = true
 		}
 	}
@@ -958,6 +1303,147 @@ func (c *Coordinator) ReconcileFilesOnStartup(ctx context.Context) error {
 	return nil
 }
 
+// ReconcileGraphOnStartup verifies the graph overlay and rebuilds it from the
+// committed metadata index when it is empty, stale, partial, failed, or missing
+// build metadata. It shares the coordinator lock with watcher events so rebuilds
+// and incremental updates cannot race.
+func (c *Coordinator) ReconcileGraphOnStartup(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.config.GraphRepository == nil {
+		slog.Debug("graph startup reconciliation skipped: graph repository not configured")
+		return nil
+	}
+
+	snapshot, err := c.config.GraphRepository.Snapshot(ctx, graph.StatusOptions{
+		ProjectID: c.config.ProjectID,
+		Now:       time.Now().UTC(),
+	})
+	if err != nil {
+		wrapped := fmt.Errorf("inspect graph status on startup: %w", err)
+		c.recordGraphUpdateFailure(ctx, "graph_startup_reconciliation_failed", "", wrapped)
+		return wrapped
+	}
+	if err := c.purgeStaleGraphEdgesLocked(ctx, "graph_startup_reconciliation"); err != nil {
+		return err
+	}
+	if !graphSnapshotNeedsRebuild(snapshot) {
+		slog.Debug("graph startup reconciliation skipped",
+			slog.String("project_id", c.config.ProjectID),
+			slog.String("status", string(snapshot.Status)))
+		return nil
+	}
+
+	return c.rebuildGraphFromMetadataLocked(ctx, "graph_startup_reconciliation", string(snapshot.Status))
+}
+
+// RefreshGraph refreshes the graph overlay from committed metadata when the
+// current graph is missing, empty, stale, partial, or failed. It is meant for
+// background maintenance cycles and shares the coordinator lock with watcher
+// events so rebuilds and incremental updates remain ordered.
+func (c *Coordinator) RefreshGraph(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.config.GraphRepository == nil {
+		return nil
+	}
+	snapshot, err := c.config.GraphRepository.Snapshot(ctx, graph.StatusOptions{
+		ProjectID: c.config.ProjectID,
+		Now:       time.Now().UTC(),
+	})
+	if err != nil {
+		wrapped := fmt.Errorf("inspect graph status before refresh: %w", err)
+		c.recordGraphUpdateFailure(ctx, "graph_refresh_failed", "", wrapped)
+		return wrapped
+	}
+	if err := c.purgeStaleGraphEdgesLocked(ctx, "graph_refresh"); err != nil {
+		return err
+	}
+	if !graphSnapshotNeedsRebuild(snapshot) {
+		slog.Debug("graph refresh skipped",
+			slog.String("project_id", c.config.ProjectID),
+			slog.String("status", string(snapshot.Status)))
+		return nil
+	}
+	return c.rebuildGraphFromMetadataLocked(ctx, "graph_refresh", "scheduled")
+}
+
+func (c *Coordinator) purgeStaleGraphEdgesLocked(ctx context.Context, event string) error {
+	if c.config.GraphRepository == nil {
+		return nil
+	}
+	retention := c.config.GraphStalePurgeAfter
+	if retention <= 0 {
+		retention = graph.DefaultStalePurgeAfter
+	}
+	olderThan := time.Now().UTC().Add(-retention)
+	purged, err := c.config.GraphRepository.PurgeStaleEdges(ctx, c.config.ProjectID, olderThan)
+	if err != nil {
+		wrapped := fmt.Errorf("purge stale graph edges older than %s: %w", retention, err)
+		c.recordGraphUpdateFailure(ctx, event+"_stale_purge_failed", "", wrapped)
+		return wrapped
+	}
+	if purged > 0 {
+		slog.Info(event+"_stale_purge_complete",
+			slog.String("project_id", c.config.ProjectID),
+			slog.Int("purged_edges", purged),
+			slog.Duration("retention", retention))
+	}
+	return nil
+}
+
+func graphSnapshotNeedsRebuild(snapshot *graph.StatusSnapshot) bool {
+	if snapshot == nil || !snapshot.Available {
+		return true
+	}
+	if snapshot.Status != graph.GraphStatusFresh {
+		return true
+	}
+	return snapshot.Nodes.Total == 0 && snapshot.Edges.Total == 0
+}
+
+func (c *Coordinator) rebuildGraphFromMetadataLocked(ctx context.Context, event, reason string) error {
+	if c.config.GraphRepository == nil {
+		return nil
+	}
+
+	started := time.Now().UTC()
+	slog.Info(event+"_begin",
+		slog.String("project_id", c.config.ProjectID),
+		slog.String("reason", reason))
+
+	sources, err := BuildGraphSourcesFromMetadata(ctx, MetadataGraphSourceConfig{
+		RootDir:       c.config.RootPath,
+		ProjectID:     c.config.ProjectID,
+		Metadata:      c.config.Metadata,
+		SecretScanner: c.config.SecretScanner,
+	})
+	if err != nil {
+		wrapped := fmt.Errorf("build graph sources from metadata: %w", err)
+		c.recordGraphUpdateFailure(ctx, event+"_failed", "", wrapped)
+		return wrapped
+	}
+	if err := c.config.GraphRepository.Reset(ctx); err != nil {
+		wrapped := fmt.Errorf("reset graph overlay: %w", err)
+		c.recordGraphUpdateFailure(ctx, event+"_failed", "", wrapped)
+		return wrapped
+	}
+	if err := graph.IndexCheapEdges(ctx, c.config.GraphRepository, c.config.ProjectID, sources, graph.CheapExtractorOptions{}); err != nil {
+		wrapped := fmt.Errorf("rebuild graph overlay: %w", err)
+		c.recordGraphUpdateFailure(ctx, event+"_failed", "", wrapped)
+		return wrapped
+	}
+	c.setGraphKnownSourcesFromSources(sources)
+
+	slog.Info(event+"_complete",
+		slog.String("project_id", c.config.ProjectID),
+		slog.Int("files", len(sources)),
+		slog.Duration("elapsed", time.Since(started)))
+	return nil
+}
+
 // scanCurrentFiles performs a filesystem scan and returns map[path] -> FileInfo.
 func (c *Coordinator) scanCurrentFiles(ctx context.Context) (map[string]*scanner.FileInfo, error) {
 	resultChan, err := c.config.Scanner.Scan(ctx, &scanner.ScanOptions{
@@ -982,7 +1468,7 @@ func (c *Coordinator) scanCurrentFiles(ctx context.Context) (map[string]*scanner
 		}
 		// Only consider indexable content types (matching indexFile logic)
 		contentType := scanner.DetectContentTypeWithRegistry(result.File.Language, c.config.LanguageRegistry)
-		if contentType == scanner.ContentTypeCode || contentType == scanner.ContentTypeMarkdown {
+		if isIndexableContentType(contentType) {
 			current[result.File.Path] = result.File
 		}
 	}

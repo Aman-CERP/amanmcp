@@ -153,13 +153,19 @@ Welcome to the document.
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(chunks), 2)
 
-	// First chunk should be frontmatter
-	assert.Contains(t, chunks[0].Content, "title: My Document")
-	assert.Contains(t, chunks[0].Content, "author: John Doe")
+	// First chunk should be metadata-only frontmatter so raw YAML does not
+	// participate in BM25/vector content.
+	assert.Empty(t, chunks[0].Content)
+	assert.Empty(t, chunks[0].RawContent)
 	assert.Equal(t, "frontmatter", chunks[0].Metadata["type"])
+	assert.Equal(t, "My Document", chunks[0].Metadata["fm.title"])
+	assert.Equal(t, "John Doe", chunks[0].Metadata["fm.author"])
+	assert.Equal(t, "2025-01-01", chunks[0].Metadata["fm.date"])
 
-	// Second chunk should be the introduction
+	// Second chunk should be the introduction with propagated frontmatter.
 	assert.Contains(t, chunks[1].Content, "# Introduction")
+	assert.Equal(t, "My Document", chunks[1].Metadata["fm.title"])
+	assert.Equal(t, "John Doe", chunks[1].Metadata["fm.author"])
 }
 
 // TS05: Large Section Split
@@ -190,11 +196,113 @@ func TestMarkdownChunker_Chunk_LargeSectionSplit(t *testing.T) {
 
 	// All chunks should have header context
 	for i, c := range chunks {
+		assert.LessOrEqual(t, estimateTokens(c.Content), 100, "Chunk %d should respect token budget", i)
 		if i > 0 {
 			// Continuation chunks should reference the section
 			assert.Contains(t, c.Metadata["header_path"], "Large Section", "Chunk %d should have header context", i)
 		}
 	}
+}
+
+func TestMarkdownChunker_Chunk_OversizedSingleWordRespectsTokenBudget(t *testing.T) {
+	const maxTokens = 20
+	chunker := NewMarkdownChunkerWithOptions(MarkdownChunkerOptions{
+		MaxChunkTokens: maxTokens,
+		OverlapTokens:  5,
+	})
+	longWord := strings.Repeat("a", (maxTokens*TokensPerChar)+40)
+	content := "# Huge Identifier\n\n" + longWord + "\n"
+
+	chunks, err := chunker.Chunk(context.Background(), &FileInput{
+		Path:     "huge.md",
+		Content:  []byte(content),
+		Language: "markdown",
+	})
+	require.NoError(t, err)
+	require.Greater(t, len(chunks), 1)
+
+	for i, chunk := range chunks {
+		assert.LessOrEqual(t, estimateTokens(chunk.Content), maxTokens, "chunk %d exceeded token budget: %q", i, chunk.Content)
+	}
+}
+
+func TestMarkdownChunker_Chunk_FrontmatterArraysAndMapsUseCompactJSON(t *testing.T) {
+	chunker := NewMarkdownChunker()
+
+	content := `---
+id: BUG-075
+type: bug
+priority: P0
+blocks:
+  - TASK-SYN50
+  - FEAT-SYN11
+labels:
+  release: v0.12.0
+  class: dogfood
+---
+
+# Summary
+
+Resolved release blocker.
+`
+
+	file := &FileInput{Path: "BUG-075.md", Content: []byte(content), Language: "markdown"}
+	chunks, err := chunker.Chunk(context.Background(), file)
+	require.NoError(t, err)
+	require.Len(t, chunks, 2)
+
+	assert.Equal(t, "BUG-075", chunks[0].Metadata["fm.id"])
+	assert.Equal(t, "bug", chunks[0].Metadata["fm.type"])
+	assert.Equal(t, `["TASK-SYN50","FEAT-SYN11"]`, chunks[0].Metadata["fm.blocks"])
+	assert.Equal(t, `{"class":"dogfood","release":"v0.12.0"}`, chunks[0].Metadata["fm.labels"])
+	assert.Equal(t, `["TASK-SYN50","FEAT-SYN11"]`, chunks[1].Metadata["fm.blocks"])
+	assert.NotContains(t, chunks[1].Content, "TASK-SYN50")
+}
+
+func TestMarkdownChunker_Chunk_MalformedFrontmatterFallsBackToRawChunk(t *testing.T) {
+	chunker := NewMarkdownChunker()
+
+	content := `---
+id: BUG-075
+labels: [unterminated
+---
+
+# Summary
+
+Still chunk body content.
+`
+
+	file := &FileInput{Path: "bad.md", Content: []byte(content), Language: "markdown"}
+	chunks, err := chunker.Chunk(context.Background(), file)
+	require.NoError(t, err)
+	require.Len(t, chunks, 2)
+
+	assert.Contains(t, chunks[0].Content, "labels: [unterminated")
+	assert.Empty(t, chunks[0].Metadata["fm.id"])
+	assert.Contains(t, chunks[1].Content, "# Summary")
+	assert.Empty(t, chunks[1].Metadata["fm.id"])
+}
+
+func TestMarkdownChunker_Chunk_RepeatedSameContentSectionsHaveDistinctIDs(t *testing.T) {
+	chunker := NewMarkdownChunker()
+
+	content := `# Alpha
+
+Same body.
+
+# Beta
+
+Same body.
+`
+
+	file := &FileInput{Path: "duplicate.md", Content: []byte(content), Language: "markdown"}
+	chunks, err := chunker.Chunk(context.Background(), file)
+	require.NoError(t, err)
+	require.Len(t, chunks, 2)
+
+	assert.NotEqual(t, chunks[0].ID, chunks[1].ID)
+	assert.Equal(t, "Alpha", chunks[0].Metadata["header_path"])
+	assert.Equal(t, "Beta", chunks[1].Metadata["header_path"])
 }
 
 // TS06: Empty Section Handling

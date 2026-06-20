@@ -30,7 +30,7 @@ var (
 
 // Debug logging flag
 var (
-	debugMode     bool
+	debugMode      bool
 	loggingCleanup func()
 )
 
@@ -253,7 +253,6 @@ func runSmartDefault(ctx context.Context, cmd *cobra.Command, offline, reindex, 
 	return runServe(ctx, "stdio", 0)
 }
 
-
 // fileExists checks if a file exists.
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
@@ -266,5 +265,5 @@ func runIndexInternal(ctx context.Context, cmd *cobra.Command, path string, offl
 	// (in same package, so accessible)
 	// Pass 0 for resumeFromCheckpoint since this is a fresh index
 	// Pass empty string for checkpointEmbedderModel (not resuming)
-	return runIndexWithOptions(ctx, cmd, path, offline, false, 0, "")
+	return runIndexWithOptions(ctx, cmd, path, offline, false, 0, "", graphBuildOptions{})
 }

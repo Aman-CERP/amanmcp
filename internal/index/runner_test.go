@@ -2,14 +2,18 @@ package index
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/Aman-CERP/amanmcp/internal/chunk"
 	"github.com/Aman-CERP/amanmcp/internal/config"
+	"github.com/Aman-CERP/amanmcp/internal/graph"
 	"github.com/Aman-CERP/amanmcp/internal/store"
 	"github.com/Aman-CERP/amanmcp/internal/ui"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // MockRenderer implements ui.Renderer for testing.
@@ -150,6 +154,10 @@ func (m *MockMetadataStore) GetChunks(ctx context.Context, ids []string) ([]*sto
 }
 
 func (m *MockMetadataStore) GetChunksByFile(ctx context.Context, fileID string) ([]*store.Chunk, error) {
+	return nil, nil
+}
+
+func (m *MockMetadataStore) GetChunksByPath(ctx context.Context, path string, limit int) ([]*store.Chunk, error) {
 	return nil, nil
 }
 
@@ -385,9 +393,14 @@ type MockChunker struct {
 	Chunks      []*chunk.Chunk
 	ChunkError  error
 	CloseCalled bool
+	Inputs      []*chunk.FileInput
 }
 
 func (m *MockChunker) Chunk(ctx context.Context, file *chunk.FileInput) ([]*chunk.Chunk, error) {
+	inputCopy := *file
+	inputCopy.Content = append([]byte(nil), file.Content...)
+	m.Inputs = append(m.Inputs, &inputCopy)
+
 	if m.ChunkError != nil {
 		return nil, m.ChunkError
 	}
@@ -414,6 +427,75 @@ func (m *MockChunker) SupportedExtensions() []string {
 
 func (m *MockChunker) Close() {
 	m.CloseCalled = true
+}
+
+type MockGraphRepository struct {
+	ReplaceEdgesCalled    bool
+	RecordBuildCalled     bool
+	ResetCalled           bool
+	ResetCount            int
+	PurgeStaleEdgesCalled bool
+	ReplaceEdgesError     error
+	RecordBuildError      error
+	RecordedBuild         graph.BuildMetadata
+	SnapshotResult        *graph.StatusSnapshot
+}
+
+func (m *MockGraphRepository) Snapshot(ctx context.Context, opts graph.StatusOptions) (*graph.StatusSnapshot, error) {
+	if m.SnapshotResult != nil {
+		return m.SnapshotResult, nil
+	}
+	return &graph.StatusSnapshot{}, nil
+}
+
+func (m *MockGraphRepository) UpsertNode(ctx context.Context, node graph.Node) (graph.Node, error) {
+	return node, nil
+}
+
+func (m *MockGraphRepository) UpsertEdge(ctx context.Context, edge graph.Edge) (graph.Edge, error) {
+	return edge, nil
+}
+
+func (m *MockGraphRepository) ReplaceEdges(ctx context.Context, replacement graph.EdgeReplacement) error {
+	m.ReplaceEdgesCalled = true
+	return m.ReplaceEdgesError
+}
+
+func (m *MockGraphRepository) MarkEdgesToSourceStale(ctx context.Context, projectID, sourcePath string) error {
+	return nil
+}
+
+func (m *MockGraphRepository) PurgeStaleEdges(ctx context.Context, projectID string, olderThan time.Time) (int, error) {
+	m.PurgeStaleEdgesCalled = true
+	return 0, nil
+}
+
+func (m *MockGraphRepository) ListNodes(ctx context.Context, query graph.NodeQuery) ([]graph.Node, error) {
+	return nil, nil
+}
+
+func (m *MockGraphRepository) ListEdges(ctx context.Context, query graph.EdgeQuery) ([]graph.Edge, error) {
+	return nil, nil
+}
+
+func (m *MockGraphRepository) RecordBuild(ctx context.Context, metadata graph.BuildMetadata) error {
+	m.RecordBuildCalled = true
+	m.RecordedBuild = metadata
+	return m.RecordBuildError
+}
+
+func (m *MockGraphRepository) RecordExtractorRun(ctx context.Context, run graph.ExtractorRun) error {
+	return nil
+}
+
+func (m *MockGraphRepository) Reset(ctx context.Context) error {
+	m.ResetCalled = true
+	m.ResetCount++
+	return nil
+}
+
+func (m *MockGraphRepository) Close() error {
+	return nil
 }
 
 // TestNewRunner tests Runner creation.
@@ -704,6 +786,286 @@ func TestRunner_StoresEmbeddingMetadata(t *testing.T) {
 		t.Errorf("Expected %s to be stored, but it was not", store.StateKeyIndexModel)
 	} else if storedModel != "embeddinggemma:300m" {
 		t.Errorf("StateKeyIndexModel = %q, want %q", storedModel, "embeddinggemma:300m")
+	}
+}
+
+func TestRunner_Run_GraphBuildFailureIsWarning(t *testing.T) {
+	// Given: a runner whose graph repository fails during edge replacement
+	renderer := &MockRenderer{}
+	graphRepo := &MockGraphRepository{
+		ReplaceEdgesError: fmt.Errorf("graph write failed"),
+	}
+	metadata := &MockMetadataStore{AllEmbeddings: make(map[string][]float32)}
+	bm25 := &MockBM25Index{}
+	vector := &MockVectorStore{}
+
+	runner, err := NewRunner(RunnerDependencies{
+		Renderer:        renderer,
+		Config:          config.NewConfig(),
+		Metadata:        metadata,
+		BM25:            bm25,
+		Vector:          vector,
+		Embedder:        &MockEmbedder{},
+		CodeChunker:     &MockChunker{},
+		MarkdownChunker: &MockChunker{},
+		GraphRepository: graphRepo,
+	})
+	require.NoError(t, err)
+	defer runner.Close()
+
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(tmpDir+"/test.go", []byte("package main\nfunc main() {}"), 0644))
+
+	// When: indexing runs
+	result, err := runner.Run(context.Background(), RunnerConfig{
+		RootDir: tmpDir,
+		DataDir: tmpDir + "/.amanmcp",
+	})
+
+	// Then: search indexing still completes, and graph failure is recorded as partial.
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, bm25.IndexCalled)
+	assert.True(t, vector.AddCalled)
+	assert.True(t, graphRepo.ReplaceEdgesCalled)
+	assert.True(t, graphRepo.RecordBuildCalled)
+	assert.Equal(t, graph.GraphStatusPartial, graphRepo.RecordedBuild.Status)
+	assert.Contains(t, graphRepo.RecordedBuild.Message, "graph write failed")
+	assert.Equal(t, 1, result.Warnings)
+	require.NotEmpty(t, renderer.ErrorEvents)
+	assert.True(t, renderer.ErrorEvents[len(renderer.ErrorEvents)-1].IsWarn)
+	assert.Contains(t, renderer.ErrorEvents[len(renderer.ErrorEvents)-1].Err.Error(), "graph build failed")
+}
+
+func TestRunner_Run_DoesNotBuildGraphWhenNoChunksAreIndexed(t *testing.T) {
+	// Given: a config-only run that produces graph source candidates but no search chunks
+	renderer := &MockRenderer{}
+	graphRepo := &MockGraphRepository{}
+	metadata := &MockMetadataStore{AllEmbeddings: make(map[string][]float32)}
+	bm25 := &MockBM25Index{}
+	vector := &MockVectorStore{}
+
+	runner, err := NewRunner(RunnerDependencies{
+		Renderer:        renderer,
+		Config:          config.NewConfig(),
+		Metadata:        metadata,
+		BM25:            bm25,
+		Vector:          vector,
+		Embedder:        &MockEmbedder{},
+		CodeChunker:     &MockChunker{},
+		MarkdownChunker: &MockChunker{},
+		GraphRepository: graphRepo,
+	})
+	require.NoError(t, err)
+	defer runner.Close()
+
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(tmpDir+"/.amanmcp.yaml", []byte("embeddings:\n  provider: static\n"), 0644))
+
+	// When: indexing exits through the no-chunks path
+	result, err := runner.Run(context.Background(), RunnerConfig{
+		RootDir: tmpDir,
+		DataDir: tmpDir + "/.amanmcp",
+	})
+
+	// Then: graph is not mutated ahead of search metadata/index commits.
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, bm25.IndexCalled)
+	assert.False(t, vector.AddCalled)
+	assert.False(t, graphRepo.ResetCalled)
+	assert.False(t, graphRepo.ReplaceEdgesCalled)
+	assert.False(t, graphRepo.RecordBuildCalled)
+}
+
+func TestRunner_Run_DoesNotBuildGraphWhenSearchIndexFails(t *testing.T) {
+	// Given: a run where search vector persistence fails
+	renderer := &MockRenderer{}
+	graphRepo := &MockGraphRepository{}
+	metadata := &MockMetadataStore{AllEmbeddings: make(map[string][]float32)}
+	bm25 := &MockBM25Index{}
+	vector := &MockVectorStore{AddError: fmt.Errorf("vector write failed")}
+
+	runner, err := NewRunner(RunnerDependencies{
+		Renderer:        renderer,
+		Config:          config.NewConfig(),
+		Metadata:        metadata,
+		BM25:            bm25,
+		Vector:          vector,
+		Embedder:        &MockEmbedder{},
+		CodeChunker:     &MockChunker{},
+		MarkdownChunker: &MockChunker{},
+		GraphRepository: graphRepo,
+	})
+	require.NoError(t, err)
+	defer runner.Close()
+
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(tmpDir+"/test.go", []byte("package main\nfunc main() {}"), 0644))
+
+	// When: indexing fails before search artifacts are fully committed
+	result, err := runner.Run(context.Background(), RunnerConfig{
+		RootDir: tmpDir,
+		DataDir: tmpDir + "/.amanmcp",
+	})
+
+	// Then: the disposable graph overlay is left untouched.
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.True(t, bm25.IndexCalled)
+	assert.True(t, vector.AddCalled)
+	assert.False(t, graphRepo.ResetCalled)
+	assert.False(t, graphRepo.ReplaceEdgesCalled)
+	assert.False(t, graphRepo.RecordBuildCalled)
+}
+
+func TestRunner_Run_DispatchesPDFsToPDFChunker(t *testing.T) {
+	metadata := &MockMetadataStore{AllEmbeddings: make(map[string][]float32)}
+	pdfChunker := &MockChunker{
+		Chunks: []*chunk.Chunk{
+			{
+				ID:          "pdf-chunk-1",
+				FilePath:    "guide.pdf",
+				Content:     "AmanMCP PDF search marker",
+				RawContent:  "AmanMCP PDF search marker",
+				ContentType: chunk.ContentTypePDF,
+				Language:    "pdf",
+				Metadata: map[string]string{
+					"content_type": "pdf",
+					"chunker":      "pdf",
+					"page_start":   "1",
+					"page_end":     "1",
+				},
+			},
+		},
+	}
+
+	runner, err := NewRunner(RunnerDependencies{
+		Renderer:        &MockRenderer{},
+		Config:          config.NewConfig(),
+		Metadata:        metadata,
+		BM25:            &MockBM25Index{},
+		Vector:          &MockVectorStore{},
+		Embedder:        &MockEmbedder{},
+		CodeChunker:     &MockChunker{},
+		MarkdownChunker: &MockChunker{},
+		PDFChunker:      pdfChunker,
+	})
+	require.NoError(t, err)
+	defer runner.Close()
+
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(tmpDir+"/guide.pdf", []byte("%PDF-1.7\x00binary-marker\n%%EOF"), 0o644))
+
+	result, err := runner.Run(context.Background(), RunnerConfig{
+		RootDir: tmpDir,
+		DataDir: tmpDir + "/.amanmcp",
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, 1, result.Files)
+	require.Equal(t, 1, result.Chunks)
+	require.Len(t, metadata.FilesSaved, 1)
+	assert.Equal(t, "pdf", metadata.FilesSaved[0].Language)
+	assert.Equal(t, "pdf", metadata.FilesSaved[0].ContentType)
+	require.Len(t, metadata.ChunksSaved, 1)
+	assert.Equal(t, store.ContentTypePDF, metadata.ChunksSaved[0].ContentType)
+	assert.Equal(t, "pdf", metadata.ChunksSaved[0].Metadata["content_type"])
+}
+
+func TestRunner_Run_WarnsWhenPDFProducesNoChunks(t *testing.T) {
+	renderer := &MockRenderer{}
+	runner, err := NewRunner(RunnerDependencies{
+		Renderer:        renderer,
+		Config:          config.NewConfig(),
+		Metadata:        &MockMetadataStore{AllEmbeddings: make(map[string][]float32)},
+		BM25:            &MockBM25Index{},
+		Vector:          &MockVectorStore{},
+		Embedder:        &MockEmbedder{},
+		CodeChunker:     &MockChunker{},
+		MarkdownChunker: &MockChunker{},
+		PDFChunker:      &MockChunker{Chunks: []*chunk.Chunk{}},
+	})
+	require.NoError(t, err)
+	defer runner.Close()
+
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(tmpDir+"/scanned.pdf", []byte("%PDF-1.7\x00binary-marker\n%%EOF"), 0o644))
+
+	result, err := runner.Run(context.Background(), RunnerConfig{
+		RootDir: tmpDir,
+		DataDir: tmpDir + "/.amanmcp",
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, 1, result.Files)
+	require.Equal(t, 0, result.Chunks)
+	require.Equal(t, 1, result.Warnings)
+	require.Len(t, renderer.ErrorEvents, 1)
+	assert.True(t, renderer.ErrorEvents[0].IsWarn)
+	assert.Equal(t, "scanned.pdf", renderer.ErrorEvents[0].File)
+	assert.Contains(t, renderer.ErrorEvents[0].Err.Error(), "OCR")
+}
+
+func TestRunner_Run_DoesNotRedactPDFBytesBeforeChunking(t *testing.T) {
+	rawSecret := "0123456789abcdefghijklmnopqrstuvwxyzABCDEF"
+	pdfBytes := []byte("%PDF-1.7\nxref\ntoken = \"" + rawSecret + "\"\n%%EOF")
+	pdfChunker := &MockChunker{
+		Chunks: []*chunk.Chunk{
+			{
+				ID:          "pdf-secret-chunk",
+				FilePath:    "secret.pdf",
+				Content:     "Extracted PDF text token = \"" + rawSecret + "\"",
+				RawContent:  "Extracted PDF text token = \"" + rawSecret + "\"",
+				ContentType: chunk.ContentTypePDF,
+				Language:    "pdf",
+				Metadata: map[string]string{
+					"content_type": "pdf",
+					"chunker":      "pdf",
+					"page_number":  "1",
+					"page_start":   "1",
+					"page_end":     "1",
+				},
+			},
+		},
+	}
+	metadata := &MockMetadataStore{AllEmbeddings: make(map[string][]float32)}
+	embedder := &MockEmbedder{}
+
+	runner, err := NewRunner(RunnerDependencies{
+		Renderer:        &MockRenderer{},
+		Config:          config.NewConfig(),
+		Metadata:        metadata,
+		BM25:            &MockBM25Index{},
+		Vector:          &MockVectorStore{},
+		Embedder:        embedder,
+		CodeChunker:     &MockChunker{},
+		MarkdownChunker: &MockChunker{},
+		PDFChunker:      pdfChunker,
+	})
+	require.NoError(t, err)
+	defer runner.Close()
+
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(tmpDir+"/secret.pdf", pdfBytes, 0o644))
+
+	result, err := runner.Run(context.Background(), RunnerConfig{
+		RootDir: tmpDir,
+		DataDir: tmpDir + "/.amanmcp",
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Files)
+	require.Equal(t, 1, result.Chunks)
+
+	require.Len(t, pdfChunker.Inputs, 1)
+	assert.Equal(t, pdfBytes, pdfChunker.Inputs[0].Content, "PDF parser input must not be redacted before extraction")
+	require.Len(t, metadata.ChunksSaved, 1)
+	assert.NotContains(t, metadata.ChunksSaved[0].Content, rawSecret)
+	assert.Contains(t, metadata.ChunksSaved[0].Content, "[REDACTED:generic-secret-assignment]")
+	assert.Equal(t, "redact", metadata.ChunksSaved[0].Metadata["secret_scan_action"])
+	require.NotEmpty(t, embedder.BatchTexts)
+	for _, text := range embedder.BatchTexts {
+		assert.NotContains(t, text, rawSecret)
 	}
 }
 

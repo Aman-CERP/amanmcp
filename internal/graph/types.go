@@ -11,7 +11,16 @@ import (
 )
 
 // SchemaVersion is the current disposable graph overlay schema version.
-const SchemaVersion = 1
+const SchemaVersion = 3
+
+const (
+	// DefaultStaleAfter is the named freshness window used by graph query/status
+	// callers when no project-specific value is configured.
+	DefaultStaleAfter = 24 * time.Hour
+	// DefaultStalePurgeAfter is the named retention window for stale graph edges
+	// in coordinator maintenance paths.
+	DefaultStalePurgeAfter = 7 * 24 * time.Hour
+)
 
 const (
 	// ExtractorCheap identifies deterministic local edge extractors.
@@ -22,24 +31,33 @@ const (
 type NodeKind string
 
 const (
-	NodeKindFile      NodeKind = "file"
-	NodeKindPackage   NodeKind = "package"
-	NodeKindImport    NodeKind = "import"
-	NodeKindSymbol    NodeKind = "symbol"
-	NodeKindChunk     NodeKind = "chunk"
-	NodeKindConfigKey NodeKind = "config_key"
+	NodeKindProject    NodeKind = "project"
+	NodeKindFile       NodeKind = "file"
+	NodeKindTestFile   NodeKind = "test_file"
+	NodeKindDoc        NodeKind = "doc"
+	NodeKindConfigFile NodeKind = "config_file"
+	NodeKindPackage    NodeKind = "package"
+	NodeKindImport     NodeKind = "import"
+	NodeKindSymbol     NodeKind = "symbol"
+	NodeKindChunk      NodeKind = "chunk"
+	NodeKindConfigKey  NodeKind = "config_key"
 )
 
 // EdgeKind identifies the relationship represented by an edge.
 type EdgeKind string
 
 const (
+	EdgeKindProjectContainsFile      EdgeKind = "project_contains_file"
 	EdgeKindFileDeclaresPackage      EdgeKind = "file_declares_package"
+	EdgeKindFileImports              EdgeKind = "file_imports"
 	EdgeKindPackageImports           EdgeKind = "package_imports"
 	EdgeKindFileDefinesSymbol        EdgeKind = "file_defines_symbol"
 	EdgeKindSymbolHasChunk           EdgeKind = "symbol_has_chunk"
 	EdgeKindFileDefinesConfigKey     EdgeKind = "file_defines_config_key"
 	EdgeKindTestCoversImplementation EdgeKind = "test_covers_implementation"
+	EdgeKindDocMentionsFile          EdgeKind = "doc_mentions_file"
+	EdgeKindDocMentionsSymbol        EdgeKind = "doc_mentions_symbol"
+	EdgeKindDocMentionsConfigKey     EdgeKind = "doc_mentions_config_key"
 	EdgeKindDocMentionsPath          EdgeKind = "doc_mentions_path"
 )
 
@@ -50,6 +68,7 @@ const (
 	ConfidenceHigh   ConfidenceLabel = "high"
 	ConfidenceMedium ConfidenceLabel = "medium"
 	ConfidenceLow    ConfidenceLabel = "low"
+	ConfidenceExact  ConfidenceLabel = "exact"
 )
 
 // GraphStatus is the stored or derived graph health state.
@@ -63,6 +82,15 @@ const (
 	GraphStatusStale        GraphStatus = "stale"
 	GraphStatusPartial      GraphStatus = "partial"
 	GraphStatusFailed       GraphStatus = "failed"
+)
+
+// BuildKind identifies whether build metadata came from a full rebuild or an
+// incremental source update.
+type BuildKind string
+
+const (
+	BuildKindFull        BuildKind = "full"
+	BuildKindIncremental BuildKind = "incremental"
 )
 
 // FreshnessState explains whether the graph build is recent enough to trust.
@@ -90,6 +118,7 @@ const (
 	WarningGraphUnavailable   WarningCode = "graph_unavailable"
 	WarningSchemaIncompatible WarningCode = "schema_incompatible"
 	WarningGraphStale         WarningCode = "graph_stale"
+	WarningGraphStaleEdges    WarningCode = "graph_stale_edges"
 	WarningExtractorFailed    WarningCode = "extractor_failed"
 	WarningExtractorPartial   WarningCode = "extractor_partial"
 	WarningBuildFailed        WarningCode = "build_failed"
@@ -114,10 +143,13 @@ type Node struct {
 
 // Evidence explains why an edge exists. Heuristic must be true for inferred edges.
 type Evidence struct {
-	Method    string `json:"method"`
-	Snippet   string `json:"snippet,omitempty"`
-	Line      int    `json:"line,omitempty"`
-	Heuristic bool   `json:"heuristic,omitempty"`
+	Method     string `json:"method"`
+	SourcePath string `json:"source_path,omitempty"`
+	Snippet    string `json:"snippet,omitempty"`
+	Line       int    `json:"line,omitempty"`
+	LineStart  int    `json:"line_start,omitempty"`
+	LineEnd    int    `json:"line_end,omitempty"`
+	Heuristic  bool   `json:"heuristic,omitempty"`
 }
 
 // Edge is a typed relationship between two existing nodes.
@@ -129,6 +161,7 @@ type Edge struct {
 	ToNodeID        string          `json:"to_node_id"`
 	Extractor       string          `json:"extractor"`
 	SourcePath      string          `json:"source_path"`
+	SourceVersion   string          `json:"source_version,omitempty"`
 	Evidence        Evidence        `json:"evidence"`
 	Confidence      float64         `json:"confidence"`
 	ConfidenceLabel ConfidenceLabel `json:"confidence_label"`
@@ -157,10 +190,12 @@ type NodeQuery struct {
 
 // EdgeQuery filters edge reads.
 type EdgeQuery struct {
-	ProjectID  string
-	Kind       EdgeKind
-	Extractor  string
-	SourcePath string
+	ProjectID    string
+	Kind         EdgeKind
+	Extractor    string
+	SourcePath   string
+	ExcludeStale bool
+	OnlyStale    bool
 }
 
 // EdgeReplacement atomically replaces all edges for one extractor/source scope.
@@ -176,6 +211,7 @@ type EdgeReplacement struct {
 // BuildMetadata records the latest graph build state for a project.
 type BuildMetadata struct {
 	ProjectID     string      `json:"project_id"`
+	Kind          BuildKind   `json:"kind,omitempty"`
 	Status        GraphStatus `json:"status"`
 	StartedAt     time.Time   `json:"started_at,omitempty"`
 	CompletedAt   time.Time   `json:"completed_at,omitempty"`
@@ -215,6 +251,13 @@ type Freshness struct {
 	SourceVersion     string         `json:"source_version,omitempty"`
 }
 
+// BuildTiming exposes compact build timestamps in graph_status.
+type BuildTiming struct {
+	StartedAt     string `json:"started_at,omitempty"`
+	CompletedAt   string `json:"completed_at,omitempty"`
+	SourceVersion string `json:"source_version,omitempty"`
+}
+
 // ExtractorSummary is the compact status contract for one extractor/source run.
 type ExtractorSummary struct {
 	Name         string          `json:"name"`
@@ -238,16 +281,20 @@ type StatusWarning struct {
 
 // StatusSnapshot is the graph_status resource payload.
 type StatusSnapshot struct {
-	Available     bool               `json:"available"`
-	SchemaVersion int                `json:"schema_version"`
-	Status        GraphStatus        `json:"status"`
-	GeneratedAt   time.Time          `json:"generated_at"`
-	Freshness     Freshness          `json:"freshness"`
-	Nodes         CountSummary       `json:"nodes"`
-	Edges         CountSummary       `json:"edges"`
-	Extractors    []ExtractorSummary `json:"extractors,omitempty"`
-	Confidence    map[string]int     `json:"confidence"`
-	Warnings      []StatusWarning    `json:"warnings,omitempty"`
+	Available             bool               `json:"available"`
+	SchemaVersion         int                `json:"schema_version"`
+	Status                GraphStatus        `json:"status"`
+	GeneratedAt           time.Time          `json:"generated_at"`
+	Freshness             Freshness          `json:"freshness"`
+	LastFullBuild         *BuildTiming       `json:"last_full_build,omitempty"`
+	LastIncrementalUpdate *BuildTiming       `json:"last_incremental_update,omitempty"`
+	Nodes                 CountSummary       `json:"nodes"`
+	Edges                 CountSummary       `json:"edges"`
+	ActiveEdges           CountSummary       `json:"active_edges"`
+	StaleEdges            CountSummary       `json:"stale_edges"`
+	Extractors            []ExtractorSummary `json:"extractors,omitempty"`
+	Confidence            map[string]int     `json:"confidence"`
+	Warnings              []StatusWarning    `json:"warnings,omitempty"`
 }
 
 // StatusOptions controls status derivation without rescanning project files.
@@ -269,6 +316,8 @@ type Repository interface {
 	UpsertNode(ctx context.Context, node Node) (Node, error)
 	UpsertEdge(ctx context.Context, edge Edge) (Edge, error)
 	ReplaceEdges(ctx context.Context, replacement EdgeReplacement) error
+	MarkEdgesToSourceStale(ctx context.Context, projectID, sourcePath string) error
+	PurgeStaleEdges(ctx context.Context, projectID string, olderThan time.Time) (int, error)
 	ListNodes(ctx context.Context, query NodeQuery) ([]Node, error)
 	ListEdges(ctx context.Context, query EdgeQuery) ([]Edge, error)
 	RecordBuild(ctx context.Context, metadata BuildMetadata) error
@@ -315,6 +364,18 @@ func normalizeEdge(edge Edge) (Edge, error) {
 	if err := validateConfidence(edge.Confidence); err != nil {
 		return Edge{}, err
 	}
+	if edge.Evidence.SourcePath == "" {
+		edge.Evidence.SourcePath = edge.SourcePath
+	}
+	if edge.Evidence.LineStart == 0 && edge.Evidence.Line != 0 {
+		edge.Evidence.LineStart = edge.Evidence.Line
+	}
+	if edge.Evidence.LineEnd == 0 && edge.Evidence.LineStart != 0 {
+		edge.Evidence.LineEnd = edge.Evidence.LineStart
+	}
+	if edge.Evidence.Line == 0 && edge.Evidence.LineStart != 0 {
+		edge.Evidence.Line = edge.Evidence.LineStart
+	}
 	edge.ConfidenceLabel = confidenceLabelFor(edge.Confidence)
 	if edge.ID == "" {
 		edge.ID = edgeID(edge.NaturalKey())
@@ -331,6 +392,8 @@ func validateConfidence(confidence float64) error {
 
 func confidenceLabelFor(confidence float64) ConfidenceLabel {
 	switch {
+	case confidence == 1:
+		return ConfidenceExact
 	case confidence >= 0.9:
 		return ConfidenceHigh
 	case confidence >= 0.7:

@@ -667,6 +667,58 @@ func TestApplyExactMatchBoost_RanksExactSymbolAboveReferences(t *testing.T) {
 	assert.Greater(t, boosted[0].Score, boosted[1].Score)
 }
 
+func TestApplyExactMatchBoost_RanksDeclarationSymbolAboveReferences(t *testing.T) {
+	results := []*SearchResult{
+		{
+			Chunk: &store.Chunk{
+				FilePath: "internal/async/indexer.go",
+				Content:  "type IndexerConfig struct { Config Config }",
+				Symbols:  []*store.Symbol{{Name: "IndexerConfig", Type: store.SymbolTypeType}},
+			},
+			Score: 1.0,
+		},
+		{
+			Chunk: &store.Chunk{
+				FilePath: "internal/config/config.go",
+				Content:  "type Config struct {}",
+				Symbols:  []*store.Symbol{{Name: "Config", Type: store.SymbolTypeType}},
+			},
+			Score: 0.5,
+		},
+	}
+
+	boosted := ApplyExactMatchBoost(results, "type Config struct")
+
+	assert.Equal(t, "internal/config/config.go", boosted[0].Chunk.FilePath)
+	assert.Greater(t, boosted[0].Score, boosted[1].Score)
+}
+
+func TestApplyExactMatchBoost_DeclarationQueryDoesNotBoostMethods(t *testing.T) {
+	results := []*SearchResult{
+		{
+			Chunk: &store.Chunk{
+				FilePath: "internal/chunk/pdf.go",
+				Content:  "func (c *PDFChunker) Chunk(ctx context.Context, file *FileInput) ([]*Chunk, error)",
+				Symbols:  []*store.Symbol{{Name: "Chunk", Type: store.SymbolTypeMethod}},
+			},
+			Score: 3.0,
+		},
+		{
+			Chunk: &store.Chunk{
+				FilePath: "internal/chunk/types.go",
+				Content:  "type Chunk struct {}",
+				Symbols:  []*store.Symbol{{Name: "Chunk", Type: store.SymbolTypeType}},
+			},
+			Score: 0.5,
+		},
+	}
+
+	boosted := ApplyExactMatchBoost(results, "type Chunk struct")
+
+	assert.Equal(t, "internal/chunk/types.go", boosted[0].Chunk.FilePath)
+	assert.Greater(t, boosted[0].Score, boosted[1].Score)
+}
+
 func TestApplyExactMatchBoost_RanksQuotedContentMatch(t *testing.T) {
 	results := []*SearchResult{
 		{
@@ -683,6 +735,57 @@ func TestApplyExactMatchBoost_RanksQuotedContentMatch(t *testing.T) {
 
 	assert.Equal(t, "internal/mcp/server.go", boosted[0].Chunk.FilePath)
 	assert.Greater(t, boosted[0].Score, boosted[1].Score)
+}
+
+func TestApplyPDFContentBoost_RanksPDFWhenQueryMentionsPDF(t *testing.T) {
+	results := []*SearchResult{
+		{
+			Chunk: &store.Chunk{
+				FilePath:    "docs/research/contextual-retrieval.md",
+				Content:     "page aware metadata",
+				ContentType: store.ContentTypeMarkdown,
+			},
+			Score: 1.0,
+		},
+		{
+			Chunk: &store.Chunk{
+				FilePath:    "internal/validation/testdata/eval-pdfs/technical-spec.pdf",
+				Content:     "PDF chunking page aware metadata",
+				ContentType: store.ContentTypePDF,
+			},
+			Score: 0.5,
+		},
+	}
+
+	boosted := ApplyPDFContentBoost(results, "how does PDF chunking preserve page aware metadata")
+
+	assert.Equal(t, "internal/validation/testdata/eval-pdfs/technical-spec.pdf", boosted[0].Chunk.FilePath)
+	assert.Greater(t, boosted[0].Score, boosted[1].Score)
+}
+
+func TestApplyPDFContentBoost_SkipsExactPDFIdentifierQueries(t *testing.T) {
+	results := []*SearchResult{
+		{
+			Chunk: &store.Chunk{
+				FilePath:    "internal/validation/testdata/eval-pdfs/technical-spec.pdf",
+				ContentType: store.ContentTypePDF,
+			},
+			Score: 1.0,
+		},
+		{
+			Chunk: &store.Chunk{
+				FilePath:    "internal/search/pdf_chunker.go",
+				ContentType: store.ContentTypeCode,
+			},
+			Score: 2.0,
+		},
+	}
+
+	boosted := ApplyPDFContentBoost(results, "PDF_SPEC_API")
+
+	assert.Equal(t, "internal/validation/testdata/eval-pdfs/technical-spec.pdf", boosted[0].Chunk.FilePath)
+	assert.Equal(t, 1.0, boosted[0].Score)
+	assert.Equal(t, 2.0, boosted[1].Score)
 }
 
 // BenchmarkIsTestFile measures test file detection performance.
@@ -1004,6 +1107,7 @@ func TestContentTypeFilter_DocsFilter(t *testing.T) {
 	}{
 		{"markdown matches", store.ContentTypeMarkdown, true},
 		{"text matches", store.ContentTypeText, true},
+		{"pdf matches", store.ContentTypePDF, true},
 		{"code no match", store.ContentTypeCode, false},
 	}
 

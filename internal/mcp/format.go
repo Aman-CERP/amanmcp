@@ -205,12 +205,23 @@ func ToSearchResultOutput(r *search.SearchResult) SearchResultOutput {
 	}
 
 	output := SearchResultOutput{
-		FilePath:     r.Chunk.FilePath,
-		Content:      r.Chunk.Content,
-		Score:        r.Score,
-		Language:     r.Chunk.Language,
-		MatchedTerms: r.MatchedTerms,
-		InBothLists:  r.InBothLists,
+		FilePath:            r.Chunk.FilePath,
+		Content:             r.Chunk.Content,
+		Score:               r.Score,
+		Language:            r.Chunk.Language,
+		LanguageSupportTier: languageSupportTierForChunk(r.Chunk),
+		ContentType:         string(r.Chunk.ContentType),
+		MatchedTerms:        r.MatchedTerms,
+		InBothLists:         r.InBothLists,
+	}
+	if r.Chunk.Metadata != nil {
+		output.Chunker = r.Chunk.Metadata["chunker"]
+		output.PageNumber = r.Chunk.Metadata["page_number"]
+		output.PageStart = r.Chunk.Metadata["page_start"]
+		output.PageEnd = r.Chunk.Metadata["page_end"]
+		if contentType := r.Chunk.Metadata["content_type"]; contentType != "" {
+			output.ContentType = contentType
+		}
 	}
 
 	sourceMeta := r.SourceMetadata

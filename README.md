@@ -2,9 +2,9 @@
 
 **Local RAG for your codebase. Zero config. Privacy-first.**
 
-[![Version](https://img.shields.io/badge/version-0.12.1-green)](https://github.com/Aman-CERP/amanmcp/releases)
+[![Version](https://img.shields.io/badge/version-0.14.0-green)](https://github.com/Aman-CERP/amanmcp/releases)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Go](https://img.shields.io/badge/Go-1.25.9+-00ADD8?logo=go)](https://golang.org/)
+[![Go](https://img.shields.io/badge/Go-1.26.3+-00ADD8?logo=go)](https://golang.org/)
 
 ---
 
@@ -50,7 +50,7 @@ flowchart LR
     style Claude fill:#3498db,color:#fff
 ```
 
-**Key features:** Hybrid search (BM25 + semantic) | AST-aware chunking | Multi-language | < 100ms queries
+**Key features:** Hybrid search (BM25 + semantic) | AST-aware chunking | AmanGraph relationship overlay | PDF text extraction | explicit language-support tiers | < 100ms queries
 
 ---
 
@@ -59,6 +59,7 @@ flowchart LR
 | Command | Description |
 |---------|-------------|
 | `amanmcp init` | Initialize project |
+| `amanmcp index [path]` | Build search indexes and AmanGraph |
 | `amanmcp search "query"` | Search codebase |
 | `amanmcp doctor` | Troubleshoot issues |
 | `amanmcp status` | Check index health |
@@ -76,6 +77,11 @@ When connected via MCP, Claude has these tools:
 | `search` | Hybrid search across codebase |
 | `search_code` | Find functions, classes, types |
 | `search_docs` | Search documentation |
+
+The structured SDK-registered MCP tools are the canonical integration path. The
+legacy in-process `Server.CallTool` markdown wrapper remains available for older
+tests and compatibility callers, but it is deprecated and targeted for removal
+after v1.0.0.
 
 **Try:** "Find the function that handles database connections"
 
@@ -122,7 +128,9 @@ Browse our comprehensive documentation organized by topic. Each category highlig
 |----------|-------|------------------|-------------|
 | [Hybrid Search](docs/concepts/hybrid-search.md) | Search Fundamentals | Why combine keyword and semantic search? | BM25 finds exact matches, vectors find meaning - fusion gets both strengths |
 | [MCP Protocol](docs/concepts/mcp-protocol.md) | AI Integration | How does AmanMCP talk to Claude? | Model Context Protocol enables structured AI-tool communication via JSON-RPC |
-| [Tree-sitter Guide](docs/concepts/tree-sitter-guide.md) | Code Parsing | How to parse code without language-specific parsers? | AST-aware chunking preserves semantic boundaries across 30+ languages |
+| [Indexing Pipeline](docs/concepts/indexing-pipeline.md) | Content Processing | What gets indexed, and how? | Code uses parser-backed chunks, markdown uses section chunks, and PDFs use page-aware text extraction |
+| [Language Support Tiers](docs/concepts/language-tiers.md) | Language Support | Which languages are parser-backed vs fallback? | Results expose `language_support_tier` so parser support is explicit |
+| [Tree-sitter Guide](docs/concepts/tree-sitter-guide.md) | Code Parsing | How to parse code with parser-backed chunking? | Tier 1 languages use AST-aware chunking; fallback languages use line chunks |
 | [Two-Stage Retrieval](docs/concepts/two-stage-retrieval.md) | Search Optimization | Why search twice instead of once? | Fast filter (candidates) then precise ranking balances speed and accuracy |
 | [Vector Search Concepts](docs/concepts/vector-search-concepts.md) | Semantic Search | How does semantic search actually work? | Embeddings turn text into numbers that capture meaning geometrically |
 
@@ -199,7 +207,7 @@ Browse our comprehensive documentation organized by topic. Each category highlig
 | Status | Feature |
 |--------|---------|
 | **Now** | Production-ready local RAG for Mac/Linux |
-| **Next** | Windows support, Rust/Java language support |
+| **Next** | Windows support, Tier 1 parser support for additional languages |
 | **Later** | IDE plugins, remote team search, cloud sync |
 
 **Contributions welcome** in [priority areas](CONTRIBUTING.md#contribution-areas).
@@ -229,7 +237,7 @@ Browse our comprehensive documentation organized by topic. Each category highlig
 
 | Component | Choice |
 |-----------|--------|
-| Language | Go 1.25.9+ |
+| Language | Go 1.26.3+ |
 | Protocol | [MCP 2025-11-25](https://modelcontextprotocol.io/) |
 | Keyword Search | SQLite FTS5 BM25 (pure Go) |
 | Vector Search | [coder/hnsw](https://github.com/coder/hnsw) |
@@ -242,7 +250,7 @@ Browse our comprehensive documentation organized by topic. Each category highlig
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 
-**Priority areas:** Language support, Windows support, performance.
+**Priority areas:** Tier 1 language support, Windows support, performance.
 
 ---
 

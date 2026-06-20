@@ -259,10 +259,25 @@ flowchart TD
 | `amanmcp index --backend=mlx` | Force MLX backend (Apple Silicon) |
 | `amanmcp index --force` | Clear existing index and rebuild |
 | `amanmcp index --resume` | Resume interrupted indexing |
+| `amanmcp index --skip-graph` | Build search indexes and leave graph state untouched |
+| `amanmcp index --graph-only` | Rebuild AmanGraph from an existing index without re-embedding |
+| `amanmcp index --force-graph-rebuild` | Clear graph artifacts before rebuilding the overlay |
 | `amanmcp index --no-tui` | Plain text output (no TUI) |
 | `amanmcp index info` | Show index configuration and stats |
 | `amanmcp index info --json` | Index info as JSON |
 | `amanmcp compact` | Optimize vector index |
+
+`amanmcp index` builds the search indexes and the local `.amanmcp/graph.db`
+relationship overlay by default. Use `--skip-graph` to opt out for a search-only
+index run that does not open or modify existing graph state. Use `--graph-only`
+after a successful index when you need to rebuild only the graph overlay;
+combine it with `--force-graph-rebuild` to recover a disposable or corrupt graph
+database without rewriting BM25 or vector artifacts. After indexing, MCP
+clients can inspect the read-only `amanmcp://graph_status` resource for
+canonical node counts, active edge counts, stale edge counts, freshness, and
+extractor warnings before calling `graph.query`. Graph freshness uses a named
+24-hour default, and serve-mode startup/refresh maintenance purges stale edges
+older than the named 7-day default.
 
 ---
 

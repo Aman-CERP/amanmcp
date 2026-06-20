@@ -152,6 +152,61 @@ Status: Superseded by ADR-039
 	assert.True(t, meta.Stale)
 }
 
+func TestDeriveSourceMetadata_UsesFrontmatterPMSignals(t *testing.T) {
+	tests := []struct {
+		name          string
+		metadata      map[string]string
+		wantClass     SourceClass
+		wantAuthority Authority
+		wantProfile   Profile
+	}{
+		{
+			name: "active P0 bug is authoritative PM memory",
+			metadata: map[string]string{
+				"fm.type":     "bug",
+				"fm.status":   "active",
+				"fm.priority": "P0",
+			},
+			wantClass:     SourceClassPMItem,
+			wantAuthority: AuthorityAuthoritative,
+			wantProfile:   ProfileProjectMemory,
+		},
+		{
+			name: "resolved task is archived",
+			metadata: map[string]string{
+				"fm.type":   "task",
+				"fm.status": "resolved",
+			},
+			wantClass:     SourceClassArchived,
+			wantAuthority: AuthorityArchived,
+			wantProfile:   ProfileArchive,
+		},
+		{
+			name: "feature type marks PM item",
+			metadata: map[string]string{
+				"fm.type": "feature",
+			},
+			wantClass:     SourceClassPMItem,
+			wantAuthority: AuthorityActive,
+			wantProfile:   ProfileProjectMemory,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			meta := DeriveSourceMetadata(SourceMetadataInput{
+				Path:        ".aman-pm/backlog/tasks/active/TASK-DOC05.md",
+				ContentType: store.ContentTypeMarkdown,
+				Metadata:    tt.metadata,
+			})
+
+			assert.Equal(t, tt.wantClass, meta.SourceClass)
+			assert.Equal(t, tt.wantAuthority, meta.Authority)
+			assert.Equal(t, tt.wantProfile, meta.Profile)
+		})
+	}
+}
+
 func TestDeriveSourceMetadata_SupersededByDowngradesContradictoryAcceptedStatus(t *testing.T) {
 	meta := DeriveSourceMetadata(SourceMetadataInput{
 		Path:        ".aman-pm/decisions/ADR-030-old-approach.md",
