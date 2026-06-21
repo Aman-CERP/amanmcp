@@ -16,15 +16,7 @@ type GraphQueryInput struct {
 	IncludeStale bool   `json:"include_stale,omitempty" jsonschema:"include stale graph edges that point at deleted or replaced sources"`
 }
 
-type GraphQueryOutput struct {
-	Available bool                  `json:"available"`
-	Status    graph.GraphStatus     `json:"status"`
-	Degraded  bool                  `json:"degraded"`
-	Mode      string                `json:"mode"`
-	Query     string                `json:"query"`
-	Results   []graph.QueryResult   `json:"results,omitempty"`
-	Warnings  []graph.StatusWarning `json:"warnings,omitempty"`
-}
+type GraphQueryOutput = graph.QueryToolOutput
 
 func (s *Server) handleGraphQueryArgs(ctx context.Context, args map[string]any) (GraphQueryOutput, error) {
 	input := GraphQueryInput{
@@ -47,20 +39,11 @@ func (s *Server) handleGraphQueryTool(ctx context.Context, input GraphQueryInput
 		input.ProjectID = defaultProjectID
 	}
 	if service == nil {
-		if input.Mode == "" {
-			input.Mode = graph.QueryModeFindReferences
-		}
-		return GraphQueryOutput{
-			Available: false,
-			Status:    graph.GraphStatusUnavailable,
-			Degraded:  true,
-			Mode:      input.Mode,
-			Query:     input.Query,
-			Warnings: []graph.StatusWarning{{
-				Code:    graph.WarningGraphUnavailable,
-				Message: "graph.query is unavailable because no graph repository is configured",
-			}},
-		}, nil
+		return graph.NewUnavailableQueryToolOutput(
+			input.Mode,
+			input.Query,
+			"graph.query is unavailable because no graph repository is configured",
+		), nil
 	}
 
 	response, err := service.Query(ctx, graph.QueryRequest{
@@ -89,17 +72,7 @@ func (s *Server) mcpGraphQueryHandler(ctx context.Context, _ *mcp.CallToolReques
 }
 
 func graphQueryOutput(response graph.QueryResponse) GraphQueryOutput {
-	return GraphQueryOutput{
-		Available: response.Status != graph.GraphStatusUnavailable &&
-			response.Status != graph.GraphStatusIncompatible &&
-			response.Status != graph.GraphStatusEmpty,
-		Status:   response.Status,
-		Degraded: response.Degraded,
-		Mode:     response.Mode,
-		Query:    response.Query,
-		Results:  response.Results,
-		Warnings: response.Warnings,
-	}
+	return graph.NewQueryToolOutput(response)
 }
 
 func stringArg(args map[string]any, key string) string {

@@ -56,6 +56,14 @@ func TestNewConfig_ReturnsDefaults(t *testing.T) {
 	assert.Equal(t, 8765, cfg.Server.Port)
 	assert.Equal(t, "debug", cfg.Server.LogLevel) // Debug by default for troubleshooting
 
+	// Eval defaults
+	assert.Equal(t, 0.10, cfg.Eval.Graph.BlockingDegradationThreshold)
+	// Per-mode relevance thresholds (TASK-GRA12/13/14)
+	assert.Equal(t, 0.75, cfg.Eval.Graph.Modes.FindReferences.MinExpectedRecallAt10)
+	assert.Equal(t, 0.70, cfg.Eval.Graph.Modes.FindReferences.MinPrecisionAt10)
+	assert.Equal(t, 0.80, cfg.Eval.Graph.Modes.ExplainSymbol.MinHitRateAt3)
+	assert.Equal(t, 0.70, cfg.Eval.Graph.Modes.ImpactAnalysis.MinHitRateAt10)
+
 	// Paths defaults
 	assert.Contains(t, cfg.Paths.Exclude, "**/node_modules/**")
 	assert.Contains(t, cfg.Paths.Exclude, "**/.git/**")
@@ -140,6 +148,86 @@ search:
 	require.NoError(t, err)
 	assert.Equal(t, "never", cfg.Search.Reranker.Policy)
 	assert.NotEmpty(t, cfg.Search.Profiles, "reranker policy merge must preserve search profile defaults")
+}
+
+func TestLoad_YamlFile_OverridesEvalGraphThreshold(t *testing.T) {
+	tmpDir := t.TempDir()
+	configContent := `
+version: 1
+eval:
+  graph:
+    blocking_degradation_threshold: 0.25
+`
+	err := os.WriteFile(filepath.Join(tmpDir, ".amanmcp.yaml"), []byte(configContent), 0o644)
+	require.NoError(t, err)
+
+	cfg, err := Load(tmpDir)
+
+	require.NoError(t, err)
+	assert.Equal(t, 0.25, cfg.Eval.Graph.BlockingDegradationThreshold)
+}
+
+func TestLoad_InvalidEvalGraphThreshold_ReturnsError(t *testing.T) {
+	tmpDir := t.TempDir()
+	configContent := `
+version: 1
+eval:
+  graph:
+    blocking_degradation_threshold: 1.25
+`
+	err := os.WriteFile(filepath.Join(tmpDir, ".amanmcp.yaml"), []byte(configContent), 0o644)
+	require.NoError(t, err)
+
+	cfg, err := Load(tmpDir)
+
+	require.Error(t, err)
+	assert.Nil(t, cfg)
+	assert.Contains(t, err.Error(), "eval.graph.blocking_degradation_threshold")
+}
+
+func TestLoad_YamlFile_OverridesEvalGraphModeThreshold(t *testing.T) {
+	tmpDir := t.TempDir()
+	configContent := `
+version: 1
+eval:
+  graph:
+    modes:
+      find_references:
+        min_expected_recall_at_10: 0.9
+      impact_analysis:
+        min_hit_rate_at_10: 0.6
+`
+	err := os.WriteFile(filepath.Join(tmpDir, ".amanmcp.yaml"), []byte(configContent), 0o644)
+	require.NoError(t, err)
+
+	cfg, err := Load(tmpDir)
+
+	require.NoError(t, err)
+	assert.Equal(t, 0.9, cfg.Eval.Graph.Modes.FindReferences.MinExpectedRecallAt10)
+	// Unspecified mode thresholds retain their defaults.
+	assert.Equal(t, 0.70, cfg.Eval.Graph.Modes.FindReferences.MinPrecisionAt10)
+	assert.Equal(t, 0.80, cfg.Eval.Graph.Modes.ExplainSymbol.MinHitRateAt3)
+	assert.Equal(t, 0.6, cfg.Eval.Graph.Modes.ImpactAnalysis.MinHitRateAt10)
+}
+
+func TestLoad_InvalidEvalGraphModeThreshold_ReturnsError(t *testing.T) {
+	tmpDir := t.TempDir()
+	configContent := `
+version: 1
+eval:
+  graph:
+    modes:
+      explain_symbol:
+        min_hit_rate_at_3: 1.5
+`
+	err := os.WriteFile(filepath.Join(tmpDir, ".amanmcp.yaml"), []byte(configContent), 0o644)
+	require.NoError(t, err)
+
+	cfg, err := Load(tmpDir)
+
+	require.Error(t, err)
+	assert.Nil(t, cfg)
+	assert.Contains(t, err.Error(), "eval.graph.modes.explain_symbol.min_hit_rate_at_3")
 }
 
 func TestLoad_InvalidRerankerPolicy_ReturnsError(t *testing.T) {
@@ -749,6 +837,26 @@ embeddings:
 	// Then: env var has highest precedence
 	require.NoError(t, err)
 	assert.Equal(t, "env-model", cfg.Embeddings.Model)
+}
+
+func TestLoad_EnvVarOverridesEvalGraphThreshold(t *testing.T) {
+	configDir := t.TempDir()
+	projectDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	t.Setenv("AMANMCP_EVAL_GRAPH_BLOCKING_DEGRADATION_THRESHOLD", "0.40")
+
+	projectConfig := `
+version: 1
+eval:
+  graph:
+    blocking_degradation_threshold: 0.25
+`
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, ".amanmcp.yaml"), []byte(projectConfig), 0o644))
+
+	cfg, err := Load(projectDir)
+
+	require.NoError(t, err)
+	assert.Equal(t, 0.40, cfg.Eval.Graph.BlockingDegradationThreshold)
 }
 
 func TestLoad_InvalidUserConfig_ReturnsError(t *testing.T) {

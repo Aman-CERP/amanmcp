@@ -4,6 +4,11 @@ Public-facing highlights of major changes. See `.aman-pm/changelog/` for detaile
 
 ---
 
+## [v0.15.0] - 2026-06-21
+
+- **Update**: Minor improvements and fixes
+
+
 ## [v0.14.0] - 2026-06-20
 
 - **Update**: Minor improvements and fixes
@@ -53,12 +58,6 @@ Public-facing highlights of major changes. See `.aman-pm/changelog/` for detaile
 - **Feature**: Path-based scoring (internal/ boosted 1.3x, cmd/ penalized 0.6x)
 - **Fix**: Multi-query consensus favored wrappers over implementations
 - **Fix**: Search results varied based on limit parameter
-
-## [v0.6.0] - 2026-01-14
-
-- **Feature**: SQLite FTS5 BM25 backend with concurrent multi-process access (default)
-- **Feature**: `--local` flag for search command to bypass daemon
-- **Fix**: CLI blocked when MCP server running (BoltDB exclusive lock issue)
 
 
 ---

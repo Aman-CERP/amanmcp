@@ -27,6 +27,15 @@ func TestRootCmd_HasEvalSearchCommand(t *testing.T) {
 	assert.Equal(t, "search", searchCmd.Name())
 }
 
+func TestRootCmd_HasEvalGraphCommand(t *testing.T) {
+	cmd := NewRootCmd()
+
+	graphCmd, _, err := cmd.Find([]string{"eval", "graph"})
+	require.NoError(t, err)
+	require.NotNil(t, graphCmd)
+	assert.Equal(t, "graph", graphCmd.Name())
+}
+
 func TestEvalSearchCmd_FlagParsingAndReportPaths(t *testing.T) {
 	corpusPath := writeEvalCmdCorpus(t, `
 queries:
@@ -79,6 +88,325 @@ queries:
 
 	require.NoError(t, err)
 	assert.Contains(t, buf.String(), "latest.md")
+}
+
+func TestEvalGraphCmd_FlagParsingAndReportPaths(t *testing.T) {
+	corpusPath := writeEvalCmdCorpus(t, `
+schema_version: 1
+queries:
+  - id: GRA-Q1
+    name: graph query
+    mode: find_references
+    query: internal/graph/query.go
+    subsets: [quick, full, mode:find_references]
+    holdout: false
+    source: manual
+    expected:
+      - source_path: internal/graph/query.go
+        rationale: direct graph evidence
+`)
+	outDir := t.TempDir()
+	restore := stubEvalGraphRunner(t, evalGraphRunnerFunc(func(ctx context.Context, opts eval.GraphOptions) (*eval.DirectGraphEvalReport, error) {
+		assert.Equal(t, corpusPath, opts.CorpusPath)
+		assert.Equal(t, "mode:find_references", opts.Subset)
+		assert.Equal(t, "json", opts.Output)
+		assert.Equal(t, outDir, opts.OutDir)
+		assert.True(t, opts.FailOnRegression)
+		assert.Equal(t, 0.10, opts.BlockingDegradationThreshold)
+		assert.Contains(t, opts.Command, "amanmcp eval graph")
+		assert.Contains(t, opts.Command, "--corpus="+corpusPath)
+		assert.Contains(t, opts.Command, "--fail-on-regression")
+		assert.Contains(t, opts.Command, "--out-dir="+outDir)
+		assert.Contains(t, opts.Command, "--output=json")
+		assert.Contains(t, opts.Command, "--subset=mode:find_references")
+		return &eval.DirectGraphEvalReport{
+			Summary: eval.DirectGraphSummary{
+				QueryCount:              1,
+				PassRate:                1.0,
+				DegradationBlockingRate: 0,
+			},
+			OutputPaths: eval.OutputPaths{
+				JSON: filepath.Join(outDir, "latest.json"),
+			},
+		}, nil
+	}))
+	defer restore()
+
+	cmd := NewRootCmd()
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetArgs([]string{
+		"eval", "graph",
+		"--corpus", corpusPath,
+		"--subset", "mode:find_references",
+		"--output", "json",
+		"--out-dir", outDir,
+		"--fail-on-regression",
+	})
+
+	err := cmd.Execute()
+
+	require.NoError(t, err)
+	assert.Contains(t, buf.String(), "latest.json")
+	assert.Contains(t, buf.String(), "Graph eval summary")
+}
+
+func TestEvalGraphCmd_PrintsMeasurementSummary(t *testing.T) {
+	cases := []struct {
+		name         string
+		report       *eval.DirectGraphEvalReport
+		wantContains []string
+		wantAbsent   []string
+	}{
+		{
+			name: "measured run surfaces measured tool and scope",
+			report: &eval.DirectGraphEvalReport{
+				MeasuredTool:      eval.DirectGraphMeasuredTool,
+				EvaluationScope:   eval.DirectGraphEvaluationScope,
+				GraphToolMeasured: true,
+				Summary:           eval.DirectGraphSummary{QueryCount: 3, MeasuredQueryCount: 3, PassRate: 1.0},
+			},
+			wantContains: []string{
+				"Measured tool: graph.query (scope direct_graph_query_modes)",
+				"graph tool measured: true (3/3 measured)",
+			},
+			wantAbsent: []string{"Unmeasured reason"},
+		},
+		{
+			name: "unmeasured run surfaces the reason",
+			report: &eval.DirectGraphEvalReport{
+				MeasuredTool:      eval.DirectGraphMeasuredTool,
+				EvaluationScope:   eval.DirectGraphEvaluationScope,
+				GraphToolMeasured: false,
+				UnmeasuredReason:  "graph.query produced no servable output (tool not measured)",
+				Summary:           eval.DirectGraphSummary{QueryCount: 3, MeasuredQueryCount: 0},
+			},
+			wantContains: []string{
+				"graph tool measured: false (0/3 measured)",
+				"Unmeasured reason: graph.query produced no servable output (tool not measured)",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			report := tc.report
+			restore := stubEvalGraphRunner(t, evalGraphRunnerFunc(func(context.Context, eval.GraphOptions) (*eval.DirectGraphEvalReport, error) {
+				return report, nil
+			}))
+			defer restore()
+
+			cmd := NewRootCmd()
+			buf := new(bytes.Buffer)
+			cmd.SetOut(buf)
+			cmd.SetErr(buf)
+			cmd.SetArgs([]string{"eval", "graph", "--output", "json", "--out-dir", t.TempDir()})
+
+			require.NoError(t, cmd.Execute())
+			for _, want := range tc.wantContains {
+				assert.Contains(t, buf.String(), want)
+			}
+			for _, absent := range tc.wantAbsent {
+				assert.NotContains(t, buf.String(), absent)
+			}
+		})
+	}
+}
+
+func TestEvalGraphCmd_UsesConfigThresholdUnlessFlagOverrides(t *testing.T) {
+	projectDir := t.TempDir()
+	t.Chdir(projectDir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, ".amanmcp.yaml"), []byte(`
+version: 1
+eval:
+  graph:
+    blocking_degradation_threshold: 0.35
+`), 0o644))
+	corpusPath := writeEvalCmdCorpus(t, `
+schema_version: 1
+queries:
+  - id: GRA-Q1
+    name: graph query
+    mode: find_references
+    query: internal/graph/query.go
+    subsets: [quick]
+    holdout: false
+    source: manual
+    expected:
+      - source_path: internal/graph/query.go
+        rationale: direct graph evidence
+`)
+	outDir := t.TempDir()
+	seen := 0
+	restore := stubEvalGraphRunner(t, evalGraphRunnerFunc(func(ctx context.Context, opts eval.GraphOptions) (*eval.DirectGraphEvalReport, error) {
+		seen++
+		if seen == 1 {
+			assert.Equal(t, 0.35, opts.BlockingDegradationThreshold)
+		} else {
+			assert.Equal(t, 0.20, opts.BlockingDegradationThreshold)
+		}
+		return &eval.DirectGraphEvalReport{
+			Summary: eval.DirectGraphSummary{
+				QueryCount:              1,
+				PassRate:                1.0,
+				DegradationBlockingRate: 0,
+			},
+			OutputPaths: eval.OutputPaths{
+				JSON: filepath.Join(outDir, "latest.json"),
+			},
+		}, nil
+	}))
+	defer restore()
+
+	cmd := NewRootCmd()
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{
+		"eval", "graph",
+		"--corpus", corpusPath,
+		"--output", "json",
+		"--out-dir", outDir,
+		"--fail-on-regression",
+	})
+	require.NoError(t, cmd.Execute())
+
+	cmd = NewRootCmd()
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{
+		"eval", "graph",
+		"--corpus", corpusPath,
+		"--output", "json",
+		"--out-dir", outDir,
+		"--fail-on-regression",
+		"--blocking-degradation-threshold", "0.20",
+	})
+	require.NoError(t, cmd.Execute())
+	assert.Equal(t, 2, seen)
+}
+
+func TestEvalGraphCmd_PrintsReportWhenRunnerReturnsReportAndError(t *testing.T) {
+	outDir := t.TempDir()
+	restore := stubEvalGraphRunner(t, evalGraphRunnerFunc(func(context.Context, eval.GraphOptions) (*eval.DirectGraphEvalReport, error) {
+		return &eval.DirectGraphEvalReport{
+			Summary: eval.DirectGraphSummary{
+				QueryCount:              2,
+				PassRate:                0.50,
+				DegradationBlockingRate: 0.50,
+			},
+			OutputPaths: eval.OutputPaths{
+				JSON: filepath.Join(outDir, "latest.json"),
+			},
+		}, errors.New("direct graph eval gate failed")
+	}))
+	defer restore()
+
+	cmd := NewRootCmd()
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetArgs([]string{"eval", "graph", "--out-dir", outDir, "--fail-on-regression"})
+
+	err := cmd.Execute()
+
+	require.Error(t, err)
+	assert.Contains(t, buf.String(), "blocking degradation")
+	assert.Contains(t, buf.String(), "latest.json")
+}
+
+func TestEvalGraphCmd_MalformedCorpusFailure(t *testing.T) {
+	corpusPath := writeEvalCmdCorpus(t, `
+schema_version: 1
+queries:
+  - id: GRA-BAD
+    name: bad graph query
+    mode: find_references
+    query: internal/graph/query.go
+    subsets: [quick]
+    holdout: false
+    source: manual
+    expected:
+      - rationale: rationale alone is not a matcher
+`)
+	outDir := t.TempDir()
+
+	cmd := NewRootCmd()
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetArgs([]string{
+		"eval", "graph",
+		"--corpus", corpusPath,
+		"--out-dir", outDir,
+	})
+
+	err := cmd.Execute()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expected evidence without a matcher")
+}
+
+func TestEvalGraphCmd_InvalidFlagsFailBeforeOpeningGraphDB(t *testing.T) {
+	corpusPath := writeEvalCmdCorpus(t, `
+schema_version: 1
+queries:
+  - id: GRA-Q1
+    name: graph query
+    mode: find_references
+    query: internal/graph/query.go
+    subsets: [quick]
+    holdout: false
+    source: manual
+    expected:
+      - source_path: internal/graph/query.go
+        rationale: direct graph evidence
+`)
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			name:    "unsupported output",
+			args:    []string{"eval", "graph", "--output", "xml"},
+			wantErr: `unsupported output "xml"`,
+		},
+		{
+			name:    "unsupported subset",
+			args:    []string{"eval", "graph", "--corpus", corpusPath, "--subset", "holdout"},
+			wantErr: `unsupported graph subset "holdout"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := NewRootCmd()
+			buf := new(bytes.Buffer)
+			cmd.SetOut(buf)
+			cmd.SetErr(buf)
+			cmd.SetArgs(tt.args)
+
+			err := cmd.Execute()
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestMakefile_HasDirectGraphEvalTargets(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "Makefile"))
+	require.NoError(t, err)
+	makefile := string(data)
+
+	assert.Contains(t, makefile, "eval-graph-quick:")
+	assert.Contains(t, makefile, "eval-graph-full:")
+	assert.Contains(t, makefile, "amanmcp eval graph --subset quick")
+	assert.Contains(t, makefile, "amanmcp eval graph --subset full")
+	assert.Contains(t, makefile, "--fail-on-regression")
+	assert.Contains(t, makefile, "--blocking-degradation-threshold")
 }
 
 func TestEvalSearchCmd_PrintsDimensionRegressionsWhenRunnerReturnsReportAndError(t *testing.T) {
@@ -164,6 +492,23 @@ func stubEvalRunner(t *testing.T, runner evalSearchRunner) func() {
 	}
 	return func() {
 		newEvalSearchRunner = old
+	}
+}
+
+type evalGraphRunnerFunc func(context.Context, eval.GraphOptions) (*eval.DirectGraphEvalReport, error)
+
+func (f evalGraphRunnerFunc) Run(ctx context.Context, opts eval.GraphOptions) (*eval.DirectGraphEvalReport, error) {
+	return f(ctx, opts)
+}
+
+func stubEvalGraphRunner(t *testing.T, runner evalGraphRunner) func() {
+	t.Helper()
+	old := newEvalGraphRunner
+	newEvalGraphRunner = func(string) evalGraphRunner {
+		return runner
+	}
+	return func() {
+		newEvalGraphRunner = old
 	}
 }
 

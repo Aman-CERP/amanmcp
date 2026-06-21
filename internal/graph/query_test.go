@@ -2,12 +2,54 @@ package graph
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestValidateQueryRequest_WrapsTypedSentinel proves every input-validation
+// rejection wraps the exported graph.ErrInvalidQueryParams sentinel so eval
+// classification can use errors.Is instead of brittle message-substring matching
+// (DEBT-037 finding #3). A valid request returns nil, and the human-readable
+// message is preserved so operator-facing logs stay informative.
+func TestValidateQueryRequest_WrapsTypedSentinel(t *testing.T) {
+	cases := []struct {
+		name string
+		req  QueryRequest
+	}{
+		{"missing project_id", QueryRequest{Mode: QueryModeFindReferences, Query: "internal/x.go"}},
+		{"unsupported mode", QueryRequest{ProjectID: "p", Mode: "bogus_mode", Query: "internal/x.go"}},
+		{"missing query", QueryRequest{ProjectID: "p", Mode: QueryModeFindReferences, Query: ""}},
+		{"nul byte", QueryRequest{ProjectID: "p", Mode: QueryModeFindReferences, Query: "internal/\x00.go"}},
+		{"absolute path", QueryRequest{ProjectID: "p", Mode: QueryModeFindReferences, Query: "/etc/passwd"}},
+		{"path traversal", QueryRequest{ProjectID: "p", Mode: QueryModeFindReferences, Query: "../secrets.go"}},
+		{"limit over cap", QueryRequest{ProjectID: "p", Mode: QueryModeFindReferences, Query: "internal/x.go", Limit: maxGraphQueryLimit + 1}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateQueryRequest(tc.req)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, ErrInvalidQueryParams),
+				"validation error %q must wrap ErrInvalidQueryParams", err)
+			assert.NotEmpty(t, err.Error(), "human-readable message must be preserved")
+		})
+	}
+
+	valid := QueryRequest{ProjectID: "p", Mode: QueryModeFindReferences, Query: "internal/x.go"}
+	require.NoError(t, validateQueryRequest(valid))
+}
+
+// TestErrInvalidQueryParams_NotMatchedByInfraErrors guards the boundary: a
+// non-validation (transport/infra) error must NOT be classified as invalid
+// params, so the eval taxonomy keeps the two failure modes distinct.
+func TestErrInvalidQueryParams_NotMatchedByInfraErrors(t *testing.T) {
+	infra := fmt.Errorf("list graph edges: %w", errors.New("disk i/o error"))
+	assert.False(t, errors.Is(infra, ErrInvalidQueryParams))
+}
 
 func TestQueryService_ReturnsBoundedSourceCitedEvidence(t *testing.T) {
 	ctx := context.Background()
@@ -135,6 +177,22 @@ func TestQueryService_UnusableGraphReturnsVisibleWarning(t *testing.T) {
 	assert.True(t, got.Degraded)
 	assert.Empty(t, got.Results)
 	assert.NotEmpty(t, got.Warnings)
+}
+
+func TestQueryServable_OnlyFreshStalePartialServeRealAnswers(t *testing.T) {
+	// QueryServable is the servability SSOT shared by the query service
+	// short-circuit and direct graph eval measurement accounting. `failed` keeps
+	// available=true (QueryAvailable) but serves no real answer, so it must not
+	// be servable.
+	servable := []GraphStatus{GraphStatusFresh, GraphStatusStale, GraphStatusPartial}
+	notServable := []GraphStatus{GraphStatusUnavailable, GraphStatusIncompatible, GraphStatusEmpty, GraphStatusFailed}
+
+	for _, status := range servable {
+		assert.True(t, QueryServable(status), "status %s should be servable", status)
+	}
+	for _, status := range notServable {
+		assert.False(t, QueryServable(status), "status %s should not be servable", status)
+	}
 }
 
 func TestQueryService_ValidatesInputs(t *testing.T) {

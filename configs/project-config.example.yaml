@@ -99,6 +99,11 @@ paths:
 #   reranker:
 #     policy: auto          # Options: auto, always, never
 
+# Eval gate configuration
+# eval:
+#   graph:
+#     blocking_degradation_threshold: 0.10  # Fail direct graph eval above this blocking status rate
+
 # Embedding configuration (can override user config)
 # embeddings:
 #   provider: ollama        # Options: ollama, static

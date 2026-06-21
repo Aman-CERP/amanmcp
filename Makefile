@@ -30,11 +30,12 @@ BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X github.com/Aman-CERP/amanmcp/pkg/version.Version=$(VERSION) \
            -X github.com/Aman-CERP/amanmcp/pkg/version.Commit=$(GIT_COMMIT) \
            -X github.com/Aman-CERP/amanmcp/pkg/version.Date=$(BUILD_DATE)
+GRAPH_EVAL_BLOCKING_DEGRADATION_THRESHOLD ?= 0.10
 
 # CGO is required for tree-sitter code parsing only
 # USearch removed in v0.1.38 - now using coder/hnsw (pure Go)
 
-.PHONY: help build build-logs test test-race test-cover test-cover-html lint lint-fix lint-fast ci-check ci-check-strict ci-check-quick release-rehearse amanpm-check-constants amanpm-validate amanpm-db-sync amanpm-db-rebuild amanpm-index-generate amanpm-comply amanpm-comply-guard amanpm-verify-release-claims clean verify-checkpoint verify-docs verify-ssot verify-all install install-user install-local install-local-and-verify install-local-logs install-local-all uninstall uninstall-local install-mlx start-mlx install-ollama start-ollama stop-ollama switch-backend-mlx switch-backend-ollama verify-install validate validate-tier1 validate-tier2 validate-all eval-search-quick eval-search-graph eval-search-baseline
+.PHONY: help build build-logs test test-race test-cover test-cover-html lint lint-fix lint-fast ci-check ci-check-strict ci-check-quick release-rehearse amanpm-check-constants amanpm-validate amanpm-db-sync amanpm-db-rebuild amanpm-index-generate amanpm-comply amanpm-comply-guard amanpm-verify-release-claims clean verify-checkpoint verify-docs verify-ssot verify-all install install-user install-local install-local-and-verify install-local-logs install-local-all uninstall uninstall-local install-mlx start-mlx install-ollama start-ollama stop-ollama switch-backend-mlx switch-backend-ollama verify-install validate validate-tier1 validate-tier2 validate-all eval-search-quick eval-search-graph eval-search-baseline eval-graph-quick eval-graph-full
 .PHONY: amanpm-capture-learning amanpm-add-changelog amanpm-create-item amanpm-move-item amanpm-create-adr amanpm-preflight-release
 
 # ============================================================================
@@ -81,6 +82,8 @@ help:
 	@echo "  make eval-search-quick  - Run quick search eval subset"
 	@echo "  make eval-search-graph  - Run graph-heavy search eval gate report"
 	@echo "  make eval-search-baseline - Regenerate locked search eval baselines"
+	@echo "  make eval-graph-quick   - Run quick direct graph.query eval subset"
+	@echo "  make eval-graph-full    - Run full direct graph.query eval subset"
 	@echo ""
 	@echo "Quality Commands:"
 	@echo "  make lint               - Run golangci-lint"
@@ -204,6 +207,16 @@ eval-search-graph:
 eval-search-baseline:
 	@echo "Regenerating full search eval baseline..."
 	@CGO_ENABLED=1 go run ./cmd/amanmcp eval search --subset full --include-holdout --output both --out-dir .aman-pm/validation/search-eval --save-baseline --force-overwrite-baseline
+
+## Run quick direct graph.query eval subset and write latest reports
+eval-graph-quick:
+	@echo "Running quick direct graph.query eval subset..."
+	@CGO_ENABLED=1 go run ./cmd/amanmcp eval graph --subset quick --output both --out-dir .aman-pm/validation/graph-eval --fail-on-regression --blocking-degradation-threshold $(GRAPH_EVAL_BLOCKING_DEGRADATION_THRESHOLD)
+
+## Run full direct graph.query eval subset and write latest reports
+eval-graph-full:
+	@echo "Running full direct graph.query eval subset..."
+	@CGO_ENABLED=1 go run ./cmd/amanmcp eval graph --subset full --output both --out-dir .aman-pm/validation/graph-eval --fail-on-regression --blocking-degradation-threshold $(GRAPH_EVAL_BLOCKING_DEGRADATION_THRESHOLD)
 
 # ============================================================================
 # Linting

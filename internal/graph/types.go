@@ -84,6 +84,13 @@ const (
 	GraphStatusFailed       GraphStatus = "failed"
 )
 
+// QueryAvailable derives the MCP graph.query availability flag from graph status.
+func QueryAvailable(status GraphStatus) bool {
+	return status != GraphStatusUnavailable &&
+		status != GraphStatusIncompatible &&
+		status != GraphStatusEmpty
+}
+
 // BuildKind identifies whether build metadata came from a full rebuild or an
 // incremental source update.
 type BuildKind string

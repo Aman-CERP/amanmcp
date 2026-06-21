@@ -2,7 +2,7 @@
 
 **Local RAG for your codebase. Zero config. Privacy-first.**
 
-[![Version](https://img.shields.io/badge/version-0.14.0-green)](https://github.com/Aman-CERP/amanmcp/releases)
+[![Version](https://img.shields.io/badge/version-0.15.0-green)](https://github.com/Aman-CERP/amanmcp/releases)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Go](https://img.shields.io/badge/Go-1.26.3+-00ADD8?logo=go)](https://golang.org/)
 

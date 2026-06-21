@@ -1,0 +1,1149 @@
+schema_version: 1
+# Direct graph.query eval corpus (FEAT-GRA2).
+#
+# Every expected row is labeled against ACTUAL `graph.query` output observed on a
+# normal index of this repository (TASK-GRA12/13/14). Matchers use current result
+# fields only (source_path, node_kind, relation, role, confidence_label,
+# evidence_method, graph_path_contains) and never node_id, which is index-volatile.
+#
+# Classes (expectation_class):
+#   quality  (default) - scored against per-mode relevance thresholds.
+#   degraded           - intentionally targets a zero-result/degraded state.
+#   gap                - documents a future-semantics relationship not represented
+#                        by current traversal (see FEAT-GRA3 / FEAT-GRA4).
+queries:
+  # ===========================================================================
+  # TASK-GRA10 smoke rows (kept; one per mode)
+  # ===========================================================================
+  - id: GRA10-FR-Q01
+    name: Find references for graph query service file
+    mode: find_references
+    query: internal/graph/query.go
+    limit: 10
+    include_stale: false
+    subsets: [quick, full, mode:find_references]
+    holdout: false
+    source: task-gra10-smoke
+    expected:
+      - source_path: internal/graph/query.go
+        node_kind: chunk
+        role: related
+        relation: symbol_has_chunk
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: Direct graph eval should preserve source-cited evidence for the graph query implementation file.
+    metadata:
+      owner_task: TASK-GRA10
+      language: go
+
+  - id: GRA10-ES-Q01
+    name: Explain graph query service symbol
+    mode: explain_symbol
+    query: QueryService
+    limit: 10
+    include_stale: false
+    subsets: [quick, full, mode:explain_symbol]
+    holdout: false
+    source: task-gra10-smoke
+    expected:
+      - source_path: internal/graph/query.go
+        node_kind: chunk
+        role: symbol_context
+        relation: symbol_has_chunk
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: explain_symbol should return symbol-context evidence for matching graph query service symbols.
+    metadata:
+      owner_task: TASK-GRA10
+      language: go
+
+  - id: GRA10-IA-Q01
+    name: Impact analysis for graph query service symbol
+    mode: impact_analysis
+    query: QueryService
+    limit: 10
+    include_stale: false
+    subsets: [quick, full, mode:impact_analysis]
+    holdout: false
+    source: task-gra10-smoke
+    expected:
+      - source_path: internal/graph/query.go
+        node_kind: chunk
+        role: downstream
+        relation: symbol_has_chunk
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: impact_analysis should return downstream graph evidence for matching graph query service symbols.
+    metadata:
+      owner_task: TASK-GRA10
+      language: go
+
+  # ===========================================================================
+  # TASK-GRA12: find_references
+  # ===========================================================================
+  - id: GRA12-FR-Q01
+    name: find_references for the config loader file
+    mode: find_references
+    query: internal/config/config.go
+    subsets: [quick, full, mode:find_references]
+    holdout: false
+    source: task-gra12
+    expected:
+      - source_path: internal/config/config.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: related
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: find_references on a Go file returns its own symbol-chunk evidence.
+    metadata: {owner_task: TASK-GRA12, kind: file}
+
+  - id: GRA12-FR-Q02
+    name: find_references for the search engine file
+    mode: find_references
+    query: internal/search/engine.go
+    subsets: [quick, full, mode:find_references]
+    holdout: false
+    source: task-gra12
+    expected:
+      - source_path: internal/search/engine.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: related
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: The search engine file exposes its chunk membership evidence.
+    metadata: {owner_task: TASK-GRA12, kind: file}
+
+  - id: GRA12-FR-Q03
+    name: find_references for the eval runner file
+    mode: find_references
+    query: internal/eval/runner.go
+    subsets: [quick, full, mode:find_references]
+    holdout: false
+    source: task-gra12
+    expected:
+      - source_path: internal/eval/runner.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: related
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: The eval runner file returns its chunk evidence.
+    metadata: {owner_task: TASK-GRA12, kind: file}
+
+  - id: GRA12-FR-Q04
+    name: find_references for the graph SQLite repository file
+    mode: find_references
+    query: internal/graph/sqlite.go
+    subsets: [quick, full, mode:find_references]
+    holdout: false
+    source: task-gra12
+    expected:
+      - source_path: internal/graph/sqlite.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: related
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: The graph repository file returns its chunk evidence.
+    metadata: {owner_task: TASK-GRA12, kind: file}
+
+  - id: GRA12-FR-Q05
+    name: find_references for the public changelog doc
+    mode: find_references
+    query: docs/changelog.md
+    subsets: [quick, full, mode:find_references]
+    holdout: false
+    source: task-gra12
+    expected:
+      - node_kind: project
+        relation: project_contains_file
+        role: related
+        confidence_label: exact
+        evidence_method: indexed_source_path
+        graph_path_contains: [project_contains_file]
+        rationale: A doc subject is contained by the project node.
+      - node_kind: doc
+        relation: doc_mentions_file
+        role: documented_reference
+        graph_path_contains: [doc_mentions_file]
+        rationale: The changelog is referenced by other docs via markdown links/paths.
+    metadata: {owner_task: TASK-GRA12, kind: doc}
+
+  - id: GRA12-FR-Q06
+    name: find_references for the BM25 store file
+    mode: find_references
+    query: internal/store/bm25.go
+    subsets: [full, mode:find_references]
+    holdout: false
+    source: task-gra12
+    expected:
+      - source_path: internal/store/bm25.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: related
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: The BM25 store file returns its chunk evidence.
+    metadata: {owner_task: TASK-GRA12, kind: file}
+
+  - id: GRA12-FR-Q07
+    name: find_references for the MCP server file
+    mode: find_references
+    query: internal/mcp/server.go
+    subsets: [full, mode:find_references]
+    holdout: false
+    source: task-gra12
+    expected:
+      - source_path: internal/mcp/server.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: related
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: The MCP server file returns its chunk evidence.
+    metadata: {owner_task: TASK-GRA12, kind: file}
+
+  - id: GRA12-FR-Q08
+    name: find_references for the graph extractors file
+    mode: find_references
+    query: internal/graph/extractors.go
+    subsets: [full, mode:find_references]
+    holdout: false
+    source: task-gra12
+    expected:
+      - source_path: internal/graph/extractors.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: related
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: The graph extractors file returns its chunk evidence.
+    metadata: {owner_task: TASK-GRA12, kind: file}
+
+  - id: GRA12-FR-Q09
+    name: find_references for the query metrics telemetry file
+    mode: find_references
+    query: internal/telemetry/query_metrics.go
+    subsets: [full, mode:find_references]
+    holdout: false
+    source: task-gra12
+    expected:
+      - source_path: internal/telemetry/query_metrics.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: related
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: The telemetry file returns its chunk evidence.
+    metadata: {owner_task: TASK-GRA12, kind: file}
+
+  - id: GRA12-FR-Q10
+    name: find_references for the Ollama embedder file
+    mode: find_references
+    query: internal/embed/ollama.go
+    subsets: [full, mode:find_references]
+    holdout: false
+    source: task-gra12
+    expected:
+      - source_path: internal/embed/ollama.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: related
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: The Ollama embedder file returns its chunk evidence.
+    metadata: {owner_task: TASK-GRA12, kind: file}
+
+  - id: GRA12-FR-Q11
+    name: find_references for the graph types file
+    mode: find_references
+    query: internal/graph/types.go
+    subsets: [full, mode:find_references]
+    holdout: false
+    source: task-gra12
+    expected:
+      - source_path: internal/graph/types.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: related
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: The graph types file returns its chunk evidence.
+    metadata: {owner_task: TASK-GRA12, kind: file}
+
+  - id: GRA12-FR-Q12
+    name: find_references for the project README doc
+    mode: find_references
+    query: docs/README.md
+    subsets: [full, mode:find_references]
+    holdout: false
+    source: task-gra12
+    expected:
+      - node_kind: doc
+        relation: doc_mentions_file
+        role: documented_reference
+        confidence_label: high
+        evidence_method: markdown_link_path_reference
+        graph_path_contains: [doc_mentions_file]
+        rationale: The README is referenced by other docs via markdown links.
+      - node_kind: project
+        relation: project_contains_file
+        role: related
+        confidence_label: exact
+        evidence_method: indexed_source_path
+        graph_path_contains: [project_contains_file]
+        rationale: The README is contained by the project node.
+    metadata: {owner_task: TASK-GRA12, kind: doc}
+
+  - id: GRA12-FR-Q13
+    name: find_references for the AI behavior contract doc
+    mode: find_references
+    query: CLAUDE.md
+    subsets: [full, mode:find_references]
+    holdout: false
+    source: task-gra12
+    expected:
+      - node_kind: doc
+        relation: doc_mentions_file
+        role: documented_reference
+        graph_path_contains: [doc_mentions_file]
+        rationale: CLAUDE.md is referenced across PM and decision docs.
+      - node_kind: project
+        relation: project_contains_file
+        role: related
+        confidence_label: exact
+        evidence_method: indexed_source_path
+        graph_path_contains: [project_contains_file]
+        rationale: CLAUDE.md is contained by the project node.
+    metadata: {owner_task: TASK-GRA12, kind: doc}
+
+  - id: GRA12-FR-Q14
+    name: find_references for the build Makefile
+    mode: find_references
+    query: Makefile
+    subsets: [full, mode:find_references]
+    holdout: false
+    source: task-gra12
+    expected:
+      - node_kind: doc
+        relation: doc_mentions_file
+        role: documented_reference
+        graph_path_contains: [doc_mentions_file]
+        rationale: The Makefile is referenced by planning and feature docs.
+      - node_kind: project
+        relation: project_contains_file
+        role: related
+        confidence_label: exact
+        evidence_method: indexed_source_path
+        graph_path_contains: [project_contains_file]
+        rationale: The Makefile is contained by the project node.
+    metadata: {owner_task: TASK-GRA12, kind: config}
+
+  - id: GRA12-FR-Q15
+    name: find_references for the graph service file
+    mode: find_references
+    query: internal/graph/service.go
+    subsets: [full, mode:find_references]
+    holdout: false
+    source: task-gra12
+    expected:
+      - source_path: internal/graph/service.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: related
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: The graph service file returns its chunk evidence.
+    metadata: {owner_task: TASK-GRA12, kind: file}
+
+  - id: GRA12-FR-Q16
+    name: find_references for a YAML config file (config-key evidence)
+    mode: find_references
+    query: .golangci.yml
+    subsets: [quick, full, mode:find_references]
+    holdout: false
+    source: task-gra12
+    expected:
+      - source_path: .golangci.yml
+        node_kind: config_key
+        relation: file_defines_config_key
+        role: related
+        confidence_label: high
+        evidence_method: yaml_config_key_parse
+        graph_path_contains: [file_defines_config_key]
+        rationale: find_references on a YAML config file returns the config keys it defines.
+      - source_path: .golangci.yml
+        node_kind: project
+        relation: project_contains_file
+        role: related
+        confidence_label: exact
+        evidence_method: indexed_source_path
+        graph_path_contains: [project_contains_file]
+        rationale: The config file is contained by the project node.
+    metadata: {owner_task: TASK-GRA12, kind: config-key}
+
+  - id: GRA12-FR-Q17
+    name: find_references for a package import path (importer files)
+    mode: find_references
+    query: github.com/Aman-CERP/amanmcp/internal/config
+    subsets: [quick, full, mode:find_references]
+    holdout: false
+    source: task-gra12
+    expected:
+      - node_kind: file
+        relation: file_imports
+        role: related
+        confidence_label: high
+        evidence_method: go_import_declaration
+        graph_path_contains: [file_imports]
+        rationale: find_references on an import path returns the files that import that package.
+    metadata: {owner_task: TASK-GRA12, kind: import}
+
+  - id: GRA12-FR-Q18
+    name: find_references for the graph package import path (file and test importers)
+    mode: find_references
+    query: github.com/Aman-CERP/amanmcp/internal/graph
+    subsets: [full, mode:find_references]
+    holdout: false
+    source: task-gra12
+    expected:
+      - relation: file_imports
+        role: related
+        confidence_label: high
+        evidence_method: go_import_declaration
+        graph_path_contains: [file_imports]
+        rationale: Both implementation files and test files that import the graph package are returned (node_kind file and test_file).
+    metadata: {owner_task: TASK-GRA12, kind: import}
+
+  - id: GRA12-FR-Q19
+    name: find_references for the version package file (mixed evidence)
+    mode: find_references
+    query: pkg/version/version.go
+    subsets: [full, mode:find_references]
+    holdout: false
+    source: task-gra12
+    expected:
+      - source_path: pkg/version/version.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: related
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: The version file's own symbol chunks dominate its references.
+      - source_path: pkg/version/version.go
+        node_kind: package
+        relation: file_declares_package
+        role: related
+        confidence_label: exact
+        evidence_method: go_package_declaration
+        graph_path_contains: [file_declares_package]
+        rationale: The file declares its package; precision below 1.0 reflects the additional import/project rows not labeled here.
+    metadata: {owner_task: TASK-GRA12, kind: file, note: mixed-evidence precision case}
+
+  - id: GRA12-FR-Q20
+    name: find_references for the CLI entrypoint (multi-relation evidence)
+    mode: find_references
+    query: cmd/amanmcp/main.go
+    subsets: [full, mode:find_references]
+    holdout: false
+    source: task-gra12
+    expected:
+      - source_path: cmd/amanmcp/main.go
+        node_kind: import
+        relation: file_imports
+        role: related
+        confidence_label: high
+        evidence_method: go_import_declaration
+        graph_path_contains: [file_imports]
+        rationale: The entrypoint's imports are returned.
+      - source_path: cmd/amanmcp/main.go
+        node_kind: symbol
+        relation: file_defines_symbol
+        role: related
+        confidence_label: high
+        evidence_method: chunk_symbol
+        graph_path_contains: [file_defines_symbol]
+        rationale: The entrypoint defines main(), surfaced via file_defines_symbol.
+      - source_path: cmd/amanmcp/main.go
+        node_kind: package
+        relation: file_declares_package
+        role: related
+        confidence_label: exact
+        evidence_method: go_package_declaration
+        graph_path_contains: [file_declares_package]
+        rationale: The entrypoint declares package main.
+    metadata: {owner_task: TASK-GRA12, kind: file, note: multi-relation precision case}
+
+  - id: GRA12-FR-DEG01
+    name: find_references degraded zero-result for an un-indexed subject
+    mode: find_references
+    query: internal/zzz_absent_eval_subject.go
+    subsets: [full, mode:find_references]
+    holdout: false
+    source: task-gra12
+    expectation_class: degraded
+    expected:
+      - node_kind: chunk
+        relation: symbol_has_chunk
+        role: related
+        graph_path_contains: [symbol_has_chunk]
+        rationale: A path with no graph node yields zero results; reported separately from relevance quality, not counted as a quality failure.
+    metadata: {owner_task: TASK-GRA12, kind: degraded, note: zero-result subject}
+
+  # ===========================================================================
+  # TASK-GRA13: explain_symbol
+  # ===========================================================================
+  - id: GRA13-ES-Q01
+    name: explain_symbol for the NewQueryService constructor
+    mode: explain_symbol
+    query: NewQueryService
+    subsets: [quick, full, mode:explain_symbol]
+    holdout: false
+    source: task-gra13
+    expected:
+      - source_path: internal/graph/query.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: symbol_context
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: The constructor's symbol-context chunk anchors its definition file.
+      - source_path: internal/graph/query.go
+        node_kind: file
+        relation: file_defines_symbol
+        role: symbol_context
+        confidence_label: high
+        evidence_method: chunk_symbol
+        graph_path_contains: [file_defines_symbol]
+        rationale: The defining file is surfaced via file_defines_symbol.
+    metadata: {owner_task: TASK-GRA13, kind: function}
+
+  - id: GRA13-ES-Q02
+    name: explain_symbol for the QueryResult type
+    mode: explain_symbol
+    query: QueryResult
+    subsets: [quick, full, mode:explain_symbol]
+    holdout: false
+    source: task-gra13
+    expected:
+      - node_kind: chunk
+        relation: symbol_has_chunk
+        role: symbol_context
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: explain_symbol returns symbol-context chunk evidence for the QueryResult type across its definitions.
+    metadata: {owner_task: TASK-GRA13, kind: type}
+
+  - id: GRA13-ES-Q03
+    name: explain_symbol for the EdgeKind type
+    mode: explain_symbol
+    query: EdgeKind
+    subsets: [quick, full, mode:explain_symbol]
+    holdout: false
+    source: task-gra13
+    expected:
+      - source_path: internal/graph/types.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: symbol_context
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: EdgeKind's symbol-context chunk anchors its definition file.
+      - source_path: internal/graph/types.go
+        node_kind: file
+        relation: file_defines_symbol
+        role: symbol_context
+        confidence_label: high
+        evidence_method: chunk_symbol
+        graph_path_contains: [file_defines_symbol]
+        rationale: The defining file is surfaced via file_defines_symbol.
+      - node_kind: doc
+        relation: doc_mentions_symbol
+        role: symbol_context
+        confidence_label: medium
+        evidence_method: markdown_inline_symbol_reference
+        graph_path_contains: [doc_mentions_symbol]
+        rationale: EdgeKind is referenced in architecture decision docs via doc_mentions_symbol.
+    metadata: {owner_task: TASK-GRA13, kind: type, note: mixed-evidence symbol}
+
+  - id: GRA13-ES-Q04
+    name: explain_symbol for the NewEngine constructor
+    mode: explain_symbol
+    query: NewEngine
+    subsets: [quick, full, mode:explain_symbol]
+    holdout: false
+    source: task-gra13
+    expected:
+      - node_kind: chunk
+        relation: symbol_has_chunk
+        role: symbol_context
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: NewEngine returns symbol-context chunk evidence for the search engine constructor.
+    metadata: {owner_task: TASK-GRA13, kind: function}
+
+  - id: GRA13-ES-Q05
+    name: explain_symbol for the ConfidenceLabel type
+    mode: explain_symbol
+    query: ConfidenceLabel
+    subsets: [quick, full, mode:explain_symbol]
+    holdout: false
+    source: task-gra13
+    expected:
+      - node_kind: chunk
+        relation: symbol_has_chunk
+        role: symbol_context
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: ConfidenceLabel returns symbol-context chunk evidence across its uses and definition.
+    metadata: {owner_task: TASK-GRA13, kind: type}
+
+  - id: GRA13-ES-Q06
+    name: explain_symbol for the matchingNodes function
+    mode: explain_symbol
+    query: matchingNodes
+    subsets: [full, mode:explain_symbol]
+    holdout: false
+    source: task-gra13
+    expected:
+      - source_path: internal/graph/query.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: symbol_context
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: matchingNodes' symbol-context chunk anchors its definition file.
+      - source_path: internal/graph/query.go
+        node_kind: file
+        relation: file_defines_symbol
+        role: symbol_context
+        confidence_label: high
+        evidence_method: chunk_symbol
+        graph_path_contains: [file_defines_symbol]
+        rationale: The defining file is surfaced via file_defines_symbol.
+    metadata: {owner_task: TASK-GRA13, kind: function}
+
+  - id: GRA13-ES-Q07
+    name: explain_symbol for the relatedResults function
+    mode: explain_symbol
+    query: relatedResults
+    subsets: [full, mode:explain_symbol]
+    holdout: false
+    source: task-gra13
+    expected:
+      - source_path: internal/graph/query.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: symbol_context
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: relatedResults' symbol-context chunk anchors its definition file.
+      - source_path: internal/graph/query.go
+        node_kind: file
+        relation: file_defines_symbol
+        role: symbol_context
+        confidence_label: high
+        evidence_method: chunk_symbol
+        graph_path_contains: [file_defines_symbol]
+        rationale: The defining file is surfaced via file_defines_symbol.
+    metadata: {owner_task: TASK-GRA13, kind: function}
+
+  - id: GRA13-ES-Q08
+    name: explain_symbol for the roleFor function
+    mode: explain_symbol
+    query: roleFor
+    subsets: [full, mode:explain_symbol]
+    holdout: false
+    source: task-gra13
+    expected:
+      - source_path: internal/graph/query.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: symbol_context
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: roleFor's symbol-context chunk anchors its definition file.
+      - source_path: internal/graph/query.go
+        node_kind: file
+        relation: file_defines_symbol
+        role: symbol_context
+        confidence_label: high
+        evidence_method: chunk_symbol
+        graph_path_contains: [file_defines_symbol]
+        rationale: The defining file is surfaced via file_defines_symbol.
+    metadata: {owner_task: TASK-GRA13, kind: function}
+
+  - id: GRA13-ES-Q09
+    name: explain_symbol for the SQLiteRepository type
+    mode: explain_symbol
+    query: SQLiteRepository
+    subsets: [full, mode:explain_symbol]
+    holdout: false
+    source: task-gra13
+    expected:
+      - node_kind: chunk
+        relation: symbol_has_chunk
+        role: symbol_context
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: SQLiteRepository returns symbol-context chunk evidence across its uses and definition.
+    metadata: {owner_task: TASK-GRA13, kind: type}
+
+  - id: GRA13-ES-Q10
+    name: explain_symbol for the parseGoImports function
+    mode: explain_symbol
+    query: parseGoImports
+    subsets: [full, mode:explain_symbol]
+    holdout: false
+    source: task-gra13
+    expected:
+      - source_path: internal/graph/extractors.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: symbol_context
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: parseGoImports' symbol-context chunk anchors its definition file.
+      - source_path: internal/graph/extractors.go
+        node_kind: file
+        relation: file_defines_symbol
+        role: symbol_context
+        confidence_label: high
+        evidence_method: chunk_symbol
+        graph_path_contains: [file_defines_symbol]
+        rationale: The defining file is surfaced via file_defines_symbol.
+    metadata: {owner_task: TASK-GRA13, kind: function}
+
+  - id: GRA13-ES-Q11
+    name: explain_symbol for the fuseResults function
+    mode: explain_symbol
+    query: fuseResults
+    subsets: [full, mode:explain_symbol]
+    holdout: false
+    source: task-gra13
+    expected:
+      - source_path: internal/search/engine.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: symbol_context
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: fuseResults' symbol-context chunk anchors its definition file.
+      - source_path: internal/search/engine.go
+        node_kind: file
+        relation: file_defines_symbol
+        role: symbol_context
+        confidence_label: high
+        evidence_method: chunk_symbol
+        graph_path_contains: [file_defines_symbol]
+        rationale: The defining file is surfaced via file_defines_symbol.
+    metadata: {owner_task: TASK-GRA13, kind: function}
+
+  - id: GRA13-ES-Q12
+    name: explain_symbol for the Snapshot symbol
+    mode: explain_symbol
+    query: Snapshot
+    subsets: [full, mode:explain_symbol]
+    holdout: false
+    source: task-gra13
+    expected:
+      - node_kind: chunk
+        relation: symbol_has_chunk
+        role: symbol_context
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: Snapshot returns symbol-context chunk evidence across its uses.
+    metadata: {owner_task: TASK-GRA13, kind: method}
+
+  - id: GRA13-ES-Q13
+    name: explain_symbol for the BM25 token symbol
+    mode: explain_symbol
+    query: BM25
+    subsets: [full, mode:explain_symbol]
+    holdout: false
+    source: task-gra13
+    expected:
+      - node_kind: chunk
+        relation: symbol_has_chunk
+        role: symbol_context
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: BM25-named symbols return symbol-context chunk evidence.
+    metadata: {owner_task: TASK-GRA13, kind: domain-token}
+
+  - id: GRA13-ES-Q14
+    name: explain_symbol for the Repository interface
+    mode: explain_symbol
+    query: Repository
+    subsets: [full, mode:explain_symbol]
+    holdout: false
+    source: task-gra13
+    expected:
+      - node_kind: chunk
+        relation: symbol_has_chunk
+        role: symbol_context
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: Repository returns symbol-context chunk evidence across implementations.
+    metadata: {owner_task: TASK-GRA13, kind: interface}
+
+  - id: GRA13-ES-Q15
+    name: explain_symbol for the QueryServiceOptions type
+    mode: explain_symbol
+    query: QueryServiceOptions
+    subsets: [full, mode:explain_symbol]
+    holdout: false
+    source: task-gra13
+    expected:
+      - source_path: internal/graph/query.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: symbol_context
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: QueryServiceOptions' symbol-context chunk anchors its definition file.
+    metadata: {owner_task: TASK-GRA13, kind: type}
+
+  # ===========================================================================
+  # TASK-GRA14: impact_analysis
+  # ===========================================================================
+  - id: GRA14-IA-Q01
+    name: impact_analysis for the graph query file
+    mode: impact_analysis
+    query: internal/graph/query.go
+    subsets: [quick, full, mode:impact_analysis]
+    holdout: false
+    source: task-gra14
+    expected:
+      - source_path: internal/graph/query.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: downstream
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: Direct downstream impact surfaces the file's own symbol-chunk evidence.
+    metadata: {owner_task: TASK-GRA14, kind: file}
+
+  - id: GRA14-IA-Q02
+    name: impact_analysis for the config loader file
+    mode: impact_analysis
+    query: internal/config/config.go
+    subsets: [quick, full, mode:impact_analysis]
+    holdout: false
+    source: task-gra14
+    expected:
+      - source_path: internal/config/config.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: downstream
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: Direct downstream impact surfaces the config file's chunk evidence.
+    metadata: {owner_task: TASK-GRA14, kind: file}
+
+  - id: GRA14-IA-Q03
+    name: impact_analysis for the search engine file
+    mode: impact_analysis
+    query: internal/search/engine.go
+    subsets: [quick, full, mode:impact_analysis]
+    holdout: false
+    source: task-gra14
+    expected:
+      - source_path: internal/search/engine.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: downstream
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: Direct downstream impact surfaces the search engine file's chunk evidence.
+    metadata: {owner_task: TASK-GRA14, kind: file}
+
+  - id: GRA14-IA-Q04
+    name: impact_analysis for the QueryService symbol
+    mode: impact_analysis
+    query: QueryService
+    subsets: [quick, full, mode:impact_analysis]
+    holdout: false
+    source: task-gra14
+    expected:
+      - source_path: internal/graph/query.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: downstream
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: Direct downstream impact for QueryService surfaces its symbol-chunk evidence.
+    metadata: {owner_task: TASK-GRA14, kind: symbol}
+
+  - id: GRA14-IA-Q05
+    name: impact_analysis for the graph extractors file
+    mode: impact_analysis
+    query: internal/graph/extractors.go
+    subsets: [quick, full, mode:impact_analysis]
+    holdout: false
+    source: task-gra14
+    expected:
+      - source_path: internal/graph/extractors.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: downstream
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: Direct downstream impact surfaces the extractors file's chunk evidence.
+    metadata: {owner_task: TASK-GRA14, kind: file}
+
+  - id: GRA14-IA-Q06
+    name: impact_analysis for the eval runner file
+    mode: impact_analysis
+    query: internal/eval/runner.go
+    subsets: [full, mode:impact_analysis]
+    holdout: false
+    source: task-gra14
+    expected:
+      - source_path: internal/eval/runner.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: downstream
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: Direct downstream impact surfaces the eval runner file's chunk evidence.
+    metadata: {owner_task: TASK-GRA14, kind: file}
+
+  - id: GRA14-IA-Q07
+    name: impact_analysis for the MCP server file
+    mode: impact_analysis
+    query: internal/mcp/server.go
+    subsets: [full, mode:impact_analysis]
+    holdout: false
+    source: task-gra14
+    expected:
+      - source_path: internal/mcp/server.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: downstream
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: Direct downstream impact surfaces the MCP server file's chunk evidence.
+    metadata: {owner_task: TASK-GRA14, kind: file}
+
+  - id: GRA14-IA-Q08
+    name: impact_analysis for the BM25 store file
+    mode: impact_analysis
+    query: internal/store/bm25.go
+    subsets: [full, mode:impact_analysis]
+    holdout: false
+    source: task-gra14
+    expected:
+      - source_path: internal/store/bm25.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: downstream
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: Direct downstream impact surfaces the BM25 store file's chunk evidence.
+    metadata: {owner_task: TASK-GRA14, kind: file}
+
+  - id: GRA14-IA-Q09
+    name: impact_analysis for the graph repository file
+    mode: impact_analysis
+    query: internal/graph/sqlite.go
+    subsets: [full, mode:impact_analysis]
+    holdout: false
+    source: task-gra14
+    expected:
+      - source_path: internal/graph/sqlite.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: downstream
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: Direct downstream impact surfaces the graph repository file's chunk evidence.
+    metadata: {owner_task: TASK-GRA14, kind: file}
+
+  - id: GRA14-IA-Q10
+    name: impact_analysis for the telemetry metrics file
+    mode: impact_analysis
+    query: internal/telemetry/query_metrics.go
+    subsets: [full, mode:impact_analysis]
+    holdout: false
+    source: task-gra14
+    expected:
+      - source_path: internal/telemetry/query_metrics.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: downstream
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: Direct downstream impact surfaces the telemetry file's chunk evidence.
+    metadata: {owner_task: TASK-GRA14, kind: file}
+
+  - id: GRA14-IA-Q11
+    name: impact_analysis for the Ollama embedder file
+    mode: impact_analysis
+    query: internal/embed/ollama.go
+    subsets: [full, mode:impact_analysis]
+    holdout: false
+    source: task-gra14
+    expected:
+      - source_path: internal/embed/ollama.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: downstream
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: Direct downstream impact surfaces the Ollama embedder file's chunk evidence.
+    metadata: {owner_task: TASK-GRA14, kind: file}
+
+  - id: GRA14-IA-Q12
+    name: impact_analysis for the graph types file
+    mode: impact_analysis
+    query: internal/graph/types.go
+    subsets: [full, mode:impact_analysis]
+    holdout: false
+    source: task-gra14
+    expected:
+      - source_path: internal/graph/types.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: downstream
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: Direct downstream impact surfaces the graph types file's chunk evidence.
+    metadata: {owner_task: TASK-GRA14, kind: file}
+
+  - id: GRA14-IA-Q13
+    name: impact_analysis for the NewEngine constructor
+    mode: impact_analysis
+    query: NewEngine
+    subsets: [full, mode:impact_analysis]
+    holdout: false
+    source: task-gra14
+    expected:
+      - source_path: internal/search/engine.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: downstream
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: Direct downstream impact for NewEngine surfaces its symbol-chunk evidence.
+    metadata: {owner_task: TASK-GRA14, kind: symbol}
+
+  - id: GRA14-IA-Q14
+    name: impact_analysis for the graph service file
+    mode: impact_analysis
+    query: internal/graph/service.go
+    subsets: [full, mode:impact_analysis]
+    holdout: false
+    source: task-gra14
+    expected:
+      - source_path: internal/graph/service.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: downstream
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: Direct downstream impact surfaces the graph service file's chunk evidence.
+    metadata: {owner_task: TASK-GRA14, kind: file}
+
+  - id: GRA14-IA-Q15
+    name: impact_analysis for the chunk treesitter package path
+    mode: impact_analysis
+    query: internal/chunk
+    subsets: [full, mode:impact_analysis]
+    holdout: false
+    source: task-gra14
+    expected:
+      - node_kind: chunk
+        relation: symbol_has_chunk
+        role: downstream
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: A package-path subject surfaces direct downstream chunk evidence for files under it.
+    metadata: {owner_task: TASK-GRA14, kind: package}
+
+  - id: GRA14-IA-Q16
+    name: impact_analysis for the config package path (package evidence)
+    mode: impact_analysis
+    query: internal/config
+    subsets: [full, mode:impact_analysis]
+    holdout: false
+    source: task-gra14
+    expected:
+      - node_kind: chunk
+        relation: symbol_has_chunk
+        role: downstream
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: Direct downstream impact for the config package surfaces its files' chunk evidence.
+      - node_kind: package
+        relation: file_declares_package
+        role: downstream
+        confidence_label: exact
+        evidence_method: go_package_declaration
+        graph_path_contains: [file_declares_package]
+        rationale: The package-declaration edge is a direct downstream relation for the config package files.
+    metadata: {owner_task: TASK-GRA14, kind: package}
+
+  - id: GRA14-IA-GAP01
+    name: impact_analysis gap for reverse test-coverage impact
+    mode: impact_analysis
+    query: internal/graph/query.go
+    subsets: [full, mode:impact_analysis]
+    holdout: false
+    source: task-gra14
+    expectation_class: gap
+    expected:
+      - node_kind: test_file
+        relation: test_covers_implementation
+        role: downstream
+        graph_path_contains: [test_covers_implementation]
+        rationale: Reverse impact (the test that covers this file) is not surfaced by current outgoing-only traversal; documented as a FEAT-GRA3/FEAT-GRA4 gap, excluded from relevance quality.
+    metadata: {owner_task: TASK-GRA14, kind: gap, future: FEAT-GRA3}

@@ -15,6 +15,37 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const DefaultEvalGraphBlockingDegradationThreshold = 0.10
+
+// Default per-mode relevance floors for the direct graph eval gate
+// (TASK-GRA12/13/14). find_references is gated on recall@10 and precision@10;
+// explain_symbol on top-3 definition/context hit rate; impact_analysis on
+// top-10 direct-impact hit rate.
+const (
+	DefaultEvalGraphFindReferencesMinRecallAt10    = 0.75
+	DefaultEvalGraphFindReferencesMinPrecisionAt10 = 0.70
+	DefaultEvalGraphExplainSymbolMinHitRateAt3     = 0.80
+	DefaultEvalGraphImpactAnalysisMinHitRateAt10   = 0.70
+)
+
+// DefaultGraphEvalModeThresholds returns the built-in per-mode relevance floors.
+// It is the single source of the mode->active-floor wiring so the config
+// constructor and the eval runner default cannot structurally drift.
+func DefaultGraphEvalModeThresholds() GraphEvalModeThresholds {
+	return GraphEvalModeThresholds{
+		FindReferences: GraphEvalModeThreshold{
+			MinExpectedRecallAt10: DefaultEvalGraphFindReferencesMinRecallAt10,
+			MinPrecisionAt10:      DefaultEvalGraphFindReferencesMinPrecisionAt10,
+		},
+		ExplainSymbol: GraphEvalModeThreshold{
+			MinHitRateAt3: DefaultEvalGraphExplainSymbolMinHitRateAt3,
+		},
+		ImpactAnalysis: GraphEvalModeThreshold{
+			MinHitRateAt10: DefaultEvalGraphImpactAnalysisMinHitRateAt10,
+		},
+	}
+}
+
 // ProjectType represents the type of project detected.
 type ProjectType string
 
@@ -38,6 +69,7 @@ type Config struct {
 	Submodules  SubmoduleConfig   `yaml:"submodules" json:"submodules"`
 	Sessions    SessionsConfig    `yaml:"sessions" json:"sessions"`
 	Compaction  CompactionConfig  `yaml:"compaction" json:"compaction"`
+	Eval        EvalConfig        `yaml:"eval" json:"eval"`
 }
 
 // PathsConfig configures which paths to include and exclude.
@@ -192,6 +224,36 @@ type CompactionConfig struct {
 	Cooldown string `yaml:"cooldown" json:"cooldown"`
 }
 
+// EvalConfig configures local validation and evaluation gates.
+type EvalConfig struct {
+	Graph GraphEvalConfig `yaml:"graph" json:"graph"`
+}
+
+// GraphEvalConfig configures direct graph.query eval gates.
+type GraphEvalConfig struct {
+	BlockingDegradationThreshold float64                 `yaml:"blocking_degradation_threshold" json:"blocking_degradation_threshold"`
+	Modes                        GraphEvalModeThresholds `yaml:"modes" json:"modes"`
+}
+
+// GraphEvalModeThresholds holds the per-mode relevance floors enforced by the
+// direct graph eval gate (TASK-GRA12/13/14).
+type GraphEvalModeThresholds struct {
+	FindReferences GraphEvalModeThreshold `yaml:"find_references" json:"find_references"`
+	ExplainSymbol  GraphEvalModeThreshold `yaml:"explain_symbol" json:"explain_symbol"`
+	ImpactAnalysis GraphEvalModeThreshold `yaml:"impact_analysis" json:"impact_analysis"`
+}
+
+// GraphEvalModeThreshold is the set of relevance floors for one graph query
+// mode. A zero field means "not enforced for this mode"; only the floors that
+// match a mode's metric (e.g. recall+precision for find_references, hit@3 for
+// explain_symbol, hit@10 for impact_analysis) are populated by default.
+type GraphEvalModeThreshold struct {
+	MinExpectedRecallAt10 float64 `yaml:"min_expected_recall_at_10,omitempty" json:"min_expected_recall_at_10,omitempty"`
+	MinPrecisionAt10      float64 `yaml:"min_precision_at_10,omitempty" json:"min_precision_at_10,omitempty"`
+	MinHitRateAt3         float64 `yaml:"min_hit_rate_at_3,omitempty" json:"min_hit_rate_at_3,omitempty"`
+	MinHitRateAt10        float64 `yaml:"min_hit_rate_at_10,omitempty" json:"min_hit_rate_at_10,omitempty"`
+}
+
 // ContextualConfig configures CR-1 Contextual Retrieval.
 // Uses LLM to generate context for chunks at index time.
 // See: https://www.anthropic.com/news/contextual-retrieval
@@ -300,6 +362,12 @@ func NewConfig() *Config {
 			MinOrphanCount:  100,   // Skip small indexes
 			IdleTimeout:     "30s", // Wait 30s without searches
 			Cooldown:        "1h",  // At most once per hour per project
+		},
+		Eval: EvalConfig{
+			Graph: GraphEvalConfig{
+				BlockingDegradationThreshold: DefaultEvalGraphBlockingDegradationThreshold,
+				Modes:                        DefaultGraphEvalModeThresholds(),
+			},
 		},
 		Contextual: ContextualConfig{
 			Enabled:      true,         // CR-1: Enabled by default for 67% error reduction
@@ -597,6 +665,31 @@ func (c *Config) mergeWith(other *Config) {
 	if other.Compaction.Cooldown != "" {
 		c.Compaction.Cooldown = other.Compaction.Cooldown
 	}
+
+	// Eval
+	if other.Eval.Graph.BlockingDegradationThreshold != 0 {
+		c.Eval.Graph.BlockingDegradationThreshold = other.Eval.Graph.BlockingDegradationThreshold
+	}
+	mergeGraphEvalModeThreshold(&c.Eval.Graph.Modes.FindReferences, other.Eval.Graph.Modes.FindReferences)
+	mergeGraphEvalModeThreshold(&c.Eval.Graph.Modes.ExplainSymbol, other.Eval.Graph.Modes.ExplainSymbol)
+	mergeGraphEvalModeThreshold(&c.Eval.Graph.Modes.ImpactAnalysis, other.Eval.Graph.Modes.ImpactAnalysis)
+}
+
+// mergeGraphEvalModeThreshold overlays non-zero per-mode threshold overrides so
+// an override of one floor preserves the defaults for the others.
+func mergeGraphEvalModeThreshold(base *GraphEvalModeThreshold, other GraphEvalModeThreshold) {
+	if other.MinExpectedRecallAt10 != 0 {
+		base.MinExpectedRecallAt10 = other.MinExpectedRecallAt10
+	}
+	if other.MinPrecisionAt10 != 0 {
+		base.MinPrecisionAt10 = other.MinPrecisionAt10
+	}
+	if other.MinHitRateAt3 != 0 {
+		base.MinHitRateAt3 = other.MinHitRateAt3
+	}
+	if other.MinHitRateAt10 != 0 {
+		base.MinHitRateAt10 = other.MinHitRateAt10
+	}
 }
 
 func appendUniqueStrings(base []string, values ...string) []string {
@@ -619,6 +712,34 @@ func validateRerankerPolicy(policy string) error {
 	default:
 		return fmt.Errorf("search.reranker.policy must be one of 'auto', 'always', or 'never', got %q", policy)
 	}
+}
+
+// validateGraphEvalModeThresholds checks that every populated per-mode relevance
+// floor is in (0, 1]. A zero floor means "not enforced" and is allowed.
+func validateGraphEvalModeThresholds(modes GraphEvalModeThresholds) error {
+	checks := []struct {
+		path  string
+		value float64
+	}{
+		{"eval.graph.modes.find_references.min_expected_recall_at_10", modes.FindReferences.MinExpectedRecallAt10},
+		{"eval.graph.modes.find_references.min_precision_at_10", modes.FindReferences.MinPrecisionAt10},
+		{"eval.graph.modes.find_references.min_hit_rate_at_3", modes.FindReferences.MinHitRateAt3},
+		{"eval.graph.modes.find_references.min_hit_rate_at_10", modes.FindReferences.MinHitRateAt10},
+		{"eval.graph.modes.explain_symbol.min_expected_recall_at_10", modes.ExplainSymbol.MinExpectedRecallAt10},
+		{"eval.graph.modes.explain_symbol.min_precision_at_10", modes.ExplainSymbol.MinPrecisionAt10},
+		{"eval.graph.modes.explain_symbol.min_hit_rate_at_3", modes.ExplainSymbol.MinHitRateAt3},
+		{"eval.graph.modes.explain_symbol.min_hit_rate_at_10", modes.ExplainSymbol.MinHitRateAt10},
+		{"eval.graph.modes.impact_analysis.min_expected_recall_at_10", modes.ImpactAnalysis.MinExpectedRecallAt10},
+		{"eval.graph.modes.impact_analysis.min_precision_at_10", modes.ImpactAnalysis.MinPrecisionAt10},
+		{"eval.graph.modes.impact_analysis.min_hit_rate_at_3", modes.ImpactAnalysis.MinHitRateAt3},
+		{"eval.graph.modes.impact_analysis.min_hit_rate_at_10", modes.ImpactAnalysis.MinHitRateAt10},
+	}
+	for _, check := range checks {
+		if check.value < 0 || check.value > 1 {
+			return fmt.Errorf("%s must be between 0 and 1, got %f", check.path, check.value)
+		}
+	}
+	return nil
 }
 
 // applyEnvOverrides applies AMANMCP_* environment variable overrides.
@@ -678,6 +799,11 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("AMANMCP_COMPACTION_COOLDOWN"); v != "" {
 		c.Compaction.Cooldown = v
+	}
+	if v := os.Getenv("AMANMCP_EVAL_GRAPH_BLOCKING_DEGRADATION_THRESHOLD"); v != "" {
+		if threshold, err := parseFloat64(v); err == nil && threshold > 0 && threshold <= 1 {
+			c.Eval.Graph.BlockingDegradationThreshold = threshold
+		}
 	}
 }
 
@@ -877,6 +1003,13 @@ func (c *Config) Validate() error {
 	}
 	c.Search.Languages = normalizedLanguages
 	if err := validateRerankerPolicy(c.Search.Reranker.Policy); err != nil {
+		return err
+	}
+	if c.Eval.Graph.BlockingDegradationThreshold <= 0 || c.Eval.Graph.BlockingDegradationThreshold > 1 {
+		return fmt.Errorf("eval.graph.blocking_degradation_threshold must be greater than 0 and at most 1, got %f",
+			c.Eval.Graph.BlockingDegradationThreshold)
+	}
+	if err := validateGraphEvalModeThresholds(c.Eval.Graph.Modes); err != nil {
 		return err
 	}
 

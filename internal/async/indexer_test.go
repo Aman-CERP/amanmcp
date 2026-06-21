@@ -35,8 +35,15 @@ func TestBackgroundIndexer_Start_RunsInGoroutine(t *testing.T) {
 	indexer := NewBackgroundIndexer(cfg)
 
 	var started atomic.Bool
+	// release holds the background run open so the running state is observable
+	// deterministically. Without it the trivial task can complete (flipping
+	// running back to false via run()'s deferred cleanup) before the assertion
+	// runs, which made this test flaky under the race detector / a slow
+	// scheduler. See BUG-079.
+	release := make(chan struct{})
 	indexer.IndexFunc = func(ctx context.Context, progress *IndexProgress) error {
 		started.Store(true)
+		<-release
 		return nil
 	}
 
@@ -47,7 +54,8 @@ func TestBackgroundIndexer_Start_RunsInGoroutine(t *testing.T) {
 	// Then: should run in background
 	assert.True(t, indexer.IsRunning())
 
-	// Wait for completion
+	// Allow the background run to complete, then wait for it.
+	close(release)
 	err := indexer.Wait()
 	require.NoError(t, err)
 	assert.True(t, started.Load())
@@ -61,10 +69,15 @@ func TestBackgroundIndexer_Progress_UpdatesDuringRun(t *testing.T) {
 	}
 	indexer := NewBackgroundIndexer(cfg)
 
+	// midRun/release synchronize the assertion with the in-flight run instead of
+	// relying on fixed sleeps, which is timing-flaky (see BUG-079).
+	midRun := make(chan struct{})
+	release := make(chan struct{})
 	indexer.IndexFunc = func(ctx context.Context, progress *IndexProgress) error {
 		progress.SetStage(StageScanning, 100)
 		progress.UpdateFiles(50)
-		time.Sleep(10 * time.Millisecond)
+		close(midRun)
+		<-release
 		progress.SetStage(StageChunking, 100)
 		progress.UpdateFiles(100)
 		return nil
@@ -74,9 +87,10 @@ func TestBackgroundIndexer_Progress_UpdatesDuringRun(t *testing.T) {
 	ctx := context.Background()
 	indexer.Start(ctx)
 
-	// Check progress during run
-	time.Sleep(5 * time.Millisecond)
+	// Check progress while the run is deterministically held open.
+	<-midRun
 	assert.True(t, indexer.IsRunning())
+	close(release)
 
 	// Wait for completion
 	err := indexer.Wait()

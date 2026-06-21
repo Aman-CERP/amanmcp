@@ -2,12 +2,22 @@ package graph
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 )
+
+// ErrInvalidQueryParams is the typed sentinel for graph.query input-validation
+// rejections (missing/oversized/unsafe params). Every validateQueryRequest error
+// wraps it so callers — notably the eval degradation classifier — can use
+// errors.Is instead of matching on message text that can silently drift
+// (DEBT-037 finding #3). It marks an authoring/config failure, never an
+// infrastructure failure; infra errors (status/node/edge reads) are wrapped
+// with their own context and never wrap this sentinel.
+var ErrInvalidQueryParams = errors.New("invalid graph query params")
 
 const (
 	QueryModeFindReferences = "find_references"
@@ -177,24 +187,24 @@ func (s *QueryService) Query(ctx context.Context, req QueryRequest) (QueryRespon
 
 func validateQueryRequest(req QueryRequest) error {
 	if strings.TrimSpace(req.ProjectID) == "" {
-		return fmt.Errorf("project_id is required")
+		return fmt.Errorf("project_id is required: %w", ErrInvalidQueryParams)
 	}
 	switch req.Mode {
 	case QueryModeFindReferences, QueryModeExplainSymbol, QueryModeImpactAnalysis:
 	default:
-		return fmt.Errorf("unsupported graph query mode %q", req.Mode)
+		return fmt.Errorf("unsupported graph query mode %q: %w", req.Mode, ErrInvalidQueryParams)
 	}
 	if req.Query == "" {
-		return fmt.Errorf("query is required")
+		return fmt.Errorf("query is required: %w", ErrInvalidQueryParams)
 	}
 	if strings.Contains(req.Query, "\x00") {
-		return fmt.Errorf("query contains unsafe NUL byte")
+		return fmt.Errorf("query contains unsafe NUL byte: %w", ErrInvalidQueryParams)
 	}
 	if filepath.IsAbs(req.Query) || strings.Contains(filepath.ToSlash(req.Query), "../") {
-		return fmt.Errorf("query must be project-relative and safe")
+		return fmt.Errorf("query must be project-relative and safe: %w", ErrInvalidQueryParams)
 	}
 	if req.Limit < 0 || req.Limit > maxGraphQueryLimit {
-		return fmt.Errorf("limit must be between 0 and %d", maxGraphQueryLimit)
+		return fmt.Errorf("limit must be between 0 and %d: %w", maxGraphQueryLimit, ErrInvalidQueryParams)
 	}
 	return nil
 }
@@ -207,8 +217,18 @@ func normalizeQueryMode(mode string) string {
 	return mode
 }
 
-func graphStatusUsable(status GraphStatus) bool {
+// QueryServable reports whether a graph status can serve a real graph.query
+// answer rather than a degraded/empty envelope. It is stricter than
+// QueryAvailable (which still reports available=true for a `failed` build): only
+// fresh, stale, and partial graphs are queried. This is the servability SSOT
+// shared by the query service short-circuit and direct graph eval measurement
+// accounting so the two surfaces cannot drift.
+func QueryServable(status GraphStatus) bool {
 	return status == GraphStatusFresh || status == GraphStatusStale || status == GraphStatusPartial
+}
+
+func graphStatusUsable(status GraphStatus) bool {
+	return QueryServable(status)
 }
 
 func graphStatusDegraded(status GraphStatus) bool {
