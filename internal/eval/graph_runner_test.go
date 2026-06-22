@@ -67,20 +67,20 @@ queries:
 				Relation:        graph.EdgeKindFileDefinesSymbol,
 				ConfidenceLabel: graph.ConfidenceHigh,
 				EvidenceMethod:  "tree_sitter",
-				GraphPath:       []string{"file:internal/graph/query.go", string(graph.EdgeKindFileDefinesSymbol), "symbol:QueryService"},
+				Path:            singleHopGraphPath("file:internal/graph/query.go", string(graph.EdgeKindFileDefinesSymbol), "symbol:QueryService"),
 			}),
 			"GRA-ES-Q01": graphOutput(graph.QueryModeExplainSymbol, "QueryService", graph.GraphStatusFresh, graph.QueryResult{
 				NodeID:     "symbol:QueryService",
 				NodeKind:   graph.NodeKindSymbol,
 				Role:       "symbol_context",
-				GraphPath:  []string{"symbol:QueryService"},
+				Path:       singleHopGraphPath("symbol:QueryService", "", ""),
 				SourcePath: "internal/graph/query.go",
 			}),
 			"GRA-IA-Q01": graphOutput(graph.QueryModeImpactAnalysis, "QueryService", graph.GraphStatusFresh, graph.QueryResult{
-				NodeID:    "file:internal/eval/graph_runner.go",
-				NodeKind:  graph.NodeKindFile,
-				Role:      "downstream",
-				GraphPath: []string{"symbol:QueryService", "file:internal/eval/graph_runner.go"},
+				NodeID:   "file:internal/eval/graph_runner.go",
+				NodeKind: graph.NodeKindFile,
+				Role:     "downstream",
+				Path:     singleHopGraphPath("symbol:QueryService", "", "file:internal/eval/graph_runner.go"),
 			}),
 		},
 	}
@@ -439,6 +439,25 @@ queries:
 			strings.Contains(lowered, "not a database") ||
 			strings.Contains(lowered, "open graph repository"),
 		"error should identify an open/init failure, got: %s", err.Error())
+}
+
+func TestExpandGraphQuerySubjectPlaceholders_ReplacesProjectIDForResultIDOnly(t *testing.T) {
+	resultID := expandGraphQuerySubjectPlaceholders(GraphQuery{
+		ID:          "GRA20-RID",
+		Mode:        graph.QueryModeFindReferences,
+		Query:       "node:symbol:${project_id}:internal/graph/query.go#QueryService:25",
+		SubjectType: graph.SubjectTypeResultID,
+	}, "project-123")
+	assert.Equal(t, "node:symbol:project-123:internal/graph/query.go#QueryService:25", resultID.Query)
+
+	path := expandGraphQuerySubjectPlaceholders(GraphQuery{
+		ID:          "GRA20-PATH",
+		Mode:        graph.QueryModeFindReferences,
+		Query:       "internal/${project_id}/query.go",
+		SubjectType: graph.SubjectTypePath,
+	}, "project-123")
+	assert.Equal(t, "internal/${project_id}/query.go", path.Query,
+		"placeholder expansion is intentionally scoped to result_id graph node ids")
 }
 
 func TestDirectGraphRunner_InvalidParamsErrorIsBlockingDegradation(t *testing.T) {
@@ -1081,7 +1100,7 @@ queries:
     name: healthy quality case
     mode: find_references
     query: good.go
-    subsets: [quick]
+    subsets: [mode:find_references]
     holdout: false
     source: test
     expected:
@@ -1091,7 +1110,7 @@ queries:
     name: degraded probe expected to miss
     mode: find_references
     query: degraded.go
-    subsets: [quick]
+    subsets: [mode:find_references]
     holdout: false
     source: test
     expectation_class: degraded
@@ -1113,7 +1132,7 @@ queries:
 
 	report, err := NewDirectGraphRunner(client).Run(context.Background(), GraphOptions{
 		CorpusPath:       corpusPath,
-		Subset:           GraphSubsetQuick,
+		Subset:           "mode:find_references",
 		Output:           "json",
 		OutDir:           t.TempDir(),
 		FailOnRegression: true,
@@ -1184,6 +1203,126 @@ queries:
 	assert.Contains(t, err.Error(), "disallowed graph status")
 }
 
+func TestDirectGraphRunner_FailsRegressionGateWhenNegativeCoverageMissing(t *testing.T) {
+	corpusPath := writeTempGraphCorpus(t, `
+schema_version: 1
+queries:
+  - id: GRA-QUAL-PASS
+    name: quality anchor
+    mode: explain_symbol
+    query: Anchor
+    subsets: [quick]
+    holdout: false
+    source: test
+    expected:
+      - node_kind: symbol
+        rationale: quality anchor
+`)
+	client := &fakeDirectGraphClient{
+		snapshot: freshGraphSnapshot(),
+		responses: map[string]DirectGraphToolOutput{
+			"GRA-QUAL-PASS": graphOutput(graph.QueryModeExplainSymbol, "Anchor", graph.GraphStatusFresh, graph.QueryResult{
+				NodeKind: graph.NodeKindSymbol,
+				Role:     "symbol_context",
+			}),
+		},
+	}
+
+	report, err := NewDirectGraphRunner(client).Run(context.Background(), GraphOptions{
+		CorpusPath:       corpusPath,
+		Subset:           GraphSubsetQuick,
+		Output:           "json",
+		OutDir:           t.TempDir(),
+		FailOnRegression: true,
+	})
+
+	require.Error(t, err)
+	require.NotNil(t, report)
+	assert.Equal(t, 0, report.Summary.NegativeAdversarialCount)
+	assert.Contains(t, err.Error(), "no negative_adversarial cases")
+}
+
+func TestDirectGraphRunner_FailsRegressionGateOnNegativeAdversarialDrop(t *testing.T) {
+	corpusPath := writeTempGraphCorpus(t, `
+schema_version: 1
+queries:
+  - id: GRA-QUAL-PASS
+    name: quality anchor keeps mode thresholds satisfiable
+    mode: explain_symbol
+    query: Anchor
+    subsets: [quick]
+    holdout: false
+    source: test
+    expected:
+      - node_kind: symbol
+        rationale: quality anchor for mode threshold gate
+  - id: GRA-NEG-PASS
+    name: disambiguation passes
+    mode: explain_symbol
+    query: Ambiguous
+    subsets: [quick]
+    holdout: false
+    source: task-gra26
+    expectation_class: negative_adversarial
+    negative:
+      expected_resolution: disambiguation_required
+      min_candidates: 2
+      max_results: 0
+  - id: GRA-NEG-FAIL
+    name: disambiguation fails when results are fabricated
+    mode: explain_symbol
+    query: AmbiguousToo
+    subsets: [quick]
+    holdout: false
+    source: task-gra26
+    expectation_class: negative_adversarial
+    negative:
+      expected_resolution: disambiguation_required
+      max_results: 0
+`)
+	client := &fakeDirectGraphClient{
+		snapshot: freshGraphSnapshot(),
+		responses: map[string]DirectGraphToolOutput{
+			"GRA-QUAL-PASS": graphOutput(graph.QueryModeExplainSymbol, "Anchor", graph.GraphStatusFresh, graph.QueryResult{
+				NodeKind: graph.NodeKindSymbol,
+				Role:     "symbol_context",
+			}),
+			"GRA-NEG-PASS": {
+				Status:     graph.GraphStatusFresh,
+				Available:  true,
+				Mode:       graph.QueryModeExplainSymbol,
+				Query:      "Ambiguous",
+				Resolution: graph.ResolutionDisambiguationRequired,
+				Candidates: []graph.Candidate{{QualifiedName: "a"}, {QualifiedName: "b"}},
+			},
+			"GRA-NEG-FAIL": graph.NewQueryToolOutput(graph.QueryResponse{
+				Status:     graph.GraphStatusFresh,
+				Mode:       graph.QueryModeExplainSymbol,
+				Query:      "AmbiguousToo",
+				Resolution: graph.ResolutionDisambiguationRequired,
+				Results: []graph.QueryResult{{
+					NodeKind: graph.NodeKindChunk,
+				}},
+			}),
+		},
+	}
+
+	report, err := NewDirectGraphRunner(client).Run(context.Background(), GraphOptions{
+		CorpusPath:       corpusPath,
+		Subset:           GraphSubsetQuick,
+		Output:           "json",
+		OutDir:           t.TempDir(),
+		FailOnRegression: true,
+	})
+
+	require.Error(t, err)
+	require.NotNil(t, report)
+	assert.Equal(t, 2, report.Summary.NegativeAdversarialCount)
+	assert.Equal(t, 1, report.Summary.NegativeAdversarialPassCount)
+	assert.InDelta(t, 0.5, report.Summary.NegativeAdversarialPassRate, 0.001)
+	assert.Contains(t, err.Error(), "negative_adversarial_pass_rate")
+}
+
 func TestDirectGraphToolOutput_UsesMCPAvailableStatusContract(t *testing.T) {
 	tests := []struct {
 		status    graph.GraphStatus
@@ -1207,12 +1346,34 @@ func TestDirectGraphToolOutput_UsesMCPAvailableStatusContract(t *testing.T) {
 	}
 }
 
-func TestGraphPathContains_RequiresExactSegment(t *testing.T) {
-	path := []string{"node:file:internal/a.go", "symbol_has_chunk", "node:chunk:abc"}
+// singleHopGraphPath builds a structured graph.GraphPath equivalent to the legacy
+// flat []string{fromID, relation, toID} fixtures, so corpus graph_path_contains
+// matchers (which target edge kinds and node ids) keep matching post-GRA21. A
+// relation/toID is only attached as a hop when present, mirroring the 1-, 2- and
+// 3-element flat arrays the fixtures used.
+func singleHopGraphPath(fromID, relation, toID string) graph.GraphPath {
+	path := graph.GraphPath{From: graph.GraphNodeEvidence{ID: fromID}}
+	if toID != "" {
+		path.To = graph.GraphNodeEvidence{ID: toID}
+	}
+	if relation != "" || toID != "" {
+		path.Hops = []graph.GraphEvidence{{
+			Node:     graph.GraphNodeEvidence{ID: toID},
+			Relation: relation,
+		}}
+	}
+	return path
+}
 
-	assert.True(t, graphPathContains(path, "symbol_has_chunk"))
-	assert.False(t, graphPathContains(path, "file"))
-	assert.False(t, graphPathContains(path, "chunk"))
+func TestGraphPathContains_MatchesExactNodeAndRelationSegments(t *testing.T) {
+	path := singleHopGraphPath("node:file:internal/a.go", "symbol_has_chunk", "node:chunk:abc")
+
+	assert.True(t, graphPathContains(path, "symbol_has_chunk"), "hop relation (edge kind) matches")
+	assert.True(t, graphPathContains(path, "node:file:internal/a.go"), "seed (From) node id matches")
+	assert.True(t, graphPathContains(path, "node:chunk:abc"), "traversed (To/hop) node id matches")
+	assert.False(t, graphPathContains(path, "file"), "partial segment must not match")
+	assert.False(t, graphPathContains(path, "chunk"), "partial segment must not match")
+	assert.False(t, graphPathContains(path, ""), "empty token never matches")
 }
 
 func TestBriefGraphStatusSnapshot_BoundsExtractorPayload(t *testing.T) {

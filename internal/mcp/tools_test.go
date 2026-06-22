@@ -587,7 +587,7 @@ func TestListTools_ReturnsCoreToolsAfterPMSurfaceSunset(t *testing.T) {
 
 	tools := srv.ListTools()
 
-	assert.Len(t, tools, 5)
+	assert.Len(t, tools, 6)
 
 	// Find tool names
 	names := make(map[string]bool)
@@ -600,9 +600,38 @@ func TestListTools_ReturnsCoreToolsAfterPMSurfaceSunset(t *testing.T) {
 	assert.True(t, names["search_docs"], "missing search_docs tool")
 	assert.True(t, names["index_status"], "missing index_status tool")
 	assert.True(t, names["graph.query"], "missing graph.query tool")
+	assert.True(t, names["expand_context"], "missing expand_context tool")
 
 	sunsetToolName := "pm" + "." + "mutate"
 	assert.False(t, names[sunsetToolName], "sunset PM mutation tool must not be listed after TASK-SUB08")
+}
+
+func TestSDKRegisteredGraphQueryToolDocumentsSubjectTypeExamples(t *testing.T) {
+	var graphToolDescription string
+	for _, tool := range sdkRegisteredTools() {
+		if tool.Name == "graph.query" {
+			graphToolDescription = tool.Description
+			break
+		}
+	}
+	require.NotEmpty(t, graphToolDescription, "graph.query tool must be SDK-registered")
+
+	for _, snippet := range []string{
+		"subject_type",
+		"auto",
+		"path",
+		"symbol",
+		"package",
+		"exact directory",
+		"case-folded",
+		"result_id",
+		`{"subject_type":"path","query":"internal/graph/query.go"}`,
+		`{"subject_type":"symbol","query":"QueryService"}`,
+		`{"subject_type":"package","query":"internal/graph#graph"}`,
+		`{"subject_type":"result_id","query":"node:symbol:project-1:internal/graph/query.go#Query:1"}`,
+	} {
+		assert.Contains(t, graphToolDescription, snippet)
+	}
 }
 
 func TestListTools_LegacyCallToolAdvertisesDeprecationMetadata(t *testing.T) {

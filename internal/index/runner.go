@@ -286,6 +286,18 @@ func (r *Runner) Run(ctx context.Context, cfg RunnerConfig) (*RunnerResult, erro
 		return nil, fmt.Errorf("failed to save files: %w", err)
 	}
 
+	// DEBT-042: replace-by-file. An edited file produces new content-hash chunk IDs,
+	// and SaveChunks/bm25.Index/vector.Add upsert by ID, so the prior generation
+	// would linger — polluting graph rebuild-from-store (the DEBT-041 duplicate
+	// symbol nodes) and BM25/vector search. Remove each (re)indexed file's existing
+	// chunks from the metadata store and the search indices before persisting the
+	// new generation. Skipped on resume, where the stored chunks ARE the current set.
+	if cfg.ResumeFromCheckpoint == 0 {
+		if err := r.replaceIndexedFileChunks(ctx, storeFiles); err != nil {
+			return nil, fmt.Errorf("failed to replace stale file chunks: %w", err)
+		}
+	}
+
 	storeChunks := make([]*store.Chunk, len(allChunks))
 	for i, c := range allChunks {
 		storeChunks[i] = convertChunkToStore(c, storeFiles, now)
@@ -1055,6 +1067,39 @@ func (r *Runner) storeIndexEmbeddingInfo(ctx context.Context) error {
 func hashString(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])[:16]
+}
+
+// replaceIndexedFileChunks removes the prior chunk generation for each file about
+// to be re-indexed, so the stores stay a single source of truth for the current
+// content (DEBT-042). For each file it deletes the existing chunks from the search
+// indices (BM25 + vector, by their stored IDs) and from the metadata chunks table,
+// leaving the file record intact for the subsequent SaveChunks. Files with no prior
+// chunks are a no-op, so first-time indexing is unaffected. This mirrors the
+// coordinator's incremental removeIndexedFile path, which the full index lacked.
+func (r *Runner) replaceIndexedFileChunks(ctx context.Context, files []*store.File) error {
+	for _, file := range files {
+		existing, err := r.metadata.GetChunksByFile(ctx, file.ID)
+		if err != nil {
+			return fmt.Errorf("load existing chunks for %s: %w", file.Path, err)
+		}
+		if len(existing) == 0 {
+			continue
+		}
+		ids := make([]string, len(existing))
+		for i, c := range existing {
+			ids[i] = c.ID
+		}
+		if err := r.bm25.Delete(ctx, ids); err != nil {
+			return fmt.Errorf("delete stale BM25 docs for %s: %w", file.Path, err)
+		}
+		if err := r.vector.Delete(ctx, ids); err != nil {
+			return fmt.Errorf("delete stale vectors for %s: %w", file.Path, err)
+		}
+		if err := r.metadata.DeleteChunksByFile(ctx, file.ID); err != nil {
+			return fmt.Errorf("delete stale chunks for %s: %w", file.Path, err)
+		}
+	}
+	return nil
 }
 
 // convertChunkToStore converts a chunk.Chunk to store.Chunk.

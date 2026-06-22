@@ -70,6 +70,7 @@ type Config struct {
 	Sessions    SessionsConfig    `yaml:"sessions" json:"sessions"`
 	Compaction  CompactionConfig  `yaml:"compaction" json:"compaction"`
 	Eval        EvalConfig        `yaml:"eval" json:"eval"`
+	Graph       GraphConfig       `yaml:"graph" json:"graph"`
 }
 
 // PathsConfig configures which paths to include and exclude.
@@ -368,6 +369,9 @@ func NewConfig() *Config {
 				BlockingDegradationThreshold: DefaultEvalGraphBlockingDegradationThreshold,
 				Modes:                        DefaultGraphEvalModeThresholds(),
 			},
+		},
+		Graph: GraphConfig{
+			Traversal: DefaultGraphTraversalConfig(),
 		},
 		Contextual: ContextualConfig{
 			Enabled:      true,         // CR-1: Enabled by default for 67% error reduction
@@ -673,6 +677,30 @@ func (c *Config) mergeWith(other *Config) {
 	mergeGraphEvalModeThreshold(&c.Eval.Graph.Modes.FindReferences, other.Eval.Graph.Modes.FindReferences)
 	mergeGraphEvalModeThreshold(&c.Eval.Graph.Modes.ExplainSymbol, other.Eval.Graph.Modes.ExplainSymbol)
 	mergeGraphEvalModeThreshold(&c.Eval.Graph.Modes.ImpactAnalysis, other.Eval.Graph.Modes.ImpactAnalysis)
+
+	// Graph traversal budgets
+	mergeGraphTraversalBudget(&c.Graph.Traversal.Policy, other.Graph.Traversal.Policy)
+	mergeGraphTraversalBudget(&c.Graph.Traversal.Modes.FindReferences, other.Graph.Traversal.Modes.FindReferences)
+	mergeGraphTraversalBudget(&c.Graph.Traversal.Modes.ExplainSymbol, other.Graph.Traversal.Modes.ExplainSymbol)
+	mergeGraphTraversalBudget(&c.Graph.Traversal.Modes.ImpactAnalysis, other.Graph.Traversal.Modes.ImpactAnalysis)
+}
+
+func mergeGraphTraversalBudget(base *GraphTraversalBudget, other GraphTraversalBudget) {
+	if other.MaxResults != 0 {
+		base.MaxResults = other.MaxResults
+	}
+	if other.MaxNodes != 0 {
+		base.MaxNodes = other.MaxNodes
+	}
+	if other.MaxPerEdgeKind != 0 {
+		base.MaxPerEdgeKind = other.MaxPerEdgeKind
+	}
+	if other.MaxTokens != 0 {
+		base.MaxTokens = other.MaxTokens
+	}
+	if other.MaxDepth != 0 {
+		base.MaxDepth = other.MaxDepth
+	}
 }
 
 // mergeGraphEvalModeThreshold overlays non-zero per-mode threshold overrides so
@@ -1010,6 +1038,10 @@ func (c *Config) Validate() error {
 			c.Eval.Graph.BlockingDegradationThreshold)
 	}
 	if err := validateGraphEvalModeThresholds(c.Eval.Graph.Modes); err != nil {
+		return err
+	}
+	NormalizeGraphTraversalConfig(&c.Graph.Traversal)
+	if err := ValidateGraphTraversalConfig(c.Graph.Traversal); err != nil {
 		return err
 	}
 

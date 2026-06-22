@@ -397,7 +397,7 @@ func runServe(ctx context.Context, transport string, port int) (err error) {
 		return fmt.Errorf("failed to create MCP server: %w", err)
 	}
 	defer func() { _ = srv.Close() }()
-	closeGraphRepo := attachGraphRepository(srv, dataDir)
+	closeGraphRepo := attachGraphRepository(srv, dataDir, cfg)
 	defer closeGraphRepo()
 
 	// Handle graceful shutdown (DEBT-015: added SIGHUP for terminal close)
@@ -629,7 +629,7 @@ func startFileWatcher(ctx context.Context, root, dataDir string, engine *search.
 	return nil
 }
 
-func attachGraphRepository(srv *mcp.Server, dataDir string) func() {
+func attachGraphRepository(srv *mcp.Server, dataDir string, cfg *config.Config) func() {
 	if srv == nil || dataDir == "" {
 		return func() {}
 	}
@@ -638,7 +638,11 @@ func attachGraphRepository(srv *mcp.Server, dataDir string) func() {
 		slog.Warn("graph_repository_unavailable", slog.String("error", err.Error()))
 		return func() {}
 	}
-	srv.SetGraphRepository(repo)
+	queryOpts := graph.QueryServiceOptions{}
+	if cfg != nil {
+		queryOpts.Traversal = cfg.Graph.Traversal
+	}
+	srv.SetGraphRepository(repo, queryOpts)
 	return func() {
 		if err := repo.Close(); err != nil {
 			slog.Warn("graph_repository_close_failed", slog.String("error", err.Error()))
@@ -950,7 +954,7 @@ func runServeWithSession(ctx context.Context, sessionName, projectPath, transpor
 		return fmt.Errorf("failed to create MCP server: %w", err)
 	}
 	defer func() { _ = srv.Close() }()
-	closeGraphRepo := attachGraphRepository(srv, dataDir)
+	closeGraphRepo := attachGraphRepository(srv, dataDir, projCfg)
 	defer closeGraphRepo()
 
 	// Handle graceful shutdown with session save (DEBT-015: added SIGHUP for terminal close)

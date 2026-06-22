@@ -516,7 +516,15 @@ func extractSymbolEdges(projectID string, file SourceFile, scope *extractionScop
 		return
 	}
 	fileNode := extractFileNode(projectID, file, scope)
-	for _, chunk := range file.Chunks {
+	// DEBT-041: a single declaration can reach extraction more than once — e.g. when
+	// a stale chunk and its re-indexed successor both survive in the store and are
+	// rebuilt together, the same symbol arrives in two overlapping, line-drifted
+	// chunks. Emitting a node per occurrence produced duplicate same-file symbol
+	// nodes (relatedResults:241 and :243). canonicalSymbolChunks collapses those
+	// drift duplicates to the declaration head while keeping genuinely distinct
+	// same-name declarations (disjoint ranges) intact.
+	keep := canonicalSymbolChunks(file.Chunks)
+	for ci, chunk := range file.Chunks {
 		if chunk.ID == "" {
 			continue
 		}
@@ -534,8 +542,11 @@ func extractSymbolEdges(projectID string, file SourceFile, scope *extractionScop
 			StartLine:  chunk.StartLine,
 			EndLine:    chunk.EndLine,
 		})
-		for _, symbol := range chunk.Symbols {
+		for si, symbol := range chunk.Symbols {
 			if symbol.Name == "" {
+				continue
+			}
+			if !keep[symbolLocator{chunk: ci, symbol: si}] {
 				continue
 			}
 			symbolKey := fmt.Sprintf("%s#%s:%d", file.Path, symbol.Name, symbol.StartLine)
@@ -575,6 +586,106 @@ func extractSymbolEdges(projectID string, file SourceFile, scope *extractionScop
 			})
 		}
 	}
+}
+
+// symbolLocator identifies one symbol by its position within a file's chunk set.
+type symbolLocator struct {
+	chunk  int
+	symbol int
+}
+
+// canonicalSymbolChunks selects, for a single file's extraction, the set of
+// (chunk, symbol) positions whose symbol node should be emitted (DEBT-041).
+//
+// It collapses a drift duplicate — the same declaration carried by a stale chunk
+// and its re-indexed successor (identical name + symbol kind, overlapping line
+// ranges) — to the occurrence with the lowest start line (the declaration head),
+// while keeping genuinely distinct same-name declarations whose ranges are
+// disjoint (e.g. two methods named Close in one file). Within one file, two
+// symbols sharing a name and kind cannot both be valid declarations at overlapping
+// lines, so range overlap is a reliable same-declaration signal. Symbols without
+// line information already share a natural key (path#name:0) and collapse at the
+// node layer, so they need no special handling here.
+//
+// Limitation: when the metadata store holds multiple chunk generations for a file
+// (a stale chunk plus its re-indexed successor — DEBT-042), the lowest-start
+// occurrence kept here is a deterministic representative, not a guaranteed-current
+// one. If an edit shifted the declaration down, the stale generation has the lower
+// line and wins, so the surviving node's line/snippet can be stale (graph.query may
+// then cite a slightly-off location at "exact" confidence). This is undecidable at
+// the graph layer — SourceChunk carries no generation/currency signal — and is the
+// reason the real fix is store-side replace-by-file (DEBT-042): once a file has a
+// single current generation, the dedup never fires and the surviving line is always
+// current. This collapse is still strictly better than the prior duplicate nodes.
+func canonicalSymbolChunks(chunks []SourceChunk) map[symbolLocator]bool {
+	type candidate struct {
+		loc       symbolLocator
+		startLine int
+		endLine   int
+	}
+	groups := map[string][]candidate{}
+	var order []string
+	for ci, chunk := range chunks {
+		for si, sym := range chunk.Symbols {
+			if sym.Name == "" {
+				continue
+			}
+			key := sym.Name + "\x00" + sym.Kind
+			if _, seen := groups[key]; !seen {
+				order = append(order, key)
+			}
+			groups[key] = append(groups[key], candidate{
+				loc:       symbolLocator{chunk: ci, symbol: si},
+				startLine: sym.StartLine,
+				endLine:   sym.EndLine,
+			})
+		}
+	}
+
+	keep := make(map[symbolLocator]bool)
+	for _, key := range order {
+		cands := groups[key]
+		// Deterministic order: declaration head (lowest start line) first, then
+		// chunk/symbol position, so the kept occurrence is stable regardless of how
+		// the (possibly stale) chunks were ordered on input.
+		sort.SliceStable(cands, func(i, j int) bool {
+			if cands[i].startLine != cands[j].startLine {
+				return cands[i].startLine < cands[j].startLine
+			}
+			if cands[i].loc.chunk != cands[j].loc.chunk {
+				return cands[i].loc.chunk < cands[j].loc.chunk
+			}
+			return cands[i].loc.symbol < cands[j].loc.symbol
+		})
+		var kept []candidate
+		for _, c := range cands {
+			overlapsKept := false
+			for _, k := range kept {
+				if symbolRangesOverlap(c.startLine, c.endLine, k.startLine, k.endLine) {
+					overlapsKept = true
+					break
+				}
+			}
+			if overlapsKept {
+				continue // drift duplicate of an already-kept declaration
+			}
+			kept = append(kept, c)
+			keep[c.loc] = true
+		}
+	}
+	return keep
+}
+
+// symbolRangesOverlap reports whether two inclusive line ranges intersect. A
+// zero/negative end line is normalized to a single-line range at the start.
+func symbolRangesOverlap(aStart, aEnd, bStart, bEnd int) bool {
+	if aEnd < aStart {
+		aEnd = aStart
+	}
+	if bEnd < bStart {
+		bEnd = bStart
+	}
+	return aStart <= bEnd && bStart <= aEnd
 }
 
 func extractConfigKeys(projectID string, file SourceFile, scope *extractionScope) {

@@ -19,6 +19,7 @@ queries:
     name: query service references
     mode: find_references
     query: internal/graph/query.go
+    subject_type: path
     limit: 10
     include_stale: false
     subsets: [quick, full, mode:find_references]
@@ -44,6 +45,7 @@ queries:
 	got := corpus.Queries[0]
 	assert.Equal(t, GraphCorpusSchemaVersion, corpus.SchemaVersion)
 	assert.Equal(t, graph.QueryModeFindReferences, got.Mode)
+	assert.Equal(t, graph.SubjectTypePath, got.SubjectType)
 	assert.Equal(t, []string{GraphSubsetQuick, GraphSubsetFull, "mode:find_references"}, got.Subsets)
 	assert.Equal(t, []graph.GraphStatus{graph.GraphStatusFresh, graph.GraphStatusStale, graph.GraphStatusPartial}, got.Degradation.AllowedStatuses)
 	assert.Equal(t, []graph.GraphStatus{graph.GraphStatusUnavailable, graph.GraphStatusIncompatible, graph.GraphStatusEmpty, graph.GraphStatusFailed}, got.Degradation.BlockingStatuses)
@@ -122,6 +124,25 @@ queries:
         rationale: has a matcher
 `,
 			wantErr: "query must be project-relative and safe",
+		},
+		{
+			name: "unsupported subject type",
+			body: `
+schema_version: 1
+queries:
+  - id: GRA-BAD-Q02A
+    name: bad subject type
+    mode: find_references
+    query: internal/graph/query.go
+    subject_type: fuzzy
+    subsets: [quick]
+    holdout: false
+    source: manual
+    expected:
+      - source_path: internal/graph/query.go
+        rationale: has a matcher
+`,
+			wantErr: `unsupported subject_type "fuzzy"`,
 		},
 		{
 			name: "trailing parent segment",
@@ -497,6 +518,8 @@ func TestRealGraphCorpus_LoadsAndMeetsTicketCounts(t *testing.T) {
 	// exercised by the committed corpus.
 	assert.Positive(t, classes[GraphExpectationClassDegraded], "expected at least one degraded-class case")
 	assert.Positive(t, classes[GraphExpectationClassGap], "expected at least one gap-class case")
+	assert.GreaterOrEqual(t, classes[GraphExpectationClassNegativeAdversarial], 8,
+		"TASK-GRA26 requires >=8 negative_adversarial cases")
 }
 
 func TestSelectGraphQueries_SubsetsExcludeHoldoutUntilExplicitlyOwned(t *testing.T) {
@@ -525,7 +548,7 @@ func TestSelectGraphQueries_SubsetsExcludeHoldoutUntilExplicitlyOwned(t *testing
 
 func TestDirectGraphEvalReportSchema_IsSeparateFromSearchGraphGate(t *testing.T) {
 	report := DirectGraphEvalReport{
-		SchemaVersion:     GraphCorpusSchemaVersion,
+		SchemaVersion:     DirectGraphReportSchemaVersion,
 		ReportType:        DirectGraphReportType,
 		MeasuredTool:      DirectGraphMeasuredTool,
 		EvaluationScope:   DirectGraphEvaluationScope,
@@ -575,7 +598,7 @@ func TestDirectGraphEvalReportSchema_IsSeparateFromSearchGraphGate(t *testing.T)
 				Relation:        graph.EdgeKindFileDefinesSymbol,
 				ConfidenceLabel: graph.ConfidenceHigh,
 				EvidenceMethod:  "tree_sitter",
-				GraphPath:       []string{"file:internal/graph/query.go", string(graph.EdgeKindFileDefinesSymbol), "symbol:QueryService"},
+				Path:            singleHopGraphPath("file:internal/graph/query.go", string(graph.EdgeKindFileDefinesSymbol), "symbol:QueryService"),
 			}},
 			Warnings: []graph.StatusWarning{{
 				Code:    graph.WarningGraphStale,
@@ -611,7 +634,7 @@ func TestDirectGraphEvalReportSchema_IsSeparateFromSearchGraphGate(t *testing.T)
 	assert.Contains(t, string(data), `"evaluation_scope":"direct_graph_query_modes"`)
 	assert.Contains(t, string(data), `"graph_tool_measured":true`)
 	assert.Contains(t, string(data), `"measured_query_count":1`)
-	assert.Contains(t, string(data), `"schema_version":1`)
+	assert.Contains(t, string(data), `"schema_version":2`)
 	assert.Contains(t, string(data), `"summary"`)
 	assert.Contains(t, string(data), `"by_mode"`)
 	assert.Contains(t, string(data), `"degradation"`)
@@ -623,7 +646,7 @@ func TestDirectGraphEvalReportSchema_IsSeparateFromSearchGraphGate(t *testing.T)
 	assert.Contains(t, string(data), `"relation":"file_defines_symbol"`)
 	assert.Contains(t, string(data), `"confidence_label":"high"`)
 	assert.Contains(t, string(data), `"evidence_method":"tree_sitter"`)
-	assert.Contains(t, string(data), `"graph_path"`)
+	assert.Contains(t, string(data), `"path":{"from":`)
 	assert.Contains(t, string(data), `"extractors"`)
 	assert.Contains(t, string(data), `"confidence"`)
 	assert.Contains(t, string(data), `"warnings"`)

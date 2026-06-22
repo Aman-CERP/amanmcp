@@ -225,6 +225,20 @@ run_amanpm_advisory() {
     log_success "AmanPM advisory check completed"
 }
 
+# Run the dogfood-baseline JSON-safety regression test (DEBT-040). Fast, no
+# amanmcp/index required; guards against a regression to hand-built JSON in
+# scripts/dogfood-baseline.sh.
+run_script_tests() {
+    log_step "Running shell-script regression tests..."
+
+    if ! ./scripts/dogfood-baseline-json-test.sh; then
+        log_error "dogfood-baseline JSON-safety test failed"
+        exit 8
+    fi
+
+    log_success "Shell-script regression tests passed"
+}
+
 # Run installed-binary parity as advisory during Sprint 16 normalization.
 run_install_local_verify_advisory() {
     log_step "Running installed binary parity advisory..."
@@ -365,6 +379,7 @@ main() {
             check_go_version
             run_tests
             run_lint
+            run_script_tests
             run_amanpm_advisory
 
             echo ""
@@ -389,6 +404,7 @@ main() {
             run_parallel_checks
             check_coverage
             run_build
+            run_script_tests
             run_install_local_verify_advisory
             run_amanpm_advisory
 

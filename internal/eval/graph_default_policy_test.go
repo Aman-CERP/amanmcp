@@ -28,14 +28,18 @@ func passingDirectGraphReport(sourceVersion string) *DirectGraphEvalReport {
 			Timestamp: fixedPolicyTime,
 			GitSHA:    sourceVersion,
 			Command:   "amanmcp eval graph --subset quick",
+			Subset:    GraphSubsetQuick,
 			Output:    "both",
 		},
 		Summary: DirectGraphSummary{
-			QueryCount:              9,
-			MeasuredQueryCount:      9,
-			PassCount:               9,
-			PassRate:                1.0,
-			DegradationBlockingRate: 0.0,
+			QueryCount:                   9,
+			MeasuredQueryCount:           9,
+			PassCount:                    9,
+			PassRate:                     1.0,
+			DegradationBlockingRate:      0.0,
+			NegativeAdversarialCount:     10,
+			NegativeAdversarialPassCount: 10,
+			NegativeAdversarialPassRate:  1.0,
 		},
 		ByMode: map[string]DirectGraphModeSummary{
 			graph.QueryModeFindReferences: {
@@ -154,6 +158,43 @@ func TestEvaluateGraphDefaultPolicy_FailingModeThresholdBlocks(t *testing.T) {
 	}
 	if len(state.FailingMetrics) == 0 {
 		t.Fatal("failing metrics must record the specific metric below floor")
+	}
+}
+
+func TestEvaluateGraphDefaultPolicy_NegativeAdversarialFailureBlocks(t *testing.T) {
+	report := passingDirectGraphReport("sha-1")
+	report.Summary.NegativeAdversarialPassCount = 7
+	report.Summary.NegativeAdversarialPassRate = 0.7
+
+	state := EvaluateGraphDefaultPolicy(report, GraphDefaultPolicyOptions{
+		CurrentSourceVersion: "sha-1",
+		Now:                  fixedPolicyTime,
+	})
+
+	if state.AllowDefaultAugmentation {
+		t.Fatal("a failing negative-adversarial pass rate must block default augmentation")
+	}
+	if state.Recommendation != GraphRecommendationKill {
+		t.Fatalf("negative-adversarial failure recommendation = %q, want %q", state.Recommendation, GraphRecommendationKill)
+	}
+}
+
+func TestEvaluateGraphDefaultPolicy_NegativeAdversarialZeroCoverageBlocks(t *testing.T) {
+	report := passingDirectGraphReport("sha-1")
+	report.Summary.NegativeAdversarialCount = 0
+	report.Summary.NegativeAdversarialPassCount = 0
+	report.Summary.NegativeAdversarialPassRate = 0.0
+
+	state := EvaluateGraphDefaultPolicy(report, GraphDefaultPolicyOptions{
+		CurrentSourceVersion: "sha-1",
+		Now:                  fixedPolicyTime,
+	})
+
+	if state.AllowDefaultAugmentation {
+		t.Fatal("missing negative-adversarial coverage on a gated subset must block default augmentation")
+	}
+	if state.Recommendation != GraphRecommendationKill {
+		t.Fatalf("zero-coverage recommendation = %q, want %q", state.Recommendation, GraphRecommendationKill)
 	}
 }
 

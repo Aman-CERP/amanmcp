@@ -95,6 +95,71 @@ search:
 	assertEdgeEvidence(t, edges, EdgeKindFileDeclaresPackage, false, ConfidenceExact)
 }
 
+// TestCheapExtractor_DedupesDriftedDuplicateSymbolNodes is the DEBT-041 contract:
+// when a single file's extraction receives the same declaration twice at
+// overlapping but line-drifted ranges (the shape produced when a stale chunk and
+// its re-indexed successor both survive in the store and are rebuilt together),
+// the graph must emit exactly ONE symbol node for that declaration — while still
+// keeping genuinely distinct same-name declarations whose ranges are disjoint
+// (e.g. two different Close methods in one file).
+func TestCheapExtractor_DedupesDriftedDuplicateSymbolNodes(t *testing.T) {
+	ctx := context.Background()
+	repo := newTestSQLiteRepository(t)
+
+	files := []SourceFile{{
+		Path:     "internal/graph/dup.go",
+		Language: "go",
+		Content:  []byte("package graph\n"),
+		Chunks: []SourceChunk{
+			// Stale chunk: relatedResults at the pre-edit lines.
+			{
+				ID: "chunk-rr-stale", FilePath: "internal/graph/dup.go", Language: "go",
+				StartLine: 241, EndLine: 281,
+				Symbols: []SourceSymbol{{Name: "relatedResults", Kind: "function", StartLine: 241, EndLine: 281, Signature: "func relatedResults()"}},
+			},
+			// Current chunk: same declaration, drifted +2 lines (heavily overlaps the stale one).
+			{
+				ID: "chunk-rr-current", FilePath: "internal/graph/dup.go", Language: "go",
+				StartLine: 243, EndLine: 284,
+				Symbols: []SourceSymbol{{Name: "relatedResults", Kind: "function", StartLine: 243, EndLine: 284, Signature: "func relatedResults()"}},
+			},
+			// Two genuinely DISTINCT Close methods (disjoint ranges) — both must survive.
+			{
+				ID: "chunk-close-a", FilePath: "internal/graph/dup.go", Language: "go",
+				StartLine: 50, EndLine: 55,
+				Symbols: []SourceSymbol{{Name: "Close", Kind: "method", StartLine: 50, EndLine: 55, Signature: "func (a *A) Close()"}},
+			},
+			{
+				ID: "chunk-close-b", FilePath: "internal/graph/dup.go", Language: "go",
+				StartLine: 120, EndLine: 125,
+				Symbols: []SourceSymbol{{Name: "Close", Kind: "method", StartLine: 120, EndLine: 125, Signature: "func (b *B) Close()"}},
+			},
+		},
+	}}
+
+	require.NoError(t, IndexCheapEdges(ctx, repo, "project-dedup", files, CheapExtractorOptions{Now: fixedGraphTime}))
+
+	nodes, err := repo.ListNodes(ctx, NodeQuery{ProjectID: "project-dedup", Kind: NodeKindSymbol})
+	require.NoError(t, err)
+	byName := make(map[string][]Node)
+	for _, n := range nodes {
+		byName[n.Name] = append(byName[n.Name], n)
+	}
+
+	require.Len(t, byName["relatedResults"], 1,
+		"a single declaration drifted across two overlapping chunks must collapse to one symbol node")
+	assert.Equal(t, 241, byName["relatedResults"][0].StartLine,
+		"dedup keeps the declaration line (lowest start) of the overlapping group")
+	assert.Len(t, byName["Close"], 2,
+		"two distinct same-name declarations at disjoint ranges must both survive")
+
+	// The surviving symbol must still be wired: exactly one file_defines_symbol edge
+	// per kept symbol (no edges to the dropped stale duplicate).
+	edges, err := repo.ListEdges(ctx, EdgeQuery{ProjectID: "project-dedup", Kind: EdgeKindFileDefinesSymbol})
+	require.NoError(t, err)
+	assert.Len(t, edges, 3, "one file_defines_symbol edge per surviving symbol (relatedResults + 2x Close)")
+}
+
 func TestConfidenceLabelFor_UsesStableADRBands(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -102,15 +167,19 @@ func TestConfidenceLabelFor_UsesStableADRBands(t *testing.T) {
 		want       ConfidenceLabel
 	}{
 		{name: "exact", confidence: 1.0, want: ConfidenceExact},
+		{name: "near exact is high", confidence: 0.999, want: ConfidenceHigh},
 		{name: "high boundary", confidence: 0.9, want: ConfidenceHigh},
 		{name: "medium below high", confidence: 0.89, want: ConfidenceMedium},
 		{name: "medium boundary", confidence: 0.7, want: ConfidenceMedium},
 		{name: "low below medium", confidence: 0.69, want: ConfidenceLow},
+		{name: "zero is low", confidence: 0, want: ConfidenceLow},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, confidenceLabelFor(tt.confidence))
+			got := confidenceLabelFor(tt.confidence)
+			assert.Equal(t, tt.want, got)
+			assert.NotEqual(t, ConfidenceLabel("heuristic"), got, "heuristic is an orthogonal evidence flag, not a label")
 		})
 	}
 }

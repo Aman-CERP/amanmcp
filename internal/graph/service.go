@@ -35,20 +35,22 @@ const (
 
 // NeighborRequest asks for bounded graph neighbors around nodes matching Query.
 type NeighborRequest struct {
-	ProjectID  string `json:"project_id"`
-	Query      string `json:"query"`
-	SourcePath string `json:"source_path,omitempty"`
-	Limit      int    `json:"limit"`
-	Depth      int    `json:"depth"`
+	ProjectID    string `json:"project_id"`
+	Query        string `json:"query"`
+	SourcePath   string `json:"source_path,omitempty"`
+	Limit        int    `json:"limit"`
+	Depth        int    `json:"depth"`
+	ExcludeStale bool   `json:"exclude_stale,omitempty"`
 }
 
 // PathRequest asks for bounded graph paths between matching nodes.
 type PathRequest struct {
-	ProjectID string `json:"project_id"`
-	FromQuery string `json:"from_query"`
-	ToQuery   string `json:"to_query"`
-	Limit     int    `json:"limit"`
-	Depth     int    `json:"depth"`
+	ProjectID    string `json:"project_id"`
+	FromQuery    string `json:"from_query"`
+	ToQuery      string `json:"to_query"`
+	Limit        int    `json:"limit"`
+	Depth        int    `json:"depth"`
+	ExcludeStale bool   `json:"exclude_stale,omitempty"`
 }
 
 // TraversalResult is the compact status-aware graph traversal response.
@@ -81,13 +83,26 @@ type GraphNodeEvidence struct {
 }
 
 // GraphEvidence is one role-labeled node or edge-backed graph fact.
+//
+// EdgeUpdatedAt and Stale are a derived freshness projection of the backing edge
+// (GRA21), computed at projection time with no dedicated storage column or
+// schema bump. EdgeUpdatedAt mirrors the edge's UpdatedAt — the edge row's last
+// WRITE time, not a content-extraction timestamp: MarkEdgesToSourceStale rewrites
+// it when flagging an edge stale, and a rebuild from stale chunks stamps a fresh
+// time over old content. So EdgeUpdatedAt is deliberately named for what it is;
+// Stale is the authoritative trust signal — treat fresh EdgeUpdatedAt + Stale=true
+// as untrustworthy evidence.
 type GraphEvidence struct {
 	Node            GraphNodeEvidence `json:"node"`
 	Relation        string            `json:"relation,omitempty"`
 	Role            GraphRole         `json:"role"`
 	ConfidenceLabel ConfidenceLabel   `json:"confidence_label,omitempty"`
+	EdgeFromNodeID  string            `json:"edge_from_node_id,omitempty"`
+	EdgeToNodeID    string            `json:"edge_to_node_id,omitempty"`
 	EdgeSourcePath  string            `json:"edge_source_path,omitempty"`
 	EdgeEvidence    Evidence          `json:"edge_evidence,omitempty"`
+	EdgeUpdatedAt   time.Time         `json:"edge_updated_at,omitempty"`
+	Stale           bool              `json:"stale,omitempty"`
 	PathExplanation string            `json:"path_explanation,omitempty"`
 }
 
@@ -120,7 +135,7 @@ func (s *QueryService) Neighbors(ctx context.Context, req NeighborRequest) (Trav
 		return result, nil
 	}
 
-	index, err := s.loadGraph(ctx, normalized.ProjectID)
+	index, err := s.loadGraph(ctx, normalized.ProjectID, normalized.ExcludeStale)
 	if err != nil {
 		return TraversalResult{}, err
 	}
@@ -157,7 +172,7 @@ func (s *QueryService) Path(ctx context.Context, req PathRequest) (TraversalResu
 		return result, nil
 	}
 
-	index, err := s.loadGraph(ctx, normalized.ProjectID)
+	index, err := s.loadGraph(ctx, normalized.ProjectID, normalized.ExcludeStale)
 	if err != nil {
 		return TraversalResult{}, err
 	}
@@ -303,12 +318,12 @@ func statusAllowsEvidence(snapshot *StatusSnapshot) bool {
 	}
 }
 
-func (s *QueryService) loadGraph(ctx context.Context, projectID string) (*graphIndex, error) {
+func (s *QueryService) loadGraph(ctx context.Context, projectID string, excludeStale bool) (*graphIndex, error) {
 	nodes, err := s.repo.ListNodes(ctx, NodeQuery{ProjectID: projectID})
 	if err != nil {
 		return nil, fmt.Errorf("list graph nodes: %w", err)
 	}
-	edges, err := s.repo.ListEdges(ctx, EdgeQuery{ProjectID: projectID})
+	edges, err := s.repo.ListEdges(ctx, EdgeQuery{ProjectID: projectID, ExcludeStale: excludeStale})
 	if err != nil {
 		return nil, fmt.Errorf("list graph edges: %w", err)
 	}
@@ -549,8 +564,12 @@ func edgeGraphEvidence(seed Node, path []adjacency) GraphEvidence {
 		Relation:        string(last.edge.Kind),
 		Role:            last.role,
 		ConfidenceLabel: last.edge.ConfidenceLabel,
+		EdgeFromNodeID:  last.edge.FromNodeID,
+		EdgeToNodeID:    last.edge.ToNodeID,
 		EdgeSourcePath:  last.edge.SourcePath,
 		EdgeEvidence:    last.edge.Evidence,
+		EdgeUpdatedAt:   last.edge.UpdatedAt,
+		Stale:           last.edge.Stale,
 		PathExplanation: graphPathExplanation(seed, path),
 	}
 }
@@ -601,9 +620,17 @@ func preferredNodeLabel(node Node) string {
 	return node.ID
 }
 
+// pathConfidenceLabel returns the bottleneck (minimum) confidence label across a
+// path's hops. It is seeded from the first hop rather than a fixed ceiling so a
+// single exact hop reports exact (not capped to high); an empty path keeps the
+// historical high default. For a one-hop path this equals that edge's label,
+// matching the flat result.confidence_label (GRA21).
 func pathConfidenceLabel(path []adjacency) ConfidenceLabel {
-	label := ConfidenceHigh
-	for _, hop := range path {
+	if len(path) == 0 {
+		return ConfidenceHigh
+	}
+	label := path[0].edge.ConfidenceLabel
+	for _, hop := range path[1:] {
 		if confidenceRank(hop.edge.ConfidenceLabel) < confidenceRank(label) {
 			label = hop.edge.ConfidenceLabel
 		}

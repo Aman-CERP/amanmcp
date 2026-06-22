@@ -7,10 +7,48 @@ schema_version: 1
 # evidence_method, graph_path_contains) and never node_id, which is index-volatile.
 #
 # Classes (expectation_class):
-#   quality  (default) - scored against per-mode relevance thresholds.
-#   degraded           - intentionally targets a zero-result/degraded state.
-#   gap                - documents a future-semantics relationship not represented
-#                        by current traversal (see FEAT-GRA3 / FEAT-GRA4).
+#   quality              (default) - scored against per-mode relevance thresholds.
+#   degraded             - intentionally targets a zero-result/degraded state.
+#   gap                  - documents a future-semantics relationship not represented
+#                          by current traversal (see FEAT-GRA3 / FEAT-GRA4).
+#   negative_adversarial - passes only when prohibited bad behavior is absent and the
+#                          expected graceful outcome is present (TASK-GRA26). Gated at
+#                          100% via negative_adversarial_pass_rate in make eval-graph-quick.
+#
+# GRA19 disambiguation re-baseline (gap policy):
+#   Nine cases were re-labeled `gap` when graph.query began resolving a subject
+#   before traversing (TASK-GRA19): GRA13-ES-Q02 (QueryResult), -Q07
+#   (relatedResults), -Q08 (roleFor), -Q11 (fuseResults), -Q12 (Snapshot), -Q13
+#   (BM25), -Q14 (Repository), and GRA14-IA-Q15/-Q16 (internal/chunk,
+#   internal/config). Each subject now returns `disambiguation_required` or
+#   `subject_not_found` instead of a merged result, so its pre-GRA19 positive
+#   `expected` rows can never match.
+#
+#   DEBT-041 update: -Q07 (relatedResults) and -Q08 (roleFor) had a SINGLE source
+#   declaration; their `disambiguation_required` was a data-quality artifact — the
+#   graph extractor emitted two drift-duplicate symbol nodes for one declaration.
+#   DEBT-041 collapses those drift duplicates at extraction, so both subjects now
+#   resolve cleanly and have been RESTORED to `quality`.
+#
+#   GRA20 update: explicit package-directory resolution is covered by
+#   GRA20-FR-Q02 (`subject_type: package`). -Q15/-Q16 remain gap cases because
+#   their mode is `impact_analysis`: package subjects resolve, but today's
+#   single-hop impact traversal only follows outgoing edges, while
+#   `file_declares_package` points file -> package.
+#   The five genuinely ambiguous subjects below remain `gap` pending GRA26's
+#   disambiguation matcher.
+#
+#   The eval result shape (DirectGraphQueryResult)
+#   does not yet carry `resolution`/`candidates`, so these cases CANNOT be scored
+#   on the new contract and are excluded from quality (they retain one positive
+#   row only because the loader requires >=1 `expected` entry). The disambiguation
+#   contract IS asserted at the Go unit-test level (internal/graph: resolve_test.go,
+#   query_test.go TestQueryService_DisambiguatesAmbiguousSymbol /
+#   _SubjectNotFoundEmitsResolutionAndHints). TASK-GRA26 MUST add a `resolution`/
+#   `candidates` matcher to the eval harness and convert these gap cases into
+#   explicit disambiguation_required/subject_not_found assertions (then remove the
+#   placeholder `expected` rows). Until then, do not read these rows as live
+#   positive expectations.
 queries:
   # ===========================================================================
   # TASK-GRA10 smoke rows (kept; one per mode)
@@ -537,21 +575,22 @@ queries:
     metadata: {owner_task: TASK-GRA13, kind: function}
 
   - id: GRA13-ES-Q02
-    name: explain_symbol for the QueryResult type
+    name: explain_symbol for the ambiguous QueryResult type (disambiguation)
     mode: explain_symbol
     query: QueryResult
     subsets: [quick, full, mode:explain_symbol]
     holdout: false
-    source: task-gra13
-    expected:
-      - node_kind: chunk
-        relation: symbol_has_chunk
-        role: symbol_context
-        confidence_label: exact
-        evidence_method: chunk_symbol_membership
-        graph_path_contains: [symbol_has_chunk]
-        rationale: explain_symbol returns symbol-context chunk evidence for the QueryResult type across its definitions.
-    metadata: {owner_task: TASK-GRA13, kind: type}
+    source: task-gra26
+    expectation_class: negative_adversarial
+    negative:
+      expected_resolution: disambiguation_required
+      min_candidates: 2
+      max_results: 0
+      prohibited_evidence:
+        - node_kind: chunk
+          relation: symbol_has_chunk
+          rationale: must not merge ambiguous QueryResult definitions into fabricated results
+    metadata: {owner_task: TASK-GRA26, family: ambiguous, language: go}
 
   - id: GRA13-ES-Q03
     name: explain_symbol for the EdgeKind type
@@ -650,9 +689,18 @@ queries:
     name: explain_symbol for the relatedResults function
     mode: explain_symbol
     query: relatedResults
-    subsets: [full, mode:explain_symbol]
+    subject_type: symbol
+    subsets: [quick, full, mode:explain_symbol]
     holdout: false
     source: task-gra13
+    # relatedResults has a SINGLE source declaration. GRA19 temporarily re-labeled
+    # this `gap` because a drift double-extraction artifact (DEBT-041) emitted two
+    # same-file symbol nodes, so the resolver correctly returned
+    # disambiguation_required rather than guessing across them. DEBT-041 now
+    # collapses drift-duplicate symbol nodes at graph extraction, so the subject
+    # resolves cleanly to its one declaration and explain_symbol is scored as
+    # quality again.
+    expectation_class: quality
     expected:
       - source_path: internal/graph/query.go
         node_kind: chunk
@@ -661,7 +709,7 @@ queries:
         confidence_label: exact
         evidence_method: chunk_symbol_membership
         graph_path_contains: [symbol_has_chunk]
-        rationale: relatedResults' symbol-context chunk anchors its definition file.
+        rationale: relatedResults resolves to one declaration; explain_symbol returns its chunk membership.
       - source_path: internal/graph/query.go
         node_kind: file
         relation: file_defines_symbol
@@ -669,8 +717,8 @@ queries:
         confidence_label: high
         evidence_method: chunk_symbol
         graph_path_contains: [file_defines_symbol]
-        rationale: The defining file is surfaced via file_defines_symbol.
-    metadata: {owner_task: TASK-GRA13, kind: function}
+        rationale: relatedResults resolves to one declaration; explain_symbol returns its file_defines_symbol evidence.
+    metadata: {owner_task: TASK-GRA13, kind: quality, restored_by: DEBT-041}
 
   - id: GRA13-ES-Q08
     name: explain_symbol for the roleFor function
@@ -679,6 +727,14 @@ queries:
     subsets: [full, mode:explain_symbol]
     holdout: false
     source: task-gra13
+    # roleFor has a SINGLE source declaration. GRA19 temporarily re-labeled this
+    # `gap` because a drift double-extraction artifact (DEBT-041) emitted two
+    # same-file symbol nodes, so the resolver correctly returned
+    # disambiguation_required rather than guessing across them. DEBT-041 now
+    # collapses drift-duplicate symbol nodes at graph extraction, so the subject
+    # resolves cleanly to its one declaration and explain_symbol is scored as
+    # quality again.
+    expectation_class: quality
     expected:
       - source_path: internal/graph/query.go
         node_kind: chunk
@@ -687,7 +743,7 @@ queries:
         confidence_label: exact
         evidence_method: chunk_symbol_membership
         graph_path_contains: [symbol_has_chunk]
-        rationale: roleFor's symbol-context chunk anchors its definition file.
+        rationale: roleFor resolves to one declaration; explain_symbol returns its chunk membership.
       - source_path: internal/graph/query.go
         node_kind: file
         relation: file_defines_symbol
@@ -695,8 +751,8 @@ queries:
         confidence_label: high
         evidence_method: chunk_symbol
         graph_path_contains: [file_defines_symbol]
-        rationale: The defining file is surfaced via file_defines_symbol.
-    metadata: {owner_task: TASK-GRA13, kind: function}
+        rationale: roleFor resolves to one declaration; explain_symbol returns its file_defines_symbol evidence.
+    metadata: {owner_task: TASK-GRA13, kind: quality, restored_by: DEBT-041}
 
   - id: GRA13-ES-Q09
     name: explain_symbol for the SQLiteRepository type
@@ -745,78 +801,73 @@ queries:
     name: explain_symbol for the fuseResults function
     mode: explain_symbol
     query: fuseResults
-    subsets: [full, mode:explain_symbol]
+    subsets: [quick, full, mode:explain_symbol]
     holdout: false
-    source: task-gra13
-    expected:
-      - source_path: internal/search/engine.go
-        node_kind: chunk
-        relation: symbol_has_chunk
-        role: symbol_context
-        confidence_label: exact
-        evidence_method: chunk_symbol_membership
-        graph_path_contains: [symbol_has_chunk]
-        rationale: fuseResults' symbol-context chunk anchors its definition file.
-      - source_path: internal/search/engine.go
-        node_kind: file
-        relation: file_defines_symbol
-        role: symbol_context
-        confidence_label: high
-        evidence_method: chunk_symbol
-        graph_path_contains: [file_defines_symbol]
-        rationale: The defining file is surfaced via file_defines_symbol.
-    metadata: {owner_task: TASK-GRA13, kind: function}
+    source: task-gra26
+    expectation_class: negative_adversarial
+    negative:
+      expected_resolution: disambiguation_required
+      min_candidates: 2
+      max_results: 0
+      prohibited_evidence:
+        - node_kind: chunk
+          relation: symbol_has_chunk
+          rationale: must not merge ambiguous fuseResults definitions into fabricated results
+    metadata: {owner_task: TASK-GRA26, family: ambiguous, language: go}
 
   - id: GRA13-ES-Q12
     name: explain_symbol for the Snapshot symbol
     mode: explain_symbol
     query: Snapshot
-    subsets: [full, mode:explain_symbol]
+    subsets: [quick, full, mode:explain_symbol]
     holdout: false
-    source: task-gra13
-    expected:
-      - node_kind: chunk
-        relation: symbol_has_chunk
-        role: symbol_context
-        confidence_label: exact
-        evidence_method: chunk_symbol_membership
-        graph_path_contains: [symbol_has_chunk]
-        rationale: Snapshot returns symbol-context chunk evidence across its uses.
-    metadata: {owner_task: TASK-GRA13, kind: method}
+    source: task-gra26
+    expectation_class: negative_adversarial
+    negative:
+      expected_resolution: disambiguation_required
+      min_candidates: 2
+      max_results: 0
+      prohibited_evidence:
+        - node_kind: chunk
+          relation: symbol_has_chunk
+          rationale: must not merge ambiguous Snapshot symbols into fabricated results
+    metadata: {owner_task: TASK-GRA26, family: ambiguous, language: go}
 
   - id: GRA13-ES-Q13
     name: explain_symbol for the BM25 token symbol
     mode: explain_symbol
     query: BM25
-    subsets: [full, mode:explain_symbol]
+    subsets: [quick, full, mode:explain_symbol]
     holdout: false
-    source: task-gra13
-    expected:
-      - node_kind: chunk
-        relation: symbol_has_chunk
-        role: symbol_context
-        confidence_label: exact
-        evidence_method: chunk_symbol_membership
-        graph_path_contains: [symbol_has_chunk]
-        rationale: BM25-named symbols return symbol-context chunk evidence.
-    metadata: {owner_task: TASK-GRA13, kind: domain-token}
+    source: task-gra26
+    expectation_class: negative_adversarial
+    negative:
+      expected_resolution: disambiguation_required
+      min_candidates: 2
+      max_results: 0
+      prohibited_evidence:
+        - node_kind: chunk
+          relation: symbol_has_chunk
+          rationale: must not merge BM25 substring matches into fabricated results
+    metadata: {owner_task: TASK-GRA26, family: ambiguous, language: go}
 
   - id: GRA13-ES-Q14
-    name: explain_symbol for the Repository interface
+    name: explain_symbol for the ambiguous Config type token
     mode: explain_symbol
-    query: Repository
-    subsets: [full, mode:explain_symbol]
+    query: Config
+    subsets: [quick, full, mode:explain_symbol]
     holdout: false
-    source: task-gra13
-    expected:
-      - node_kind: chunk
-        relation: symbol_has_chunk
-        role: symbol_context
-        confidence_label: exact
-        evidence_method: chunk_symbol_membership
-        graph_path_contains: [symbol_has_chunk]
-        rationale: Repository returns symbol-context chunk evidence across implementations.
-    metadata: {owner_task: TASK-GRA13, kind: interface}
+    source: task-gra26
+    expectation_class: negative_adversarial
+    negative:
+      expected_resolution: disambiguation_required
+      min_candidates: 2
+      max_results: 0
+      prohibited_evidence:
+        - node_kind: chunk
+          relation: symbol_has_chunk
+          rationale: must not merge ambiguous Config symbols into fabricated results
+    metadata: {owner_task: TASK-GRA26, family: ambiguous, language: go}
 
   - id: GRA13-ES-Q15
     name: explain_symbol for the QueryServiceOptions type
@@ -1077,7 +1128,8 @@ queries:
     name: impact_analysis for the graph service file
     mode: impact_analysis
     query: internal/graph/service.go
-    subsets: [full, mode:impact_analysis]
+    subject_type: path
+    subsets: [quick, full, mode:impact_analysis]
     holdout: false
     source: task-gra14
     expected:
@@ -1095,9 +1147,14 @@ queries:
     name: impact_analysis for the chunk treesitter package path
     mode: impact_analysis
     query: internal/chunk
+    subject_type: package
     subsets: [full, mode:impact_analysis]
     holdout: false
     source: task-gra14
+    # GRA20 resolves this directory subject to package node internal/chunk#chunk.
+    # It remains a gap because impact_analysis currently follows outgoing edges
+    # only, and file_declares_package points file -> package.
+    expectation_class: gap
     expected:
       - node_kind: chunk
         relation: symbol_has_chunk
@@ -1105,16 +1162,21 @@ queries:
         confidence_label: exact
         evidence_method: chunk_symbol_membership
         graph_path_contains: [symbol_has_chunk]
-        rationale: A package-path subject surfaces direct downstream chunk evidence for files under it.
-    metadata: {owner_task: TASK-GRA14, kind: package}
+        rationale: Package-directory subject resolves, but package impact traversal has no downstream edge yet.
+    metadata: {owner_task: TASK-GRA14, kind: gap, was: package-impact, future: FEAT-GRA3, follow_up: TASK-GRA26}
 
   - id: GRA14-IA-Q16
     name: impact_analysis for the config package path (package evidence)
     mode: impact_analysis
     query: internal/config
+    subject_type: package
     subsets: [full, mode:impact_analysis]
     holdout: false
     source: task-gra14
+    # GRA20 resolves this directory subject to package node internal/config#config.
+    # It remains a gap because impact_analysis currently follows outgoing edges
+    # only, and file_declares_package points file -> package.
+    expectation_class: gap
     expected:
       - node_kind: chunk
         relation: symbol_has_chunk
@@ -1129,8 +1191,45 @@ queries:
         confidence_label: exact
         evidence_method: go_package_declaration
         graph_path_contains: [file_declares_package]
-        rationale: The package-declaration edge is a direct downstream relation for the config package files.
-    metadata: {owner_task: TASK-GRA14, kind: package}
+        rationale: Package-directory subject resolves, but package impact traversal has no downstream edge yet.
+    metadata: {owner_task: TASK-GRA14, kind: gap, was: package-impact, future: FEAT-GRA3, follow_up: TASK-GRA26}
+
+  - id: GRA20-FR-Q01
+    name: find_references for a stable graph file node id
+    mode: find_references
+    query: node:file:${project_id}:internal/graph/query.go
+    subject_type: result_id
+    subsets: [quick, full, mode:find_references]
+    holdout: false
+    source: task-gra20
+    expected:
+      - source_path: internal/graph/query.go
+        node_kind: chunk
+        relation: symbol_has_chunk
+        role: related
+        confidence_label: exact
+        evidence_method: chunk_symbol_membership
+        graph_path_contains: [symbol_has_chunk]
+        rationale: subject_type=result_id resolves the graph file node id and traverses file-scoped symbol chunk evidence.
+    metadata: {owner_task: TASK-GRA20, kind: result_id}
+
+  - id: GRA20-FR-Q02
+    name: find_references for the config package directory
+    mode: find_references
+    query: internal/config
+    subject_type: package
+    subsets: [quick, full, mode:find_references]
+    holdout: false
+    source: task-gra20
+    expected:
+      - node_kind: file
+        relation: file_declares_package
+        role: related
+        confidence_label: exact
+        evidence_method: go_package_declaration
+        graph_path_contains: [file_declares_package]
+        rationale: subject_type=package resolves the package directory and find_references surfaces files that declare it.
+    metadata: {owner_task: TASK-GRA20, kind: package}
 
   - id: GRA14-IA-GAP01
     name: impact_analysis gap for reverse test-coverage impact
@@ -1147,3 +1246,116 @@ queries:
         graph_path_contains: [test_covers_implementation]
         rationale: Reverse impact (the test that covers this file) is not surfaced by current outgoing-only traversal; documented as a FEAT-GRA3/FEAT-GRA4 gap, excluded from relevance quality.
     metadata: {owner_task: TASK-GRA14, kind: gap, future: FEAT-GRA3}
+
+  # ===========================================================================
+  # TASK-GRA26: negative_adversarial robustness (capstone verification)
+  # ===========================================================================
+  - id: GRA26-NEG-MISS01
+    name: missing symbol returns subject_not_found without fabricated results
+    mode: explain_symbol
+    query: ZZZ_GRA26_NONEXISTENT_SYMBOL_XQ9
+    subsets: [quick, full, mode:explain_symbol]
+    holdout: false
+    source: task-gra26
+    expectation_class: negative_adversarial
+    negative:
+      expected_resolution: subject_not_found
+      max_results: 0
+      prohibited_evidence:
+        - node_kind: chunk
+          rationale: must not fabricate chunk evidence for absent subjects
+    metadata: {owner_task: TASK-GRA26, family: missing_subject, language: go}
+
+  - id: GRA26-NEG-MISS02
+    name: missing file path returns subject_not_found without fabricated results
+    mode: find_references
+    query: internal/zzz_absent_eval_subject_gra26.go
+    subject_type: path
+    subsets: [quick, full, mode:find_references]
+    holdout: false
+    source: task-gra26
+    expectation_class: negative_adversarial
+    negative:
+      expected_resolution: subject_not_found
+      max_results: 0
+      prohibited_evidence:
+        - node_kind: file
+          rationale: must not fabricate file evidence for absent paths
+    metadata: {owner_task: TASK-GRA26, family: missing_subject, language: go}
+
+  - id: GRA26-NEG-LANG01
+    name: unsupported rust symbol returns subject_not_found without hallucinated evidence
+    mode: explain_symbol
+    query: rust_main_entry_only_gra26
+    subsets: [quick, full, mode:explain_symbol]
+    holdout: false
+    source: task-gra26
+    expectation_class: negative_adversarial
+    negative:
+      expected_resolution: subject_not_found
+      max_results: 0
+      expected_warning_codes: [unsupported_language]
+      expected_labels: [unsupported_language]
+      prohibited_evidence:
+        - node_kind: chunk
+          rationale: must not fabricate evidence for unsupported-language subjects
+    degradation:
+      expected_labels: [unsupported_language]
+    metadata: {owner_task: TASK-GRA26, family: unsupported_language, language: rust}
+
+  - id: GRA26-NEG-LANG02
+    name: unsupported rust package path returns subject_not_found without hallucinated evidence
+    mode: find_references
+    query: src/main.rs
+    subject_type: path
+    subsets: [full, mode:find_references]
+    holdout: false
+    source: task-gra26
+    expectation_class: negative_adversarial
+    negative:
+      expected_resolution: subject_not_found
+      max_results: 0
+      expected_warning_codes: [unsupported_language]
+      expected_labels: [unsupported_language]
+      prohibited_evidence:
+        - node_kind: file
+          rationale: must not fabricate file evidence for unsupported-language paths
+    degradation:
+      expected_labels: [unsupported_language]
+    metadata: {owner_task: TASK-GRA26, family: unsupported_language, language: rust}
+
+  - id: GRA26-NEG-BUDGET01
+    name: traversal budget exhausted returns partial evidence not silent empty
+    mode: find_references
+    query: internal/graph/query.go
+    budget_overrides:
+      max_nodes: 2
+    subsets: [quick, full, mode:find_references]
+    holdout: false
+    source: task-gra26
+    expectation_class: negative_adversarial
+    negative:
+      min_results: 1
+      expected_warning_codes: [traversal_budget_exhausted]
+      expected_labels: [traversal_budget_exhausted]
+    degradation:
+      expected_labels: [traversal_budget_exhausted]
+    metadata: {owner_task: TASK-GRA26, family: budget_exhausted, language: go}
+
+  - id: GRA26-NEG-BUDGET02
+    name: per-edge-kind budget exhausted returns partial evidence not silent empty
+    mode: find_references
+    query: internal/search/engine.go
+    budget_overrides:
+      max_per_edge_kind: 1
+    subsets: [quick, full, mode:find_references]
+    holdout: false
+    source: task-gra26
+    expectation_class: negative_adversarial
+    negative:
+      min_results: 1
+      expected_warning_codes: [traversal_budget_exhausted]
+      expected_labels: [traversal_budget_exhausted]
+    degradation:
+      expected_labels: [traversal_budget_exhausted]
+    metadata: {owner_task: TASK-GRA26, family: budget_exhausted, language: go}

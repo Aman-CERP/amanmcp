@@ -246,7 +246,7 @@ func TestScoreGraphCase_MatchedExpectedAgreesWithLegacyCounter(t *testing.T) {
 // is exactly source_path|node_kind|relation|role and that two results agree iff
 // every tuple field agrees. node_id, confidence, and graph_path are intentionally
 // excluded from the base key: node_id is index-volatile, confidence is a ranking
-// input, and graph_path embeds per-result node IDs (so two distinct chunks of the
+// input, and path embeds per-result node IDs (so two distinct chunks of the
 // same file — the dominant duplicate shape — collapse to one identity, which is
 // the dedup the ticket requires).
 func TestGraphResultIdentity_StableTuple(t *testing.T) {
@@ -257,18 +257,18 @@ func TestGraphResultIdentity_StableTuple(t *testing.T) {
 		NodeKind:   graph.NodeKindChunk,
 		Relation:   graph.EdgeKindSymbolHasChunk,
 		Role:       "related",
-		GraphPath:  []string{"seed", "symbol_has_chunk", "node:chunk:p:a"},
+		Path:       singleHopGraphPath("seed", "symbol_has_chunk", "node:chunk:p:a"),
 	}
 
-	// Same matcher fields, different node_id + confidence + graph_path (distinct
-	// chunk nodes / edge paths of the same file) => same identity, so they
-	// collapse for precision.
+	// Same matcher fields, different node_id + confidence + path (distinct chunk
+	// nodes / edge paths of the same file) => same identity, so they collapse for
+	// precision.
 	sameTuple := base
 	sameTuple.NodeID = "node-2"
 	sameTuple.Confidence = 0.9
-	sameTuple.GraphPath = []string{"seed", "symbol_has_chunk", "node:chunk:p:b"}
+	sameTuple.Path = singleHopGraphPath("seed", "symbol_has_chunk", "node:chunk:p:b")
 	assert.Equal(t, graphResultIdentity(base, mode), graphResultIdentity(sameTuple, mode),
-		"node_id, confidence, and graph_path must not affect the find_references identity")
+		"node_id, confidence, and path must not affect the find_references identity")
 
 	// Differing relation/role/kind/source_path each break identity.
 	for _, mut := range []func(*graph.QueryResult){

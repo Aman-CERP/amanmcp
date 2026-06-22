@@ -25,6 +25,8 @@ const (
 const (
 	// ExtractorCheap identifies deterministic local edge extractors.
 	ExtractorCheap = "cheap"
+	// ExtractorSCIPGo identifies SCIP-backed precise edges (FEAT-GRA5).
+	ExtractorSCIPGo = "scip-go"
 )
 
 // NodeKind identifies the graph primitive represented by a node.
@@ -59,9 +61,16 @@ const (
 	EdgeKindDocMentionsSymbol        EdgeKind = "doc_mentions_symbol"
 	EdgeKindDocMentionsConfigKey     EdgeKind = "doc_mentions_config_key"
 	EdgeKindDocMentionsPath          EdgeKind = "doc_mentions_path"
+	// EdgeKindSymbolCalls identifies precise caller→callee edges (FEAT-GRA5/GRA34).
+	// Reserved for SCIP-Go promotion; the context classifier prefers this over import-proxy.
+	EdgeKindSymbolCalls EdgeKind = "symbol_calls"
 )
 
-// ConfidenceLabel is a compact, stable confidence bucket for status output.
+// ConfidenceLabel is a compact, stable magnitude bucket for graph output.
+//
+// Labels are derived solely from Edge.Confidence: exact == 1.0, high >= 0.9,
+// medium >= 0.7, and low otherwise. The label does not describe how an edge was
+// derived; Evidence.Heuristic is the orthogonal parser-backed-vs-inferred signal.
 type ConfidenceLabel string
 
 const (
@@ -122,13 +131,15 @@ const (
 type WarningCode string
 
 const (
-	WarningGraphUnavailable   WarningCode = "graph_unavailable"
-	WarningSchemaIncompatible WarningCode = "schema_incompatible"
-	WarningGraphStale         WarningCode = "graph_stale"
-	WarningGraphStaleEdges    WarningCode = "graph_stale_edges"
-	WarningExtractorFailed    WarningCode = "extractor_failed"
-	WarningExtractorPartial   WarningCode = "extractor_partial"
-	WarningBuildFailed        WarningCode = "build_failed"
+	WarningGraphUnavailable         WarningCode = "graph_unavailable"
+	WarningSchemaIncompatible       WarningCode = "schema_incompatible"
+	WarningGraphStale               WarningCode = "graph_stale"
+	WarningGraphStaleEdges          WarningCode = "graph_stale_edges"
+	WarningExtractorFailed          WarningCode = "extractor_failed"
+	WarningExtractorPartial         WarningCode = "extractor_partial"
+	WarningBuildFailed              WarningCode = "build_failed"
+	WarningTraversalBudgetExhausted WarningCode = "traversal_budget_exhausted"
+	WarningUnsupportedLanguage      WarningCode = "unsupported_language"
 )
 
 // Node is a typed graph entity. Key is the stable natural key within kind/project.
@@ -280,10 +291,12 @@ type ExtractorSummary struct {
 
 // StatusWarning is a compact machine-readable degradation warning.
 type StatusWarning struct {
-	Code       WarningCode `json:"code"`
-	Message    string      `json:"message"`
-	Extractor  string      `json:"extractor,omitempty"`
-	SourcePath string      `json:"source_path,omitempty"`
+	Code         WarningCode           `json:"code"`
+	Message      string                `json:"message"`
+	Extractor    string                `json:"extractor,omitempty"`
+	SourcePath   string                `json:"source_path,omitempty"`
+	BudgetReason TraversalBudgetReason `json:"budget_reason,omitempty"`
+	BudgetLimit  int                   `json:"budget_limit,omitempty"`
 }
 
 // StatusSnapshot is the graph_status resource payload.
@@ -397,6 +410,10 @@ func validateConfidence(confidence float64) error {
 	return nil
 }
 
+// confidenceLabelFor maps the numeric confidence score to the public four-label
+// taxonomy. Keep this as the single banding rule for every extractor: exact
+// means a 1.0 identity edge from any extractor (parser/chunk today, SCIP later),
+// not a SCIP-specific provenance claim.
 func confidenceLabelFor(confidence float64) ConfidenceLabel {
 	switch {
 	case confidence == 1:

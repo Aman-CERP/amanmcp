@@ -89,8 +89,49 @@ func TestGraphDegradationLabels_MapsStatusAndWarnings(t *testing.T) {
 			want: []GraphDegradationLabel{DegradationResultTruncated},
 		},
 		{
+			name: "traversal_budget_exhausted uses structured budget_reason",
+			in: graphDegradationInput{
+				Status:       graph.GraphStatusFresh,
+				WarningCodes: []graph.WarningCode{graph.WarningTraversalBudgetExhausted},
+				Warnings: []graph.StatusWarning{{
+					Code:         graph.WarningTraversalBudgetExhausted,
+					BudgetReason: graph.TraversalBudgetResults,
+					BudgetLimit:  10,
+				}},
+			},
+			want: []GraphDegradationLabel{DegradationResultTruncated, DegradationTraversalBudgetExhausted},
+		},
+		{
+			name: "results budget reason is detected when another budget warning precedes it",
+			in: graphDegradationInput{
+				Status:       graph.GraphStatusFresh,
+				WarningCodes: []graph.WarningCode{graph.WarningTraversalBudgetExhausted},
+				Warnings: []graph.StatusWarning{
+					{
+						Code:         graph.WarningTraversalBudgetExhausted,
+						BudgetReason: graph.TraversalBudgetPerEdgeKind,
+						BudgetLimit:  3,
+					},
+					{
+						Code:         graph.WarningTraversalBudgetExhausted,
+						BudgetReason: graph.TraversalBudgetResults,
+						BudgetLimit:  5,
+					},
+				},
+			},
+			want: []GraphDegradationLabel{DegradationResultTruncated, DegradationTraversalBudgetExhausted},
+		},
+		{
 			name: "unsupported corpus language maps to unsupported_language",
 			in:   graphDegradationInput{Status: graph.GraphStatusFresh, Language: "rust"},
+			want: []GraphDegradationLabel{DegradationUnsupportedLanguage},
+		},
+		{
+			name: "unsupported_language product warning maps to unsupported_language",
+			in: graphDegradationInput{
+				Status:       graph.GraphStatusFresh,
+				WarningCodes: []graph.WarningCode{graph.WarningUnsupportedLanguage},
+			},
 			want: []GraphDegradationLabel{DegradationUnsupportedLanguage},
 		},
 		{
@@ -154,6 +195,7 @@ func TestGraphBlockingDegradationLabels_FollowsRecoverabilityMatrix(t *testing.T
 		status      graph.GraphStatus
 		resultCount int
 		query       GraphQuery
+		warnings    []graph.StatusWarning
 		want        []GraphDegradationLabel
 	}{
 		{
@@ -259,11 +301,31 @@ func TestGraphBlockingDegradationLabels_FollowsRecoverabilityMatrix(t *testing.T
 			query:  GraphQuery{Degradation: GraphDegradationExpectation{BlockingStatuses: defaultBlockingGraphStatuses}},
 			want:   []GraphDegradationLabel{DegradationInvalidParams},
 		},
+		{
+			name:        "traversal_budget_exhausted blocks when results reason follows another budget warning",
+			labels:      []GraphDegradationLabel{DegradationTraversalBudgetExhausted},
+			status:      graph.GraphStatusFresh,
+			resultCount: 5,
+			query:       GraphQuery{Degradation: GraphDegradationExpectation{BlockingStatuses: defaultBlockingGraphStatuses}},
+			warnings: []graph.StatusWarning{
+				{
+					Code:         graph.WarningTraversalBudgetExhausted,
+					BudgetReason: graph.TraversalBudgetPerEdgeKind,
+					BudgetLimit:  3,
+				},
+				{
+					Code:         graph.WarningTraversalBudgetExhausted,
+					BudgetReason: graph.TraversalBudgetResults,
+					BudgetLimit:  5,
+				},
+			},
+			want: []GraphDegradationLabel{DegradationTraversalBudgetExhausted},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := graphBlockingDegradationLabels(tt.labels, tt.status, tt.resultCount, tt.query)
+			got := graphBlockingDegradationLabels(tt.labels, tt.status, tt.resultCount, tt.query, tt.warnings)
 			assert.Equal(t, tt.want, got)
 		})
 	}

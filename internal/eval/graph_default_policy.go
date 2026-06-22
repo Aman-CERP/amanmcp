@@ -44,7 +44,8 @@ const (
 	graphDefaultReasonNoCurrentVer  = "current source version not provided; eval freshness cannot be certified"
 	graphDefaultReasonModeThreshold = "per-mode relevance threshold not met"
 	graphDefaultReasonContract      = "graph contract failures present"
-	graphDefaultReasonBlockingDeg   = "blocking degradation rate above threshold"
+	graphDefaultReasonBlockingDeg        = "blocking degradation rate above threshold"
+	graphDefaultReasonNegativeAdversarial = "negative-adversarial gate not satisfied"
 	graphDefaultReasonInsufficient  = "insufficient consecutive passing runs on distinct source versions"
 	graphDefaultReasonPassed        = "direct graph eval passed for the current source version"
 )
@@ -201,6 +202,14 @@ func EvaluateGraphDefaultPolicy(report *DirectGraphEvalReport, opts GraphDefault
 	if report.Summary.DegradationBlockingRate > blockThreshold {
 		reasons = append(reasons, fmt.Sprintf("%s: %.2f > %.2f",
 			graphDefaultReasonBlockingDeg, report.Summary.DegradationBlockingRate, blockThreshold))
+		recommendation = strongerGraphRecommendation(recommendation, GraphRecommendationKill)
+	}
+
+	// 7. Negative-adversarial contract (TASK-GRA26): same fail-closed gate the
+	// direct graph runner enforces for quick/full subsets.
+	if failures := graphNegativeGateFailures(report.Summary, report.Run.Subset); len(failures) > 0 {
+		state.FailingMetrics = append(state.FailingMetrics, failures...)
+		reasons = append(reasons, graphDefaultReasonNegativeAdversarial+": "+strings.Join(failures, "; "))
 		recommendation = strongerGraphRecommendation(recommendation, GraphRecommendationKill)
 	}
 

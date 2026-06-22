@@ -239,6 +239,7 @@ type MockBM25Index struct {
 	IndexCalled bool
 	SaveCalled  bool
 	Documents   []*store.Document
+	DeletedIDs  []string
 	IndexError  error
 	SaveError   error
 }
@@ -254,6 +255,7 @@ func (m *MockBM25Index) Search(ctx context.Context, query string, limit int) ([]
 }
 
 func (m *MockBM25Index) Delete(ctx context.Context, docIDs []string) error {
+	m.DeletedIDs = append(m.DeletedIDs, docIDs...)
 	return nil
 }
 
@@ -288,6 +290,7 @@ type MockVectorStore struct {
 	SaveCalled bool
 	IDs        []string
 	Vectors    [][]float32
+	DeletedIDs []string
 	AddError   error
 	SaveError  error
 }
@@ -304,6 +307,7 @@ func (m *MockVectorStore) Search(ctx context.Context, query []float32, k int) ([
 }
 
 func (m *MockVectorStore) Delete(ctx context.Context, ids []string) error {
+	m.DeletedIDs = append(m.DeletedIDs, ids...)
 	return nil
 }
 
@@ -917,6 +921,81 @@ func TestRunner_Run_DoesNotBuildGraphWhenSearchIndexFails(t *testing.T) {
 	assert.False(t, graphRepo.ResetCalled)
 	assert.False(t, graphRepo.ReplaceEdgesCalled)
 	assert.False(t, graphRepo.RecordBuildCalled)
+}
+
+// TestRunner_Run_ReplacesFileChunksOnReindex is the DEBT-042 contract: re-indexing
+// a file must REPLACE that file's chunks in the metadata store, not leave the prior
+// generation behind. Edited files get new content-hash chunk IDs, and the full
+// index path persisted them without removing the old set — the stale generation is
+// what polluted graph rebuild-from-store (the DEBT-041 duplicate symbol nodes) and
+// BM25/vector search.
+func TestRunner_Run_ReplacesFileChunksOnReindex(t *testing.T) {
+	tmpDir := t.TempDir()
+	dataDir := tmpDir + "/.amanmcp"
+	require.NoError(t, os.MkdirAll(dataDir, 0o755))
+
+	metadata, err := store.NewSQLiteStore(dataDir + "/metadata.db")
+	require.NoError(t, err)
+	defer func() { _ = metadata.Close() }()
+
+	chunker := &MockChunker{}
+	bm25 := &MockBM25Index{}
+	vector := &MockVectorStore{}
+	runner, err := NewRunner(RunnerDependencies{
+		Renderer:        &MockRenderer{},
+		Config:          config.NewConfig(),
+		Metadata:        metadata,
+		BM25:            bm25,
+		Vector:          vector,
+		Embedder:        &MockEmbedder{},
+		CodeChunker:     chunker,
+		MarkdownChunker: &MockChunker{},
+		GraphRepository: &MockGraphRepository{},
+	})
+	require.NoError(t, err)
+	defer runner.Close()
+
+	ctx := context.Background()
+	fileID := hashString("test.go")
+
+	// Gen A: index test.go with one chunk at line 2.
+	require.NoError(t, os.WriteFile(tmpDir+"/test.go", []byte("package main\nfunc A() {}\n"), 0o644))
+	chunker.Chunks = []*chunk.Chunk{{
+		ID: "genA-1", FilePath: "test.go", Content: "func A() {}",
+		ContentType: chunk.ContentTypeCode, Language: "go", StartLine: 2, EndLine: 2,
+	}}
+	_, err = runner.Run(ctx, RunnerConfig{RootDir: tmpDir, DataDir: dataDir})
+	require.NoError(t, err)
+
+	genA, err := metadata.GetChunksByFile(ctx, fileID)
+	require.NoError(t, err)
+	require.Len(t, genA, 1, "first index stores one chunk")
+	require.Equal(t, "genA-1", genA[0].ID)
+
+	// Gen B: edit the file so the symbol shifts down → a new chunk id.
+	require.NoError(t, os.WriteFile(tmpDir+"/test.go", []byte("package main\n\n\nfunc A() {}\n"), 0o644))
+	chunker.Chunks = []*chunk.Chunk{{
+		ID: "genB-1", FilePath: "test.go", Content: "func A() {}",
+		ContentType: chunk.ContentTypeCode, Language: "go", StartLine: 4, EndLine: 4,
+	}}
+	_, err = runner.Run(ctx, RunnerConfig{RootDir: tmpDir, DataDir: dataDir})
+	require.NoError(t, err)
+
+	// The store must hold ONLY the current generation, not both.
+	after, err := metadata.GetChunksByFile(ctx, fileID)
+	require.NoError(t, err)
+	ids := make([]string, len(after))
+	for i, c := range after {
+		ids[i] = c.ID
+	}
+	assert.Equal(t, []string{"genB-1"}, ids,
+		"re-index must replace the file's chunks, not accumulate the stale generation")
+
+	// AC2: the stale chunk's id is removed from BM25 and the vector store, so search
+	// can no longer return the prior generation.
+	assert.Contains(t, bm25.DeletedIDs, "genA-1", "stale chunk must be deleted from BM25 on re-index")
+	assert.Contains(t, vector.DeletedIDs, "genA-1", "stale chunk must be deleted from the vector store on re-index")
+	assert.NotContains(t, bm25.DeletedIDs, "genB-1", "the current chunk must not be deleted")
 }
 
 func TestRunner_Run_DispatchesPDFsToPDFChunker(t *testing.T) {

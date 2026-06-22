@@ -52,6 +52,43 @@ NEGATIVE_FAILED=0
 # Results array for JSON
 declare -a RESULTS=()
 
+# Build one compact JSON result object from key/value pairs.
+#
+# Usage: result_json key1 val1 key2 val2 ...
+#
+# Every value is passed to jq via --arg, so jq (a real JSON encoder) does the
+# escaping: double quotes, backslashes, and control characters (U+0000-U+001F,
+# including newlines, tabs, and ANSI ESC) are escaped, and any invalid UTF-8
+# byte sequence is replaced with U+FFFD. This is the same coercion Go's own
+# encoding/json performs, so a malformed command-output capture can never
+# produce an invalid baseline-results.json (DEBT-040). Keys must be valid jq
+# identifiers (they are fixed literals at every call site).
+#
+# NUL bytes are already stripped from captured output by bash command
+# substitution upstream. Callers must size-cap any large value before passing it
+# (jq's --arg sends values via the argv list, which is bounded by ARG_MAX); the
+# capture sites use `head -c` for exactly this reason.
+result_json() {
+    if [[ $(( $# % 2 )) -ne 0 ]]; then
+        echo "result_json: odd argument count ($#); expected key/value pairs" >&2
+        return 1
+    fi
+    local jq_args=()
+    local filter="{"
+    local first=1
+    while [[ $# -gt 1 ]]; do
+        local key="$1"
+        local val="$2"
+        shift 2
+        jq_args+=(--arg "$key" "$val")
+        [[ $first -eq 1 ]] || filter+=","
+        filter+="${key}:\$${key}"
+        first=0
+    done
+    filter+="}"
+    jq -cn "${jq_args[@]}" "$filter"
+}
+
 # Check if amanmcp is available
 check_amanmcp() {
     if ! command -v amanmcp &> /dev/null; then
@@ -89,18 +126,20 @@ run_query() {
 
     if [[ $exit_code -ne 0 ]]; then
         echo -e "${RED}FAIL${NC} (command error)"
-        RESULTS+=("{\"tier\":\"${tier}\",\"query\":\"${query}\",\"expected\":\"${expected}\",\"status\":\"error\",\"error\":\"command failed\"}")
+        RESULTS+=("$(result_json tier "$tier" query "$query" expected "$expected" status "error" error "command failed")")
         return 1
     fi
 
     # Check if expected file/pattern appears in results
     if echo "$output" | grep -q "$expected"; then
         echo -e "${GREEN}PASS${NC}"
-        RESULTS+=("{\"tier\":\"${tier}\",\"query\":\"${query}\",\"expected\":\"${expected}\",\"status\":\"pass\"}")
+        RESULTS+=("$(result_json tier "$tier" query "$query" expected "$expected" status "pass")")
         return 0
     else
         echo -e "${RED}FAIL${NC} (expected not found)"
-        RESULTS+=("{\"tier\":\"${tier}\",\"query\":\"${query}\",\"expected\":\"${expected}\",\"status\":\"fail\",\"output\":\"$(echo "$output" | head -5 | tr '\n' ' ')\"}")
+        local snippet
+        snippet=$(printf '%s' "$output" | head -5 | tr '\n' ' ' | head -c 2000)
+        RESULTS+=("$(result_json tier "$tier" query "$query" expected "$expected" status "fail" output "$snippet")")
         return 1
     fi
 }
@@ -123,17 +162,19 @@ run_negative() {
     # Exit code 0 means success, even with empty results
     if [[ $exit_code -eq 0 ]]; then
         echo -e "${GREEN}PASS${NC} (handled gracefully)"
-        RESULTS+=("{\"tier\":\"negative\",\"query\":\"${query}\",\"description\":\"${description}\",\"status\":\"pass\"}")
+        RESULTS+=("$(result_json tier "negative" query "$query" description "$description" status "pass")")
         return 0
     else
         # Some errors are acceptable for edge cases
         if echo "$output" | grep -qE "(no results|empty|not found)"; then
             echo -e "${GREEN}PASS${NC} (expected empty)"
-            RESULTS+=("{\"tier\":\"negative\",\"query\":\"${query}\",\"description\":\"${description}\",\"status\":\"pass\"}")
+            RESULTS+=("$(result_json tier "negative" query "$query" description "$description" status "pass")")
             return 0
         fi
         echo -e "${RED}FAIL${NC} (unexpected error)"
-        RESULTS+=("{\"tier\":\"negative\",\"query\":\"${query}\",\"description\":\"${description}\",\"status\":\"fail\",\"error\":\"${output}\"}")
+        local err
+        err=$(printf '%s' "$output" | head -c 4000)
+        RESULTS+=("$(result_json tier "negative" query "$query" description "$description" status "fail" error "$err")")
         return 1
     fi
 }
@@ -144,78 +185,78 @@ run_tier1() {
 
     # Code location queries
     if run_query "tier1" "Where is the vector store created" "internal/store/hnsw" "search"; then
-        ((TIER1_PASSED++))
+        ((++TIER1_PASSED))
     else
-        ((TIER1_FAILED++))
+        ((++TIER1_FAILED))
     fi
 
     if run_query "tier1" "How does RRF fusion work" "internal/search/fusion" "search"; then
-        ((TIER1_PASSED++))
+        ((++TIER1_PASSED))
     else
-        ((TIER1_FAILED++))
+        ((++TIER1_FAILED))
     fi
 
     if run_query "tier1" "Find the embedder interface" "internal/embed" "search"; then
-        ((TIER1_PASSED++))
+        ((++TIER1_PASSED))
     else
-        ((TIER1_FAILED++))
+        ((++TIER1_FAILED))
     fi
 
     if run_query "tier1" "Where are MCP tools registered" "internal/mcp/server" "search"; then
-        ((TIER1_PASSED++))
+        ((++TIER1_PASSED))
     else
-        ((TIER1_FAILED++))
+        ((++TIER1_FAILED))
     fi
 
     # Documentation queries
     if run_query "tier1" "What are the performance targets" "docs/" "search"; then
-        ((TIER1_PASSED++))
+        ((++TIER1_PASSED))
     else
-        ((TIER1_FAILED++))
+        ((++TIER1_FAILED))
     fi
 
     if run_query "tier1" "How do I add a new language" "docs/" "search"; then
-        ((TIER1_PASSED++))
+        ((++TIER1_PASSED))
     else
-        ((TIER1_FAILED++))
+        ((++TIER1_FAILED))
     fi
 
     # Symbol queries
     if run_query "tier1" "Search function" "internal/search/engine" "search"; then
-        ((TIER1_PASSED++))
+        ((++TIER1_PASSED))
     else
-        ((TIER1_FAILED++))
+        ((++TIER1_FAILED))
     fi
 
     if run_query "tier1" "Index function" "internal/index" "search"; then
-        ((TIER1_PASSED++))
+        ((++TIER1_PASSED))
     else
-        ((TIER1_FAILED++))
+        ((++TIER1_FAILED))
     fi
 
     if run_query "tier1" "Chunk type" "internal/chunk" "search"; then
-        ((TIER1_PASSED++))
+        ((++TIER1_PASSED))
     else
-        ((TIER1_FAILED++))
+        ((++TIER1_FAILED))
     fi
 
     if run_query "tier1" "Config type" "internal/config" "search"; then
-        ((TIER1_PASSED++))
+        ((++TIER1_PASSED))
     else
-        ((TIER1_FAILED++))
+        ((++TIER1_FAILED))
     fi
 
     # Cross-reference queries
     if run_query "tier1" "OllamaEmbedder" "internal/embed/ollama" "search"; then
-        ((TIER1_PASSED++))
+        ((++TIER1_PASSED))
     else
-        ((TIER1_FAILED++))
+        ((++TIER1_FAILED))
     fi
 
     if run_query "tier1" "Config struct fields" "internal/config" "search"; then
-        ((TIER1_PASSED++))
+        ((++TIER1_PASSED))
     else
-        ((TIER1_FAILED++))
+        ((++TIER1_FAILED))
     fi
 
     echo ""
@@ -227,27 +268,27 @@ run_tier2() {
     echo -e "\n${BOLD}${CYAN}=== Tier 2 Queries (Should Pass) ===${NC}\n"
 
     if run_query "tier2" "What configuration options exist" "config" "search"; then
-        ((TIER2_PASSED++))
+        ((++TIER2_PASSED))
     else
-        ((TIER2_FAILED++))
+        ((++TIER2_FAILED))
     fi
 
     if run_query "tier2" "Installation instructions" "README" "search"; then
-        ((TIER2_PASSED++))
+        ((++TIER2_PASSED))
     else
-        ((TIER2_FAILED++))
+        ((++TIER2_FAILED))
     fi
 
     if run_query "tier2" "Error codes" "internal/" "search"; then
-        ((TIER2_PASSED++))
+        ((++TIER2_PASSED))
     else
-        ((TIER2_FAILED++))
+        ((++TIER2_FAILED))
     fi
 
     if run_query "tier2" "SearchOptions parameters" "search" "search"; then
-        ((TIER2_PASSED++))
+        ((++TIER2_PASSED))
     else
-        ((TIER2_FAILED++))
+        ((++TIER2_FAILED))
     fi
 
     echo ""
@@ -259,27 +300,27 @@ run_negative_tests() {
     echo -e "\n${BOLD}${CYAN}=== Negative Tests (Must Not Crash) ===${NC}\n"
 
     if run_negative "xyznonexistent123abcdef" "Non-existent symbol"; then
-        ((NEGATIVE_PASSED++))
+        ((++NEGATIVE_PASSED))
     else
-        ((NEGATIVE_FAILED++))
+        ((++NEGATIVE_FAILED))
     fi
 
     if run_negative "func(); DROP TABLE users;" "SQL injection attempt"; then
-        ((NEGATIVE_PASSED++))
+        ((++NEGATIVE_PASSED))
     else
-        ((NEGATIVE_FAILED++))
+        ((++NEGATIVE_FAILED))
     fi
 
     if run_negative "" "Empty query string"; then
-        ((NEGATIVE_PASSED++))
+        ((++NEGATIVE_PASSED))
     else
-        ((NEGATIVE_FAILED++))
+        ((++NEGATIVE_FAILED))
     fi
 
     if run_negative "a" "Single character query"; then
-        ((NEGATIVE_PASSED++))
+        ((++NEGATIVE_PASSED))
     else
-        ((NEGATIVE_FAILED++))
+        ((++NEGATIVE_FAILED))
     fi
 
     echo ""
@@ -293,19 +334,32 @@ save_results() {
 
     mkdir -p "$(dirname "$RESULTS_FILE")"
 
-    cat > "$RESULTS_FILE" << EOF
-{
-  "timestamp": "${timestamp}",
-  "summary": {
-    "tier1": {"passed": ${TIER1_PASSED}, "failed": ${TIER1_FAILED}, "total": 12},
-    "tier2": {"passed": ${TIER2_PASSED}, "failed": ${TIER2_FAILED}, "total": 4},
-    "negative": {"passed": ${NEGATIVE_PASSED}, "failed": ${NEGATIVE_FAILED}, "total": 4}
-  },
-  "results": [
-$(IFS=,; echo "${RESULTS[*]}" | sed 's/},{/},\n    {/g' | sed 's/^/    /')
-  ]
-}
-EOF
+    # Each RESULTS entry is already a compact, fully-escaped JSON object (built by
+    # result_json via jq). Slurp them into an array and assemble the whole
+    # document with jq so the emitted file is always valid JSON regardless of
+    # what the captured command output contained (DEBT-040).
+    local results_json
+    if [[ ${#RESULTS[@]} -gt 0 ]]; then
+        results_json=$(printf '%s\n' "${RESULTS[@]}" | jq -s '.')
+    else
+        results_json='[]'
+    fi
+
+    jq -n \
+        --arg timestamp "$timestamp" \
+        --argjson t1p "$TIER1_PASSED" --argjson t1f "$TIER1_FAILED" \
+        --argjson t2p "$TIER2_PASSED" --argjson t2f "$TIER2_FAILED" \
+        --argjson negp "$NEGATIVE_PASSED" --argjson negf "$NEGATIVE_FAILED" \
+        --argjson results "$results_json" \
+        '{
+          timestamp: $timestamp,
+          summary: {
+            tier1: {passed: $t1p, failed: $t1f, total: 12},
+            tier2: {passed: $t2p, failed: $t2f, total: 4},
+            negative: {passed: $negp, failed: $negf, total: 4}
+          },
+          results: $results
+        }' > "$RESULTS_FILE"
 
     echo -e "\n${CYAN}Results saved to: ${RESULTS_FILE}${NC}"
 
@@ -451,4 +505,8 @@ main() {
     print_summary
 }
 
-main "$@"
+# Only run when executed directly, so tests can source this file and call
+# result_json / save_results in isolation (DEBT-040 regression test).
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

@@ -13,9 +13,18 @@ import (
 )
 
 const (
+	// GraphCorpusSchemaVersion versions the INPUT corpus YAML contract
+	// (graph-queries.yaml). It is validated on load (ValidateGraphCorpus) and must
+	// not change unless the corpus file format changes.
 	GraphCorpusSchemaVersion = 1
-	DefaultGraphCorpusPath   = "internal/validation/testdata/graph-queries.yaml"
-	DefaultGraphOutDir       = ".aman-pm/validation/graph-eval"
+	// DirectGraphReportSchemaVersion versions the OUTPUT report contract
+	// (DirectGraphEvalReport, written to latest.json) independently of the corpus.
+	// Bumped to 2 by TASK-GRA21: each results[] entry now carries the structured
+	// `path` object (was the flat `graph_path` string array), an incompatible shape
+	// change for any consumer keying off this version.
+	DirectGraphReportSchemaVersion = 2
+	DefaultGraphCorpusPath         = "internal/validation/testdata/graph-queries.yaml"
+	DefaultGraphOutDir             = ".aman-pm/validation/graph-eval"
 
 	GraphSubsetQuick = "quick"
 	GraphSubsetFull  = "full"
@@ -31,9 +40,10 @@ const (
 	// cases are reported separately so an intentionally-degraded probe or a
 	// known future-semantics gap is not counted as a relevance failure
 	// (TASK-GRA12/13/14).
-	GraphExpectationClassQuality  = "quality"
-	GraphExpectationClassDegraded = "degraded"
-	GraphExpectationClassGap      = "gap"
+	GraphExpectationClassQuality             = "quality"
+	GraphExpectationClassDegraded            = "degraded"
+	GraphExpectationClassGap                 = "gap"
+	GraphExpectationClassNegativeAdversarial = "negative_adversarial"
 
 	maxGraphEvalLimit = 50
 )
@@ -111,6 +121,8 @@ var allowedGraphWarningCodes = map[graph.WarningCode]bool{
 	graph.WarningExtractorPartial:                true,
 	graph.WarningBuildFailed:                     true,
 	graph.WarningCode("graph_results_truncated"): true,
+	graph.WarningTraversalBudgetExhausted:        true,
+	graph.WarningUnsupportedLanguage:             true,
 }
 
 var allowedDirectGraphRoles = map[string]bool{
@@ -122,9 +134,10 @@ var allowedDirectGraphRoles = map[string]bool{
 }
 
 var allowedGraphExpectationClasses = map[string]bool{
-	GraphExpectationClassQuality:  true,
-	GraphExpectationClassDegraded: true,
-	GraphExpectationClassGap:      true,
+	GraphExpectationClassQuality:             true,
+	GraphExpectationClassDegraded:            true,
+	GraphExpectationClassGap:                 true,
+	GraphExpectationClassNegativeAdversarial: true,
 }
 
 // graphExpectationClassOrDefault returns the case's expectation class, treating
@@ -147,16 +160,28 @@ type rawGraphQuery struct {
 	Name                 string                      `yaml:"name"`
 	Mode                 string                      `yaml:"mode"`
 	Query                string                      `yaml:"query"`
+	SubjectType          string                      `yaml:"subject_type,omitempty"`
 	Limit                int                         `yaml:"limit,omitempty"`
 	IncludeStale         bool                        `yaml:"include_stale,omitempty"`
+	BudgetOverrides      graphTraversalBudgetYAML    `yaml:"budget_overrides,omitempty"`
 	Subsets              []string                    `yaml:"subsets"`
 	Holdout              *bool                       `yaml:"holdout"`
 	Source               string                      `yaml:"source"`
 	ExpectationClass     string                      `yaml:"expectation_class,omitempty"`
 	Expected             []GraphExpectedEvidence     `yaml:"expected"`
 	AcceptedAlternatives []GraphExpectedEvidence     `yaml:"accepted_alternatives,omitempty"`
+	Negative             GraphNegativeExpectation    `yaml:"negative,omitempty"`
 	Degradation          GraphDegradationExpectation `yaml:"degradation,omitempty"`
 	Metadata             map[string]string           `yaml:"metadata,omitempty"`
+}
+
+// graphTraversalBudgetYAML mirrors graph.TraversalBudgetOverrides for corpus YAML.
+type graphTraversalBudgetYAML struct {
+	MaxResults     *int `yaml:"max_results,omitempty"`
+	MaxNodes       *int `yaml:"max_nodes,omitempty"`
+	MaxPerEdgeKind *int `yaml:"max_per_edge_kind,omitempty"`
+	MaxTokens      *int `yaml:"max_tokens,omitempty"`
+	MaxDepth       *int `yaml:"max_depth,omitempty"`
 }
 
 type GraphCorpus struct {
@@ -165,20 +190,23 @@ type GraphCorpus struct {
 }
 
 type GraphQuery struct {
-	ID                   string                      `json:"id" yaml:"id"`
-	Name                 string                      `json:"name" yaml:"name"`
-	Mode                 string                      `json:"mode" yaml:"mode"`
-	Query                string                      `json:"query" yaml:"query"`
-	Limit                int                         `json:"limit,omitempty" yaml:"limit,omitempty"`
-	IncludeStale         bool                        `json:"include_stale,omitempty" yaml:"include_stale,omitempty"`
-	Subsets              []string                    `json:"subsets" yaml:"subsets"`
-	Holdout              bool                        `json:"holdout" yaml:"holdout"`
-	Source               string                      `json:"source" yaml:"source"`
-	ExpectationClass     string                      `json:"expectation_class,omitempty" yaml:"expectation_class,omitempty"`
-	Expected             []GraphExpectedEvidence     `json:"expected" yaml:"expected"`
-	AcceptedAlternatives []GraphExpectedEvidence     `json:"accepted_alternatives,omitempty" yaml:"accepted_alternatives,omitempty"`
-	Degradation          GraphDegradationExpectation `json:"degradation,omitempty" yaml:"degradation,omitempty"`
-	Metadata             map[string]string           `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	ID                   string                         `json:"id" yaml:"id"`
+	Name                 string                         `json:"name" yaml:"name"`
+	Mode                 string                         `json:"mode" yaml:"mode"`
+	Query                string                         `json:"query" yaml:"query"`
+	SubjectType          string                         `json:"subject_type,omitempty" yaml:"subject_type,omitempty"`
+	Limit                int                            `json:"limit,omitempty" yaml:"limit,omitempty"`
+	IncludeStale         bool                           `json:"include_stale,omitempty" yaml:"include_stale,omitempty"`
+	BudgetOverrides      graph.TraversalBudgetOverrides `json:"budget_overrides,omitempty" yaml:"budget_overrides,omitempty"`
+	Subsets              []string                       `json:"subsets" yaml:"subsets"`
+	Holdout              bool                           `json:"holdout" yaml:"holdout"`
+	Source               string                         `json:"source" yaml:"source"`
+	ExpectationClass     string                         `json:"expectation_class,omitempty" yaml:"expectation_class,omitempty"`
+	Expected             []GraphExpectedEvidence        `json:"expected" yaml:"expected"`
+	AcceptedAlternatives []GraphExpectedEvidence        `json:"accepted_alternatives,omitempty" yaml:"accepted_alternatives,omitempty"`
+	Negative             GraphNegativeExpectation       `json:"negative,omitempty" yaml:"negative,omitempty"`
+	Degradation          GraphDegradationExpectation    `json:"degradation,omitempty" yaml:"degradation,omitempty"`
+	Metadata             map[string]string              `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 }
 
 type GraphExpectedEvidence struct {
@@ -244,6 +272,11 @@ type DirectGraphSummary struct {
 	P50LatencyMs            int64   `json:"p50_latency_ms"`
 	P95LatencyMs            int64   `json:"p95_latency_ms"`
 	DegradationBlockingRate float64 `json:"degradation_blocking_rate"`
+	// Negative-adversarial metrics (TASK-GRA26): measured separately from quality
+	// relevance and gated at 100% via a direct threshold in the graph runner.
+	NegativeAdversarialCount     int     `json:"negative_adversarial_count"`
+	NegativeAdversarialPassCount int     `json:"negative_adversarial_pass_count"`
+	NegativeAdversarialPassRate  float64 `json:"negative_adversarial_pass_rate"`
 }
 
 type DirectGraphModeSummary struct {
@@ -307,6 +340,8 @@ type DirectGraphQueryResult struct {
 	Name                 string                `json:"name,omitempty"`
 	Mode                 string                `json:"mode"`
 	Query                string                `json:"query"`
+	Resolution           string                `json:"resolution,omitempty"`
+	CandidateCount       int                   `json:"candidate_count,omitempty"`
 	Status               graph.GraphStatus     `json:"status"`
 	Available            bool                  `json:"available"`
 	Degraded             bool                  `json:"degraded"`
@@ -409,14 +444,17 @@ func (raw rawGraphCorpus) toGraphCorpus() (GraphCorpus, error) {
 			Name:                 query.Name,
 			Mode:                 query.Mode,
 			Query:                query.Query,
+			SubjectType:          strings.TrimSpace(query.SubjectType),
 			Limit:                query.Limit,
 			IncludeStale:         query.IncludeStale,
+			BudgetOverrides:      query.BudgetOverrides.toGraphOverrides(),
 			Subsets:              query.Subsets,
 			Holdout:              *query.Holdout,
 			Source:               query.Source,
 			ExpectationClass:     strings.TrimSpace(query.ExpectationClass),
 			Expected:             query.Expected,
 			AcceptedAlternatives: query.AcceptedAlternatives,
+			Negative:             query.Negative,
 			Degradation:          query.Degradation,
 			Metadata:             query.Metadata,
 		})
@@ -496,6 +534,9 @@ func validateGraphQuery(query GraphQuery) error {
 	if err := validateProjectRelativeGraphValue(query.Query); err != nil {
 		return err
 	}
+	if err := validateGraphSubjectType(query.SubjectType); err != nil {
+		return err
+	}
 	if query.Limit < 0 || query.Limit > maxGraphEvalLimit {
 		return fmt.Errorf("limit must be between 0 and %d", maxGraphEvalLimit)
 	}
@@ -516,8 +557,16 @@ func validateGraphQuery(query GraphQuery) error {
 	if class := strings.TrimSpace(query.ExpectationClass); class != "" && !allowedGraphExpectationClasses[class] {
 		return fmt.Errorf("unsupported expectation_class %q", class)
 	}
-	if len(query.Expected) == 0 {
+	class := graphExpectationClassOrDefault(query.ExpectationClass)
+	if class == GraphExpectationClassNegativeAdversarial {
+		if err := validateGraphNegativeExpectation(query.Negative); err != nil {
+			return fmt.Errorf("negative expectation: %w", err)
+		}
+	} else if len(query.Expected) == 0 {
 		return fmt.Errorf("missing expected evidence")
+	}
+	if class == GraphExpectationClassNegativeAdversarial {
+		return validateGraphDegradation(query.Degradation)
 	}
 	seenExpected := make(map[string]bool, len(query.Expected))
 	for _, expected := range query.Expected {
@@ -549,6 +598,15 @@ func validateGraphQuery(query GraphQuery) error {
 		seenAlternative[key] = true
 	}
 	return validateGraphDegradation(query.Degradation)
+}
+
+func validateGraphSubjectType(subjectType string) error {
+	switch strings.TrimSpace(subjectType) {
+	case "", graph.SubjectTypeAuto, graph.SubjectTypePath, graph.SubjectTypeSymbol, graph.SubjectTypePackage, graph.SubjectTypeResultID:
+		return nil
+	default:
+		return fmt.Errorf("unsupported subject_type %q", subjectType)
+	}
 }
 
 func validateGraphExpectedEvidence(expected GraphExpectedEvidence) error {
@@ -670,6 +728,16 @@ func hasGraphSubset(query GraphQuery, subset string) bool {
 		}
 	}
 	return false
+}
+
+func (raw graphTraversalBudgetYAML) toGraphOverrides() graph.TraversalBudgetOverrides {
+	return graph.TraversalBudgetOverrides{
+		MaxResults:     raw.MaxResults,
+		MaxNodes:       raw.MaxNodes,
+		MaxPerEdgeKind: raw.MaxPerEdgeKind,
+		MaxTokens:      raw.MaxTokens,
+		MaxDepth:       raw.MaxDepth,
+	}
 }
 
 func validateProjectRelativeGraphValue(value string) error {

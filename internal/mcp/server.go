@@ -195,11 +195,15 @@ func (s *Server) SetMetrics(m *telemetry.QueryMetrics) {
 }
 
 // SetGraphRepository wires graph status and graph.query to one repository.
-func (s *Server) SetGraphRepository(repo graph.Repository) {
+func (s *Server) SetGraphRepository(repo graph.Repository, opts ...graph.QueryServiceOptions) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.graphStatus = repo
-	s.graphQuery = graph.NewQueryService(repo, graph.QueryServiceOptions{})
+	queryOpts := graph.QueryServiceOptions{}
+	if len(opts) > 0 {
+		queryOpts = opts[0]
+	}
+	s.graphQuery = graph.NewQueryService(repo, queryOpts)
 }
 
 // SetGraphQueryService wires graph.query to a testable graph service.
@@ -248,6 +252,8 @@ func (s *Server) CallTool(ctx context.Context, name string, args map[string]any)
 		return s.handleIndexStatusTool(ctx, args)
 	case "graph.query":
 		return s.handleGraphQueryArgs(ctx, args)
+	case "expand_context":
+		return s.handleExpandContextArgs(ctx, args)
 	default:
 		return nil, NewMethodNotFoundError(name)
 	}
@@ -653,6 +659,9 @@ func (s *Server) registerTools() {
 
 	mcp.AddTool(s.mcp, tools[4], s.mcpGraphQueryHandler)
 	s.logger.Debug("Registered tool", slog.String("name", "graph.query"))
+
+	mcp.AddTool(s.mcp, tools[5], s.mcpExpandContextHandler)
+	s.logger.Debug("Registered tool", slog.String("name", "expand_context"))
 
 	s.logger.Info("MCP tools registered", slog.Int("count", len(tools)))
 }

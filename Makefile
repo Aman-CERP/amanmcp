@@ -35,7 +35,7 @@ GRAPH_EVAL_BLOCKING_DEGRADATION_THRESHOLD ?= 0.10
 # CGO is required for tree-sitter code parsing only
 # USearch removed in v0.1.38 - now using coder/hnsw (pure Go)
 
-.PHONY: help build build-logs test test-race test-cover test-cover-html lint lint-fix lint-fast ci-check ci-check-strict ci-check-quick release-rehearse amanpm-check-constants amanpm-validate amanpm-db-sync amanpm-db-rebuild amanpm-index-generate amanpm-comply amanpm-comply-guard amanpm-verify-release-claims clean verify-checkpoint verify-docs verify-ssot verify-all install install-user install-local install-local-and-verify install-local-logs install-local-all uninstall uninstall-local install-mlx start-mlx install-ollama start-ollama stop-ollama switch-backend-mlx switch-backend-ollama verify-install validate validate-tier1 validate-tier2 validate-all eval-search-quick eval-search-graph eval-search-baseline eval-graph-quick eval-graph-full
+.PHONY: help build build-logs test test-race test-baseline-json test-cover test-cover-html lint lint-fix lint-fast ci-check ci-check-strict ci-check-quick release-rehearse amanpm-check-constants amanpm-validate amanpm-db-sync amanpm-db-rebuild amanpm-index-generate amanpm-comply amanpm-comply-guard amanpm-verify-release-claims clean verify-checkpoint verify-docs verify-ssot verify-substrate-parity verify-amanpm-wave2 verify-all rules-for-paths scoped-claude-md-for spawn-rules-for verify-feature-complete-with-gates test-amanpm-tooling verifications-prune install install-user install-local install-local-and-verify install-local-logs install-local-all uninstall uninstall-local install-mlx start-mlx install-ollama start-ollama stop-ollama switch-backend-mlx switch-backend-ollama verify-install validate validate-tier1 validate-tier2 validate-all eval-search-quick eval-search-graph eval-search-baseline eval-graph-quick eval-graph-full
 .PHONY: amanpm-capture-learning amanpm-add-changelog amanpm-create-item amanpm-move-item amanpm-create-adr amanpm-preflight-release
 
 # ============================================================================
@@ -154,6 +154,11 @@ test:
 test-race:
 	@echo "Running tests with race detector..."
 	@CGO_ENABLED=1 go test -race ./...
+
+## Run shell-script regression tests (DEBT-040 JSON-safety)
+test-baseline-json:
+	@echo "Running dogfood-baseline JSON-safety regression test..."
+	@./scripts/dogfood-baseline-json-test.sh
 
 test-cover:
 	@echo "Running tests with coverage..."
@@ -300,6 +305,46 @@ amanpm-create-adr:
 
 amanpm-preflight-release:
 	@python3 .aman-pm/scripts/amanpm/pm-preflight-release.py $(ARGS)
+
+# Wave 2: rule discovery + spawn-prompt + definition-of-done (DEBT-046)
+rules-for-paths:
+	@python3 scripts/python/rules_for_paths.py \
+		$(if $(JSON),--json) \
+		$(if $(TYPE),--type=$(TYPE)) \
+		$(if $(TYPES),--types=$(TYPES)) \
+		$(PATHS)
+
+scoped-claude-md-for:
+	@python3 scripts/python/scoped_claude_md_for.py \
+		$(if $(INLINE),--inline) \
+		$(if $(JSON),--json) \
+		$(PATHS)
+
+spawn-rules-for:
+	@python3 scripts/python/spawn_prompt_skeleton.py \
+		$(if $(PROFILE),--profile=$(PROFILE),--profile=code-mod) \
+		$(if $(JSON),--json) \
+		$(PATHS)
+
+verify-feature-complete-with-gates:
+ifndef ID
+	@echo "Usage: make verify-feature-complete-with-gates ID=DEBT-046"
+	@echo "       (or FEAT-SYN11, TASK-SUB14, BUG-079, SPIKE-007)"
+	@exit 1
+endif
+	@PYTHONPATH="scripts/python:.aman-pm/scripts/amanpm" \
+		python3 .aman-pm/scripts/amanpm/verify_feature_complete_with_gates.py $(ID) \
+		$(if $(JSON),--json) \
+		$(if $(QUICK),--quick)
+
+test-amanpm-tooling:
+	@PYTHONPATH="scripts/python:.aman-pm/scripts/amanpm" \
+		python3 -m unittest discover -s .aman-pm/scripts/tests -p 'test_*.py' -v
+
+verifications-prune:
+	@find .aman-pm/sprints/active/verifications -maxdepth 1 -name '*.yaml' -mtime +$${DAYS:-90} -print -delete 2>/dev/null || true
+	@find .aman-pm/audits/evidence/verification-records -maxdepth 1 -name '*.yaml' -mtime +$${DAYS:-90} -print -delete 2>/dev/null || true
+	@echo "PASS: verification records older than $${DAYS:-90} days pruned"
 
 # Fast commit check (no tests, lint-fast only) - used by pre-commit hook
 ci-check-commit:
@@ -476,8 +521,16 @@ verify-ssot:
 amanpm-verify-release-claims:
 	@./scripts/amanpm/verify-release-claims.sh
 
+# Verify DEBT-034 AmanPM substrate parity (skills, commands, agents, rules).
+verify-substrate-parity:
+	@./scripts/verify-substrate-parity.sh
+
+# Verify DEBT-046 Wave 2 tooling (spawn-rules, DoD harness, adapted skills).
+verify-amanpm-wave2:
+	@./scripts/verify-amanpm-wave2.sh
+
 # Run all product verification checks (kept separate from amanpm-* substrate checks).
-verify-all: verify-docs verify-checkpoint verify-ssot
+verify-all: verify-docs verify-checkpoint verify-ssot verify-substrate-parity verify-amanpm-wave2
 	@echo "All verification checks complete"
 
 

@@ -128,8 +128,34 @@ func (r *DirectGraphRunner) Run(ctx context.Context, opts GraphOptions) (*Direct
 			return report, fmt.Errorf("direct graph eval gate failed: relevance thresholds not met: %s",
 				strings.Join(failures, "; "))
 		}
+		// (5) Negative-adversarial contract (TASK-GRA26): a dedicated 100% gate,
+		// independent of the blocking-degradation threshold and baseline machinery.
+		if failures := graphNegativeGateFailures(report.Summary, opts.Subset); len(failures) > 0 {
+			return report, fmt.Errorf("direct graph eval gate failed: %s", strings.Join(failures, "; "))
+		}
 	}
 	return report, nil
+}
+
+func finalizeGraphNegativeQueryResult(
+	result DirectGraphQueryResult,
+	query GraphQuery,
+	output DirectGraphToolOutput,
+) DirectGraphQueryResult {
+	result.Scored = true
+	passed, reason := scoreGraphNegativeCase(query.Negative, graphNegativeInput{
+		Resolution:        output.Resolution,
+		CandidateCount:    len(output.Candidates),
+		ResultCount:       len(output.Results),
+		Results:           output.Results,
+		WarningCodes:      result.WarningCodes,
+		DegradationLabels: result.DegradationLabels,
+	})
+	result.Passed = passed
+	if !passed {
+		result.FailureReason = reason
+	}
+	return result
 }
 
 func (r *DirectGraphRunner) snapshot(ctx context.Context) (GraphStatusSnapshotBrief, error) {
@@ -149,6 +175,8 @@ func (r *DirectGraphRunner) runQuery(ctx context.Context, query GraphQuery) Dire
 		Name:             query.Name,
 		Mode:             query.Mode,
 		Query:            query.Query,
+		Resolution:       output.Resolution,
+		CandidateCount:   len(output.Candidates),
 		ExpectationClass: graphExpectationClassOrDefault(query.ExpectationClass),
 		Status:           output.Status,
 		Available:        output.Available,
@@ -170,15 +198,20 @@ func (r *DirectGraphRunner) runQuery(ctx context.Context, query GraphQuery) Dire
 	result.DegradationLabels = graphDegradationLabels(graphDegradationInput{
 		Status:         output.Status,
 		WarningCodes:   result.WarningCodes,
+		Warnings:       append([]graph.StatusWarning(nil), output.Warnings...),
 		StaleResults:   anyStaleGraphResult(output.Results),
 		Language:       query.Metadata["language"],
 		InvalidParams:  err != nil && isGraphInvalidParamsError(err),
 		TransportError: err != nil,
 	})
-	result.BlockingDegradationLabels = graphBlockingDegradationLabels(result.DegradationLabels, output.Status, result.ResultCount, query)
+	result.BlockingDegradationLabels = graphBlockingDegradationLabels(
+		result.DegradationLabels, output.Status, result.ResultCount, query, result.Warnings)
 	result.BlockingDegradation = len(result.BlockingDegradationLabels) > 0
 	if err != nil {
 		return result
+	}
+	if graphExpectationClassOrDefault(query.ExpectationClass) == GraphExpectationClassNegativeAdversarial {
+		return finalizeGraphNegativeQueryResult(result, query, output)
 	}
 	if isBlockingGraphStatus(query.Degradation.BlockingStatuses, output.Status) {
 		result.FailureReason = fmt.Sprintf("blocking graph status %s", output.Status)
@@ -226,12 +259,17 @@ func (r *DirectGraphRunner) runQuery(ctx context.Context, query GraphQuery) Dire
 type SQLiteDirectGraphClient struct {
 	dataDir   string
 	projectID string
+	queryOpts graph.QueryServiceOptions
 	repo      graph.Repository
 	service   *graph.QueryService
 }
 
-func NewSQLiteDirectGraphClient(dataDir, projectID string) *SQLiteDirectGraphClient {
-	return &SQLiteDirectGraphClient{dataDir: dataDir, projectID: projectID}
+func NewSQLiteDirectGraphClient(dataDir, projectID string, opts ...graph.QueryServiceOptions) *SQLiteDirectGraphClient {
+	client := &SQLiteDirectGraphClient{dataDir: dataDir, projectID: projectID}
+	if len(opts) > 0 {
+		client.queryOpts = opts[0]
+	}
+	return client
 }
 
 func (c *SQLiteDirectGraphClient) Prepare(context.Context) error {
@@ -252,7 +290,7 @@ func (c *SQLiteDirectGraphClient) Prepare(context.Context) error {
 		return fmt.Errorf("open graph repository: %w", err)
 	}
 	c.repo = repo
-	c.service = graph.NewQueryService(repo, graph.QueryServiceOptions{})
+	c.service = graph.NewQueryService(repo, c.queryOpts)
 	return nil
 }
 
@@ -274,17 +312,27 @@ func (c *SQLiteDirectGraphClient) QueryGraph(ctx context.Context, query GraphQue
 	if err := c.Prepare(ctx); err != nil {
 		return DirectGraphToolOutput{}, err
 	}
+	query = expandGraphQuerySubjectPlaceholders(query, c.projectID)
 	response, err := c.service.Query(ctx, graph.QueryRequest{
-		ProjectID:    c.projectID,
-		Mode:         query.Mode,
-		Query:        query.Query,
-		Limit:        query.Limit,
-		IncludeStale: query.IncludeStale,
+		ProjectID:       c.projectID,
+		Mode:            query.Mode,
+		Query:           query.Query,
+		SubjectType:     query.SubjectType,
+		Limit:           query.Limit,
+		IncludeStale:    query.IncludeStale,
+		BudgetOverrides: query.BudgetOverrides,
 	})
 	if err != nil {
 		return DirectGraphToolOutput{}, err
 	}
 	return directGraphToolOutput(response), nil
+}
+
+func expandGraphQuerySubjectPlaceholders(query GraphQuery, projectID string) GraphQuery {
+	if query.SubjectType == graph.SubjectTypeResultID {
+		query.Query = strings.ReplaceAll(query.Query, "${project_id}", projectID)
+	}
+	return query
 }
 
 func (c *SQLiteDirectGraphClient) Close() error {
@@ -351,7 +399,7 @@ func buildDirectGraphReport(
 ) *DirectGraphEvalReport {
 	summary := summarizeDirectGraph(results)
 	report := &DirectGraphEvalReport{
-		SchemaVersion:   GraphCorpusSchemaVersion,
+		SchemaVersion:   DirectGraphReportSchemaVersion,
 		ReportType:      DirectGraphReportType,
 		MeasuredTool:    DirectGraphMeasuredTool,
 		EvaluationScope: DirectGraphEvaluationScope,
@@ -433,6 +481,8 @@ func summarizeDirectGraph(results []DirectGraphQueryResult) DirectGraphSummary {
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
 	summary.P50LatencyMs = percentile(latencies, 0.50)
 	summary.P95LatencyMs = percentile(latencies, 0.95)
+	summary.NegativeAdversarialPassCount, summary.NegativeAdversarialCount, summary.NegativeAdversarialPassRate =
+		summarizeGraphNegativeAdversarial(results)
 	return summary
 }
 
@@ -775,7 +825,15 @@ func directGraphMarkdownReport(report *DirectGraphEvalReport) string {
 	// Blocking degradation rate is rendered once, in the dedicated Degradation
 	// section below (with its case count), rather than duplicated here (DEBT-037
 	// finding #6). The gate reads report.Summary.DegradationBlockingRate directly.
-	fmt.Fprintf(&b, "- p95 latency: %d ms\n\n", report.Summary.P95LatencyMs)
+	fmt.Fprintf(&b, "- p95 latency: %d ms\n", report.Summary.P95LatencyMs)
+	if report.Summary.NegativeAdversarialCount > 0 {
+		fmt.Fprintf(&b, "- Negative adversarial pass rate: %.2f (%d/%d)\n",
+			report.Summary.NegativeAdversarialPassRate,
+			report.Summary.NegativeAdversarialPassCount,
+			report.Summary.NegativeAdversarialCount,
+		)
+	}
+	b.WriteString("\n")
 
 	b.WriteString("## Modes\n\n")
 	b.WriteString("| Mode | Queries | Measured | Quality | recall@10 | precision@3 | precision@5 | precision@10 | hit@3 | hit@10 | Threshold met |\n")
@@ -986,13 +1044,13 @@ func scoreGraphCase(expected, alternatives []GraphExpectedEvidence, results []gr
 
 // graphResultIdentity is the per-mode stable dedup key for a graph result. Its
 // base is source_path|node_kind|relation|role (TASK-GRA15) — exactly the stable
-// matcher fields. node_id, confidence, and graph_path are excluded from the base:
-// node_id is index-volatile (the corpus never matches on it), and graph_path
-// embeds per-result node IDs (graph.query builds it as [seed.id, edge.kind,
-// related.id], query.go) — including either would leak that volatility into the
-// key AND defeat dedup for the dominant find_references shape (many chunks of one
-// file share source_path/kind/relation/role but each carry a distinct chunk node
-// id), which is exactly the duplicate-looking evidence the ticket says to collapse.
+// matcher fields. node_id, confidence, and path are excluded from the base:
+// node_id is index-volatile (the corpus never matches on it), and path embeds
+// per-result node IDs (the structured GraphPath's From/To/Hops carry node ids;
+// GRA21) — including either would leak that volatility into the key AND defeat
+// dedup for the dominant find_references shape (many chunks of one file share
+// source_path/kind/relation/role but each carry a distinct chunk node id), which
+// is exactly the duplicate-looking evidence the ticket says to collapse.
 // \x00 separates fields so no realistic field value (filesystem paths, edge kinds,
 // role enums) can forge a key collision.
 //
@@ -1122,7 +1180,7 @@ func matchesGraphEvidence(want GraphExpectedEvidence, result graph.QueryResult) 
 		return false
 	}
 	for _, token := range want.GraphPathContains {
-		if !graphPathContains(result.GraphPath, token) {
+		if !graphPathContains(result.Path, token) {
 			return false
 		}
 	}
@@ -1141,10 +1199,23 @@ func matchesGraphSourcePath(want, got string) bool {
 	return false
 }
 
-func graphPathContains(path []string, token string) bool {
+// graphPathContains reports whether the structured GraphPath exposes `token` as
+// one of its citable segments — the seed (From), any traversed node (a hop's Node
+// or To), or any hop relation (edge kind). This preserves the exact membership
+// semantics of the legacy flat []string{seed.ID, edge.Kind, related.ID} path
+// (GRA21): for a single-hop result From.ID==seed.ID, Hops[0].Relation==edge.Kind,
+// and To.ID==Hops[0].Node.ID==related.ID, so every corpus token that matched the
+// flat array before — edge kinds and node ids alike — still matches.
+func graphPathContains(path graph.GraphPath, token string) bool {
 	token = strings.TrimSpace(token)
-	for _, segment := range path {
-		if strings.TrimSpace(segment) == token {
+	if token == "" {
+		return false
+	}
+	if strings.TrimSpace(path.From.ID) == token || strings.TrimSpace(path.To.ID) == token {
+		return true
+	}
+	for _, hop := range path.Hops {
+		if strings.TrimSpace(hop.Relation) == token || strings.TrimSpace(hop.Node.ID) == token {
 			return true
 		}
 	}

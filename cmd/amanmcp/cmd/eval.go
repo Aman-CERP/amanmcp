@@ -10,6 +10,7 @@ import (
 
 	"github.com/Aman-CERP/amanmcp/internal/config"
 	"github.com/Aman-CERP/amanmcp/internal/eval"
+	"github.com/Aman-CERP/amanmcp/internal/graph"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -28,7 +29,11 @@ var newEvalSearchRunner = func(projectRoot string) evalSearchRunner {
 
 var newEvalGraphRunner = func(projectRoot string) evalGraphRunner {
 	dataDir := filepath.Join(projectRoot, ".amanmcp")
-	return eval.NewDirectGraphRunner(eval.NewSQLiteDirectGraphClient(dataDir, hashString(projectRoot)))
+	queryOpts := graph.QueryServiceOptions{}
+	if cfg, err := config.Load(projectRoot); err == nil {
+		queryOpts.Traversal = cfg.Graph.Traversal
+	}
+	return eval.NewDirectGraphRunner(eval.NewSQLiteDirectGraphClient(dataDir, hashString(projectRoot), queryOpts))
 }
 
 type lazyValidationSearcher struct {

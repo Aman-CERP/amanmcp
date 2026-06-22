@@ -4,6 +4,11 @@ Public-facing highlights of major changes. See `.aman-pm/changelog/` for detaile
 
 ---
 
+## [v0.16.0] - 2026-06-22
+
+- **Update**: Minor improvements and fixes
+
+
 ## [v0.15.0] - 2026-06-21
 
 - **Update**: Minor improvements and fixes
@@ -51,13 +56,6 @@ Public-facing highlights of major changes. See `.aman-pm/changelog/` for detaile
 ## [v0.7.2] - 2026-01-14
 
 - **Documentation**: Comprehensive `.amanmcp.yaml` auto-generation and search pollution prevention docs
-
-## [v0.7.0] - 2026-01-14
-
-- **Feature**: Test file deprioritization (0.5x score penalty)
-- **Feature**: Path-based scoring (internal/ boosted 1.3x, cmd/ penalized 0.6x)
-- **Fix**: Multi-query consensus favored wrappers over implementations
-- **Fix**: Search results varied based on limit parameter
 
 
 ---

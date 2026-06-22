@@ -10,21 +10,23 @@ import (
 
 // GraphDegradationLabel is an eval-owned degradation category (TASK-GRA16). The
 // labels map onto current product graph statuses and warning codes without
-// inventing conflicting product states; unsupported_language and invalid_params
-// are eval-side classifications with no required product warning.
+// inventing conflicting product states; invalid_params is an eval-side
+// classification with no required product warning. unsupported_language can also
+// be inferred from corpus metadata or graph.WarningUnsupportedLanguage.
 type GraphDegradationLabel string
 
 const (
-	DegradationEmptyGraph          GraphDegradationLabel = "empty_graph"
-	DegradationStaleGraph          GraphDegradationLabel = "stale_graph"
-	DegradationPartialGraph        GraphDegradationLabel = "partial_graph"
-	DegradationUnavailableGraph    GraphDegradationLabel = "unavailable_graph"
-	DegradationIncompatibleGraph   GraphDegradationLabel = "incompatible_graph"
-	DegradationFailedGraph         GraphDegradationLabel = "failed_graph"
-	DegradationStaleEdges          GraphDegradationLabel = "stale_edges"
-	DegradationUnsupportedLanguage GraphDegradationLabel = "unsupported_language"
-	DegradationResultTruncated     GraphDegradationLabel = "result_truncated"
-	DegradationInvalidParams       GraphDegradationLabel = "invalid_params"
+	DegradationEmptyGraph               GraphDegradationLabel = "empty_graph"
+	DegradationStaleGraph               GraphDegradationLabel = "stale_graph"
+	DegradationPartialGraph             GraphDegradationLabel = "partial_graph"
+	DegradationUnavailableGraph         GraphDegradationLabel = "unavailable_graph"
+	DegradationIncompatibleGraph        GraphDegradationLabel = "incompatible_graph"
+	DegradationFailedGraph              GraphDegradationLabel = "failed_graph"
+	DegradationStaleEdges               GraphDegradationLabel = "stale_edges"
+	DegradationUnsupportedLanguage      GraphDegradationLabel = "unsupported_language"
+	DegradationResultTruncated          GraphDegradationLabel = "result_truncated"
+	DegradationTraversalBudgetExhausted GraphDegradationLabel = "traversal_budget_exhausted"
+	DegradationInvalidParams            GraphDegradationLabel = "invalid_params"
 )
 
 // graphResultsTruncatedWarning mirrors the product's inline truncation warning
@@ -43,6 +45,7 @@ func allGraphDegradationLabels() []GraphDegradationLabel {
 		DegradationStaleEdges,
 		DegradationUnsupportedLanguage,
 		DegradationResultTruncated,
+		DegradationTraversalBudgetExhausted,
 		DegradationInvalidParams,
 	}
 	sortGraphDegradationLabels(labels)
@@ -67,6 +70,7 @@ var graphEvalSupportedLanguages = map[string]bool{
 type graphDegradationInput struct {
 	Status        graph.GraphStatus
 	WarningCodes  []graph.WarningCode
+	Warnings      []graph.StatusWarning
 	StaleResults  bool
 	Language      string
 	InvalidParams bool
@@ -113,6 +117,13 @@ func graphDegradationLabels(in graphDegradationInput) []GraphDegradationLabel {
 			set[DegradationStaleEdges] = struct{}{}
 		case graphResultsTruncatedWarning:
 			set[DegradationResultTruncated] = struct{}{}
+		case graph.WarningTraversalBudgetExhausted:
+			set[DegradationTraversalBudgetExhausted] = struct{}{}
+			if hasTraversalBudgetReason(in.Warnings, graph.WarningTraversalBudgetExhausted, graph.TraversalBudgetResults) {
+				set[DegradationResultTruncated] = struct{}{}
+			}
+		case graph.WarningUnsupportedLanguage:
+			set[DegradationUnsupportedLanguage] = struct{}{}
 		}
 	}
 
@@ -178,7 +189,7 @@ func graphLabelIsStatusDerived(label GraphDegradationLabel) bool {
 // the top window), and counting it would make the <=10% gate unmeetable on a
 // healthy graph, where common symbols legitimately have more than ten references.
 // A case can still force-expect truncation via expected_labels.
-func graphBlockingDegradationLabels(labels []GraphDegradationLabel, status graph.GraphStatus, resultCount int, query GraphQuery) []GraphDegradationLabel {
+func graphBlockingDegradationLabels(labels []GraphDegradationLabel, status graph.GraphStatus, resultCount int, query GraphQuery, warnings []graph.StatusWarning) []GraphDegradationLabel {
 	if len(labels) == 0 {
 		return nil
 	}
@@ -199,6 +210,11 @@ func graphBlockingDegradationLabels(labels []GraphDegradationLabel, status graph
 			}
 		case label == DegradationResultTruncated:
 			if resultCount < directGraphRankWindow {
+				blocking = append(blocking, label)
+			}
+		case label == DegradationTraversalBudgetExhausted:
+			if hasTraversalBudgetReason(warnings, graph.WarningTraversalBudgetExhausted, graph.TraversalBudgetResults) &&
+				resultCount < directGraphRankWindow {
 				blocking = append(blocking, label)
 			}
 		default: // invalid_params, unsupported_language
@@ -254,9 +270,11 @@ func graphLabelRecoverability(label GraphDegradationLabel) GraphDegradationInfo 
 	case DegradationStaleEdges:
 		return GraphDegradationInfo{label, "recoverable", "reindex or remove the stale-edge opt-in"}
 	case DegradationUnsupportedLanguage:
-		return GraphDegradationInfo{label, "eval metadata, not a product warning", "fix corpus language metadata or add extractor support"}
+		return GraphDegradationInfo{label, "query targets a language without graph extractor support", "use a supported language subject or add extractor support"}
 	case DegradationResultTruncated:
 		return GraphDegradationInfo{label, "query/corpus tunable", "lower expected breadth or adjust the limit within the product cap"}
+	case DegradationTraversalBudgetExhausted:
+		return GraphDegradationInfo{label, "query/corpus tunable", "raise the relevant traversal budget within policy or narrow the query"}
 	case DegradationInvalidParams:
 		return GraphDegradationInfo{label, "corpus/config authoring failure", "fix the corpus row"}
 	default:
@@ -270,6 +288,18 @@ func graphLabelRecoverability(label GraphDegradationLabel) GraphDegradationInfo 
 // sentinel so classification cannot drift from the product's validation message
 // text (DEBT-037 finding #3). Infrastructure errors (status/node/edge reads) do
 // not wrap that sentinel and so are correctly excluded.
+func hasTraversalBudgetReason(warnings []graph.StatusWarning, code graph.WarningCode, reason graph.TraversalBudgetReason) bool {
+	for _, warning := range warnings {
+		if warning.Code != code {
+			continue
+		}
+		if warning.BudgetReason == reason {
+			return true
+		}
+	}
+	return false
+}
+
 func isGraphInvalidParamsError(err error) bool {
 	return errors.Is(err, graph.ErrInvalidQueryParams)
 }

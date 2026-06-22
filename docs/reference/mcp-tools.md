@@ -18,6 +18,23 @@ source relationships do not appear current. Set `include_stale: true` only when
 debugging graph maintenance; stale results include `stale: true` in the result
 payload.
 
+`graph.query` accepts an optional `subject_type` to make the subject resolver
+deterministic while keeping `auto` as the default for existing callers:
+
+| `subject_type` | Subject in `query` | Example |
+|---|---|---|
+| `auto` | Existing GRA19 resolver with exact path inference. | `{"query":"QueryService"}` |
+| `path` | Exact project-relative `source_path` for file-like graph nodes. | `{"subject_type":"path","query":"internal/graph/query.go"}` |
+| `symbol` | Symbol name/key/id using the same disambiguation model as untyped symbols. | `{"subject_type":"symbol","query":"QueryService"}` |
+| `package` | Package key/name/directory, resolved in strictest-first order: exact `dir#package` or name, exact directory, then case-folded key/name/directory. Ambiguous matches return candidates instead of guessing. | `{"subject_type":"package","query":"internal/graph#graph"}` |
+| `result_id` | Stable graph node ID only. Public search result IDs are irreversible hashes and are not resolved in v1. | `{"subject_type":"result_id","query":"node:symbol:project-1:internal/graph/query.go#Query:1"}` |
+
+Results expose both confidence magnitude and derivation method. The
+`confidence_label` is one of `exact`, `high`, `medium`, or `low`; inferred
+relationships expose `heuristic: true` on the flat result and on
+`path.hops[].edge_evidence.heuristic`. A missing `heuristic` field means
+`false`.
+
 Graph freshness uses the named default `graph.DefaultStaleAfter` of 24 hours
 when no caller-specific value is supplied. Serve-mode graph maintenance purges
 stale edges older than the named default `graph.DefaultStalePurgeAfter` of 7

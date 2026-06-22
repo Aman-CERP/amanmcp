@@ -9,6 +9,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestPathConfidenceLabel_IsBottleneckIncludingExact guards the GRA21 contract
+// that a path's confidence label is the bottleneck (minimum) across its hops, so a
+// single-hop path's label equals that one edge's label — INCLUDING exact. The
+// prior implementation initialized the label to high and only lowered it, so an
+// exact single edge collapsed to high, disagreeing with the flat result.confidence_label.
+func TestPathConfidenceLabel_IsBottleneckIncludingExact(t *testing.T) {
+	hop := func(label ConfidenceLabel) adjacency {
+		return adjacency{edge: Edge{ConfidenceLabel: label}}
+	}
+	tests := []struct {
+		name string
+		path []adjacency
+		want ConfidenceLabel
+	}{
+		{"single exact hop stays exact", []adjacency{hop(ConfidenceExact)}, ConfidenceExact},
+		{"single high hop stays high", []adjacency{hop(ConfidenceHigh)}, ConfidenceHigh},
+		{"single low hop stays low", []adjacency{hop(ConfidenceLow)}, ConfidenceLow},
+		{"bottleneck of exact then high is high", []adjacency{hop(ConfidenceExact), hop(ConfidenceHigh)}, ConfidenceHigh},
+		{"bottleneck of high then low is low", []adjacency{hop(ConfidenceHigh), hop(ConfidenceLow)}, ConfidenceLow},
+		{"bottleneck of all exact is exact", []adjacency{hop(ConfidenceExact), hop(ConfidenceExact)}, ConfidenceExact},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, pathConfidenceLabel(tt.path))
+		})
+	}
+}
+
 func TestQueryService_Neighbors_ReturnsSourceCitedEvidence(t *testing.T) {
 	ctx := context.Background()
 	repo := newTestSQLiteRepository(t)
@@ -470,10 +498,13 @@ func findGraphEvidenceByRole(t *testing.T, evidence []GraphEvidence, role GraphR
 	return GraphEvidence{}
 }
 
-func assertWarningCode(t *testing.T, warnings []StatusWarning, code WarningCode) {
+func assertWarningCode(t *testing.T, warnings []StatusWarning, code WarningCode, messageContains ...string) {
 	t.Helper()
 	for _, warning := range warnings {
 		if warning.Code == code {
+			if len(messageContains) > 0 && messageContains[0] != "" {
+				assert.Contains(t, warning.Message, messageContains[0])
+			}
 			return
 		}
 	}
